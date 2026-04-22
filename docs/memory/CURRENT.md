@@ -1,33 +1,42 @@
 # 현재 위치
 
-**지금**: Phase 2a-ii 완료. CLI sidecar dump + MD ↔ 파일 교차검증까지
-green. 다음은 Phase 2b (caption 추출) 또는 L1 LLM skeleton.
+**지금**: Phase 2b (caption IR surface) 완료. `PictureControl.caption_text`
+가 gso 체인 안의 LIST_HEADER + 자식 PARA_TEXT 로부터 추출되어
+타입된 IR 로 올라옴. TRL fixture 9개 picture 중 6개 caption 실 추출.
 
 **최근 ship**:
-- `hwp-to-md` CLI 에 `--no-assets`, `--assets-dir=<path>`, `-h/--help`
-  플래그 추가. 기본 동작: `doc.hwp` → `doc.md` + sibling `doc.assets/`
-  디렉토리에 모든 `BinaryEntry` dump. stdout (`-`) 모드는 자동으로
-  assets 를 비활성 (명시적 `--assets-dir` 로 override 가능).
-- `crates/codec/src/export/assets.rs` 신설 — pure `dump_assets(doc, dir)`.
-  Path traversal 가드 (id 에 `/`, `\`, `.`, NUL 포함 시 reject).
-- Multi-paragraph 박스 제목이 `##` 로 승격되도록 `try_table_as_heading`
-  relax. TRL fixture 7장 "연구개발성과의 활용방안 및 기대효과
-  (기술성·시장성 및 사업성 검토 방안 등)" 이 본문으로 내려앉던
-  이슈 수정 — cell.paragraphs.len() != 1 가드가 원인이었고, 이미
-  존재하던 `try_table_as_passage` 의 space-join 패턴과 동일하게 처리.
+- `PictureControl` 에 `caption_text: Option<String>` 필드 추가.
+- `body_text::parse_paragraph` 의 gso 상태머신 확장: CTRL_HEADER "gso "
+  → LIST_HEADER (at child_lvl+1) 를 만나면 caption 수집 모드 진입,
+  deeper PARA_TEXT 를 수집, SHAPE_COMPONENT 에서 종료. raw_records 는
+  변경하지 않으므로 라운드트립 불변.
+- `markdown::emit_picture` 가 `{{그림 N. <caption>}}` 로 emit.
+  HWP 자동 번호 필드 (`"그림 ￼. ..."`) 의 FFFC 제거 후 생기는 `"그림 . "`
+  prefix 를 `strip_caption_label_prefix` 로 제거 (그림/표/Figure/Table).
+- Phase 2a-ii 완료: `hwp-to-md` CLI `--no-assets`, `--assets-dir=<path>`.
+- Heading fix: multi-paragraph 박스 제목도 `##` 승격 (TRL 7장 이슈).
 
-**다음 후보** (병렬 가능):
-- Phase 2b: caption 추출 — gso 컨트롤 안의 sub-paragraph 에서
-  caption text 를 surface, `PictureControl` 과 연결 (`{{그림 N.}}`
-  placeholder 가 `{{그림 N. <caption>}}` 이 되도록)
-- L1 (LLM-friendly layer skeleton): `MdOptions` 에 `llm: Option<LlmOptions>`
-  추가, section/paragraph/table/cell id 만 emit, role/editable 은 전부
-  `unknown` 으로 시작. 기존 human 출력 불변 (opt-in).
+**알려진 갭** (다음 follow-up):
+- **셀-임베드 picture 의 MD emission**: 현재 `emit_picture` 는 top-level
+  paragraph 의 picture control 만 emit. TRL 에서는 9개 중 8개가 표
+  안에 있어 MD 에 placeholder 가 나오지 않음 (IR 에는 존재). 캡션은
+  저장되어 있으나 MD 표면으로 안 올라옴. 기존 "Cell-embedded pictures
+  are silently dropped (Phase 2 follow-up)" 주석에 이미 기록된 별도
+  작업. 해결하려면 `emit_table_as_list` / `emit_cell_line` 에 picture
+  emit 분기 추가 필요.
+- **Non-picture gso 의 caption**: line/rect/ole 같은 비-picture shape 은
+  pending_picture 가 clear 되면서 caption 도 같이 버려짐. 이 도형
+  type 들에 독립적인 IR control 타입이 생기면 그때 연결.
+
+**다음 후보**:
+- 위 follow-up (셀-임베드 picture MD emission) — Phase 2b 의 자연스러운
+  완결
+- L1 (LLM-friendly layer skeleton): `MdOptions.llm: Option<LlmOptions>`,
+  section/table/cell/figure id 만 emit. 기존 human 출력 불변 (opt-in).
 
 **막힌 것**: 없음.
 
-**작업 트리**: 깨끗. 테스트: 182/182 green (신규 27: assets 5 + CLI
-17 + heading 3 + xref 2).
+**작업 트리**: 깨끗. 테스트: 186/186 green.
 
 **빠른 컨텍스트**:
 - 라운드트립이 1순위 목표; 마크다운 품질은 2순위. 명시적 결정은

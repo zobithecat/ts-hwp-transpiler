@@ -186,4 +186,10 @@ pub struct PictureControl {
     pub bin_id: u16,
     pub width_hwpu: u32,
     pub height_hwpu: u32,
+    /// Caption text harvested from the gso container's child LIST_HEADER
+    /// + its sub-paragraph's PARA_TEXT records. `None` when the picture
+    /// has no caption authored; `Some` holds the concatenated text
+    /// (multi-paragraph captions joined by newline, unfiltered — the
+    /// Markdown exporter runs `clean_text` before emitting).
+    pub caption_text: Option<String>,
 }

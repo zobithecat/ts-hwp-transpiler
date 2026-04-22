@@ -144,6 +144,8 @@ fn parse_paragraph(iter: &mut RecIter, level: u16) -> Result<Paragraph, IrError>
                             width_hwpu,
                             height_hwpu,
                             is_pic_confirmed: false,
+                            in_caption: false,
+                            caption_parts: Vec::new(),
                         })
                     } else {
                         None
@@ -159,8 +161,18 @@ fn parse_paragraph(iter: &mut RecIter, level: u16) -> Result<Paragraph, IrError>
                 para.controls[idx].kind = ControlKind::Table(tc);
                 continue;
             }
+        } else if rec.level == child_lvl + 1 && rec.tag == tag::LIST_HEADER {
+            // Optional caption container inside a gso. Sub-paragraph's
+            // PARA_TEXT records that follow (deeper levels) get harvested
+            // into `caption_parts` until SHAPE_COMPONENT ends the caption
+            // scope. If this gso turns out to be a non-picture shape, the
+            // collected parts are discarded along with `pending_picture`.
+            if let Some(p) = pending_picture.as_mut() {
+                p.in_caption = true;
+            }
         } else if rec.level == child_lvl + 1 && rec.tag == tag::SHAPE_COMPONENT {
             if let Some(p) = pending_picture.as_mut() {
+                p.in_caption = false;
                 match gso_picture::parse_shape_component_id(&rec.data) {
                     Some(id) if id == gso_picture::GSO_ID_PICTURE => {
                         p.is_pic_confirmed = true;
@@ -172,6 +184,22 @@ fn parse_paragraph(iter: &mut RecIter, level: u16) -> Result<Paragraph, IrError>
                     }
                 }
             }
+        } else if rec.tag == tag::PARA_TEXT && rec.level > child_lvl + 1 {
+            // Caption paragraph text arrives deeper than the caption's
+            // LIST_HEADER. We only collect while `in_caption` is active —
+            // PARA_TEXT inside a different sub-structure (e.g. a nested
+            // cell) won't match because such nesting is routed through
+            // the TABLE / cell branch, not this fallthrough.
+            if let Some(p) = pending_picture.as_mut() {
+                if p.in_caption {
+                    if let Ok(text) = super::paragraph_text::extract_text(&rec) {
+                        let trimmed = text.trim();
+                        if !trimmed.is_empty() {
+                            p.caption_parts.push(trimmed.to_string());
+                        }
+                    }
+                }
+            }
         } else if rec.level == child_lvl + 2 && rec.tag == tag::SHAPE_COMPONENT_PICTURE {
             // SHAPE_COMPONENT_PICTURE sits one level deeper than its
             // parent SHAPE_COMPONENT (which is at child_lvl + 1) — it's a
@@ -179,11 +207,17 @@ fn parse_paragraph(iter: &mut RecIter, level: u16) -> Result<Paragraph, IrError>
             if let Some(p) = pending_picture.take() {
                 if p.is_pic_confirmed {
                     if let Some(bin_id) = gso_picture::parse_picture_bin_id(&rec.data) {
+                        let caption_text = if p.caption_parts.is_empty() {
+                            None
+                        } else {
+                            Some(p.caption_parts.join(" "))
+                        };
                         para.controls[p.ctrl_idx].kind =
                             ControlKind::Picture(PictureControl {
                                 bin_id,
                                 width_hwpu: p.width_hwpu,
                                 height_hwpu: p.height_hwpu,
+                                caption_text,
                             });
                     }
                 }
@@ -203,6 +237,11 @@ struct PendingPicture {
     width_hwpu: u32,
     height_hwpu: u32,
     is_pic_confirmed: bool,
+    /// Toggled on by the caption LIST_HEADER at `child_lvl + 1` and off
+    /// again when SHAPE_COMPONENT arrives. While true, any PARA_TEXT at
+    /// a deeper level is treated as caption content.
+    in_caption: bool,
+    caption_parts: Vec<String>,
 }
 
 /// Starting at the record after TABLE, read `LIST_HEADER × N` + the cell

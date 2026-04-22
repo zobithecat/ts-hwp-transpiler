@@ -83,8 +83,8 @@ fn emit_paragraph(
 }
 
 /// Emit one top-level picture: optional `![](path){…}` then a
-/// `{{그림 N.}}` placeholder block. Cell-embedded pictures are silently
-/// dropped (Phase 2 follow-up).
+/// `{{그림 N. <caption>}}` placeholder block. Cell-embedded pictures are
+/// silently dropped (Phase 2 follow-up).
 fn emit_picture(
     doc: &IrDocument,
     pic: &PictureControl,
@@ -101,7 +101,31 @@ fn emit_picture(
             "![]({prefix}/{filename}){{width={w}mm; height={h}mm}}\n\n"
         ));
     }
-    out.push_str(&format!("{{{{그림 {n}.}}}}\n\n"));
+    let caption_suffix = pic
+        .caption_text
+        .as_deref()
+        .map(clean_text)
+        .map(|s| strip_caption_label_prefix(&s).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(|s| format!(" {s}"))
+        .unwrap_or_default();
+    out.push_str(&format!("{{{{그림 {n}.{caption_suffix}}}}}\n\n"));
+}
+
+/// HWP captions authored via the built-in "그림" / "표" auto-numbering
+/// field produce text like `"그림 ￼. <title>"` where `￼` (U+FFFC) is the
+/// field-code placeholder for the running figure number. `clean_text`
+/// drops the FFFC, leaving a stranded `"그림 . "` prefix that duplicates
+/// (and clashes with) our own `{{그림 N.}}` counter. Strip it so the
+/// emitted placeholder reads as `{{그림 N. <title>}}`. Unknown-language
+/// forms ("Figure", "Table", English "표" alias) covered symmetrically.
+fn strip_caption_label_prefix(s: &str) -> &str {
+    for prefix in ["그림 . ", "표 . ", "Figure . ", "Table . "] {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            return rest;
+        }
+    }
+    s
 }
 
 /// Extension for `BIN<bin_id>` — looked up in the typed DocInfo BinData
@@ -726,6 +750,82 @@ mod tests {
         };
         let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
         assert_eq!(to_markdown(&doc), "## 1. 기술개발 목표\n");
+    }
+
+    #[test]
+    fn strip_caption_label_prefix_removes_post_fffc_artifact() {
+        // After clean_text drops U+FFFC, HWP's "그림 ￼. foo" becomes the
+        // stranded "그림 . foo". Must collapse to "foo".
+        assert_eq!(strip_caption_label_prefix("그림 . foo"), "foo");
+        assert_eq!(strip_caption_label_prefix("표 . bar"), "bar");
+        assert_eq!(strip_caption_label_prefix("Figure . baz"), "baz");
+        assert_eq!(strip_caption_label_prefix("Table . qux"), "qux");
+        // Without the exact prefix, leave untouched.
+        assert_eq!(strip_caption_label_prefix("그림 설명"), "그림 설명");
+        assert_eq!(strip_caption_label_prefix("foo bar"), "foo bar");
+    }
+
+    #[test]
+    fn picture_emits_caption_in_placeholder() {
+        use hwp_transpiler_core::ir::{BinData, PictureControl};
+
+        let mut doc = IrDocument::default();
+        doc.doc_info.bin_data.push(BinData {
+            bin_data_id: Some(1),
+            extension: Some("png".into()),
+            ..BinData::default()
+        });
+        doc.sections.push(Section {
+            paragraphs: vec![Paragraph {
+                controls: vec![Control {
+                    kind: ControlKind::Picture(PictureControl {
+                        bin_id: 1,
+                        width_hwpu: 7200,
+                        height_hwpu: 3600,
+                        caption_text: Some(
+                            "그림 \u{FFFC}. 시스템 전체 아키텍처".into(),
+                        ),
+                    }),
+                }],
+                ..Paragraph::default()
+            }],
+            ..Section::default()
+        });
+        let md = to_markdown_with(
+            &doc,
+            &MdOptions {
+                assets_path: Some("x.assets".into()),
+                ..MdOptions::default()
+            },
+        );
+        assert!(
+            md.contains("{{그림 1. 시스템 전체 아키텍처}}"),
+            "expected caption-suffixed placeholder; got: {md}"
+        );
+    }
+
+    #[test]
+    fn picture_without_caption_keeps_bare_placeholder() {
+        use hwp_transpiler_core::ir::PictureControl;
+
+        let mut doc = IrDocument::default();
+        doc.sections.push(Section {
+            paragraphs: vec![Paragraph {
+                controls: vec![Control {
+                    kind: ControlKind::Picture(PictureControl {
+                        bin_id: 1,
+                        width_hwpu: 0,
+                        height_hwpu: 0,
+                        caption_text: None,
+                    }),
+                }],
+                ..Paragraph::default()
+            }],
+            ..Section::default()
+        });
+        let md = to_markdown(&doc);
+        assert!(md.contains("{{그림 1.}}"), "got: {md}");
+        assert!(!md.contains("{{그림 1. "), "no trailing space-text: {md}");
     }
 
     #[test]
