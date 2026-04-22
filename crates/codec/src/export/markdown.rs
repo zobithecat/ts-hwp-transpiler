@@ -465,7 +465,7 @@ fn clean_text(s: &str) -> String {
         match c {
             '\u{FFFC}' | '\u{00AD}' => {}
             '\u{00A0}' | '\u{2003}' => out.push(' '),
-            _ => out.push(c),
+            _ => out.push(translate_pua_bullet(c).unwrap_or(c)),
         }
     }
     let mut squeezed = String::with_capacity(out.len());
@@ -482,6 +482,24 @@ fn clean_text(s: &str) -> String {
         }
     }
     squeezed.trim().to_string()
+}
+
+/// Map Hancom Office's proprietary PUA-encoded circled-digit bullets
+/// (used by its Korean enumeration list styles) to standard Unicode
+/// equivalents. Hancom uses two ranges in practice — older fonts encode
+/// in the BMP PUA, newer ones in Supplementary PUA-A — and the same
+/// `①` glyph appears at both `U+F2B1` and `U+F02B1`. Returns `None` for
+/// anything outside the recognised range; callers fall back to the
+/// original char.
+fn translate_pua_bullet(c: char) -> Option<char> {
+    let n = c as u32;
+    if (0xF02B1..=0xF02C4).contains(&n) {
+        return char::from_u32(0x2460 + (n - 0xF02B1));
+    }
+    if (0xF2B1..=0xF2C4).contains(&n) {
+        return char::from_u32(0x2460 + (n - 0xF2B1));
+    }
+    None
 }
 
 #[cfg(test)]
@@ -550,6 +568,28 @@ mod tests {
             to_markdown(&doc),
             "intro\n\n# Chapter One\n\n### Subsection\n"
         );
+    }
+
+    #[test]
+    fn hancom_pua_circled_digits_map_to_unicode() {
+        // 한컴 fonts encode ①..⑳ in two PUA ranges depending on the
+        // font generation: BMP (U+F2B1+) and Supplementary PUA-A
+        // (U+F02B1+). Both should normalise to U+2460+.
+        let doc = make_doc(
+            vec![style("본문")],
+            vec![para(
+                0,
+                "\u{F2B1} 과제 개요\n\u{F02B2} 부록\n\u{F2BA} 마지막\n\u{F02C4} 끝",
+            )],
+        );
+        let md = to_markdown(&doc);
+        assert!(md.contains("① 과제 개요"), "got: {md}");
+        assert!(md.contains("② 부록"), "got: {md}");
+        assert!(md.contains("⑩ 마지막"), "got: {md}");
+        assert!(md.contains("⑳ 끝"), "got: {md}");
+        // No raw PUA chars left from either range.
+        assert!(!md.contains('\u{F2B1}'));
+        assert!(!md.contains('\u{F02B1}'));
     }
 
     #[test]
