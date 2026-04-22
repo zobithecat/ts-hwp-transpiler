@@ -170,6 +170,7 @@ dependencies = [
 name = "hwp-transpiler-render"
 version = "0.1.0"
 dependencies = [
+ "hwp-transpiler-codec",
  "hwp-transpiler-core",
  "serde",
 ]

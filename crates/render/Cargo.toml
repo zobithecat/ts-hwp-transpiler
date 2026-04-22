@@ -7,3 +7,6 @@ license.workspace = true
 [dependencies]
 hwp-transpiler-core = { path = "../core" }
 serde = { workspace = true }
+
+[dev-dependencies]
+hwp-transpiler-codec = { path = "../codec" }
