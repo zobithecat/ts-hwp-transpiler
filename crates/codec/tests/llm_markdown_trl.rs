@@ -153,6 +153,7 @@ fn trl_llm_with_editable_splits_value_cells() {
             llm: Some(markdown::LlmOptions {
                 emit_roles: true,
                 emit_editable: true,
+                ..markdown::LlmOptions::default()
             }),
             ..markdown::MdOptions::default()
         },
@@ -178,6 +179,57 @@ fn trl_llm_with_editable_splits_value_cells() {
     assert!(
         !md.contains("role=label,editable=true"),
         "label cells must be non-editable"
+    );
+}
+
+#[test]
+fn trl_llm_with_domain_hints_tags_common_form_tables() {
+    // L4 integration: the keyword classifier must find at least the
+    // big-ticket domain tables a Korean grant-proposal form carries —
+    // budget, institution info, performance metrics. Counts are loose
+    // so keyword tuning doesn't break this test, but the categories
+    // must be non-empty.
+    let fixture = repo_path(
+        "test/260420-1. 연구개발계획서(서식)[TRL점프업 1단계]_대진대_수정_1430_fin.hwp",
+    );
+    let Ok(bytes) = std::fs::read(&fixture) else {
+        eprintln!("skipping: TRL fixture not present");
+        return;
+    };
+    let doc = HwpReader.read(&bytes).expect("read");
+    let md = markdown::to_markdown_with(
+        &doc,
+        &markdown::MdOptions {
+            llm: Some(markdown::LlmOptions {
+                domain_hints: true,
+                ..markdown::LlmOptions::default()
+            }),
+            ..markdown::MdOptions::default()
+        },
+    );
+
+    let budget = md.match_indices("kind=budget").count();
+    let institution = md.match_indices("kind=institution_info").count();
+    let performance = md.match_indices("kind=performance_metrics").count();
+    let personnel = md.match_indices("kind=personnel").count();
+    let total_hinted = budget + institution + performance + personnel
+        + md.match_indices("kind=schedule").count();
+
+    assert!(budget > 0, "TRL must carry at least one budget table");
+    assert!(institution > 0, "TRL must carry at least one institution table");
+    assert!(performance > 0, "TRL must carry at least one performance table");
+    assert!(personnel > 0, "TRL must carry at least one personnel table");
+    assert!(
+        total_hinted >= 15,
+        "TRL has ~19 domain-hinted tables today; threshold 15 guards the keyword set. Got {total_hinted}"
+    );
+
+    // `kind=unknown` must never appear — unknown tables skip the
+    // attribute entirely so humans and LLMs both see a clean TABLE
+    // header for unclassifiable shapes.
+    assert!(
+        !md.contains("kind=unknown"),
+        "unknown must be elided, not emitted"
     );
 }
 

@@ -36,8 +36,12 @@ Options:
                        Targets LLM chunking/slot-rewrite/reinsertion.
   --emit-roles         With --llm, add role=header|label|value|spacer
                        to each CELL from the visual classifier.
-  --emit-editable      With --llm, add editable=unknown to each CELL
-                       (placeholder — classifier not wired yet).
+  --emit-editable      With --llm, add editable=true|false|unknown to
+                       each CELL from the conservative slot classifier.
+  --emit-domain-hints  With --llm, add kind=<domain> to TABLE markers
+                       when the keyword-based domain inferrer classifies
+                       (institution_info / budget / schedule /
+                       performance_metrics / personnel).
   -h, --help           Print this help and exit.
 ";
 
@@ -78,6 +82,7 @@ fn main() -> ExitCode {
         llm: args.llm.then(|| markdown::LlmOptions {
             emit_roles: args.emit_roles,
             emit_editable: args.emit_editable,
+            domain_hints: args.emit_domain_hints,
         }),
     };
     let md = markdown::to_markdown_with(&doc, &md_opts);
@@ -141,6 +146,7 @@ struct CliArgs {
     llm: bool,
     emit_roles: bool,
     emit_editable: bool,
+    emit_domain_hints: bool,
 }
 
 #[derive(Debug)]
@@ -174,6 +180,7 @@ fn parse_args(raw: &[String]) -> Result<Option<CliArgs>, String> {
     let mut llm = false;
     let mut emit_roles = false;
     let mut emit_editable = false;
+    let mut emit_domain_hints = false;
 
     let mut i = 0;
     while i < raw.len() {
@@ -188,6 +195,9 @@ fn parse_args(raw: &[String]) -> Result<Option<CliArgs>, String> {
             }
             "--emit-editable" => {
                 emit_editable = true;
+            }
+            "--emit-domain-hints" => {
+                emit_domain_hints = true;
             }
             "--no-assets" => {
                 if matches!(assets, AssetsMode::Explicit(_)) {
@@ -248,8 +258,10 @@ fn parse_args(raw: &[String]) -> Result<Option<CliArgs>, String> {
         return Err(format!("unexpected extra argument: {}", positionals[2]));
     }
 
-    if (emit_roles || emit_editable) && !llm {
-        return Err("--emit-roles / --emit-editable require --llm".into());
+    if (emit_roles || emit_editable || emit_domain_hints) && !llm {
+        return Err(
+            "--emit-roles / --emit-editable / --emit-domain-hints require --llm".into(),
+        );
     }
 
     Ok(Some(CliArgs {
@@ -259,6 +271,7 @@ fn parse_args(raw: &[String]) -> Result<Option<CliArgs>, String> {
         llm,
         emit_roles,
         emit_editable,
+        emit_domain_hints,
     }))
 }
 

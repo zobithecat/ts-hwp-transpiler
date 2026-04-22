@@ -53,7 +53,8 @@ use hwp_transpiler_core::ir::{
     ControlKind, IrDocument, Paragraph, PictureControl, TableCell, TableControl,
 };
 use hwp_transpiler_core::semantics::{
-    CellRole, DocInfoResolver, VisualExtract, classify_roles,
+    CellRole, DocInfoResolver, TableDomain, VisualExtract, classify_roles,
+    infer_table_domain,
 };
 
 use super::markdown::{LlmOptions, MdOptions};
@@ -119,7 +120,7 @@ fn emit_paragraph(
         let ctrl_path = format!("{path}-c{ci}");
         match &c.kind {
             ControlKind::Table(t) => {
-                emit_table(doc, t, out, llm, &ctrl_path);
+                emit_table(doc, t, out, llm, &ctrl_path, &para.text);
             }
             ControlKind::Picture(p) => {
                 emit_figure(p, out);
@@ -135,12 +136,19 @@ fn emit_table(
     out: &mut String,
     llm: &LlmOptions,
     path: &str,
+    owner_para_text: &str,
 ) {
     let tbl_id = format!("tbl-{path}");
-    line(
-        out,
-        &format!("TABLE[id={tbl_id},rows={},cols={}]", t.rows, t.cols),
-    );
+    let mut tbl_header =
+        format!("TABLE[id={tbl_id},rows={},cols={}", t.rows, t.cols);
+    if llm.domain_hints {
+        let domain = infer_table_domain(t, owner_para_text);
+        if domain != TableDomain::Unknown {
+            tbl_header.push_str(&format!(",kind={}", domain.as_str()));
+        }
+    }
+    tbl_header.push(']');
+    line(out, &tbl_header);
 
     // Run the visual classifier whenever either role or editable is
     // requested — editable inference depends on role, so even when the
@@ -313,7 +321,7 @@ fn emit_cell(
             let inner_ctrl_path = format!("{inner_par_path}-c{ci}");
             match &ctrl.kind {
                 ControlKind::Table(nested) => {
-                    emit_table(doc, nested, out, llm, &inner_ctrl_path);
+                    emit_table(doc, nested, out, llm, &inner_ctrl_path, &p.text);
                 }
                 ControlKind::Picture(pic) => {
                     emit_figure(pic, out);
@@ -541,7 +549,7 @@ mod tests {
             ..Section::default()
         });
         let opts = MdOptions {
-            llm: Some(LlmOptions { emit_roles: true, emit_editable: true }),
+            llm: Some(LlmOptions { emit_roles: true, emit_editable: true, ..LlmOptions::default() }),
             ..MdOptions::default()
         };
         let md = to_llm_markdown(&doc, &opts);
@@ -569,7 +577,7 @@ mod tests {
             ..Section::default()
         });
         let opts = MdOptions {
-            llm: Some(LlmOptions { emit_roles: true, emit_editable: true }),
+            llm: Some(LlmOptions { emit_roles: true, emit_editable: true, ..LlmOptions::default() }),
             ..MdOptions::default()
         };
         let md = to_llm_markdown(&doc, &opts);
@@ -596,7 +604,7 @@ mod tests {
             ..Section::default()
         });
         let opts = MdOptions {
-            llm: Some(LlmOptions { emit_roles: true, emit_editable: true }),
+            llm: Some(LlmOptions { emit_roles: true, emit_editable: true, ..LlmOptions::default() }),
             ..MdOptions::default()
         };
         let md = to_llm_markdown(&doc, &opts);
@@ -632,7 +640,7 @@ mod tests {
             ..Section::default()
         });
         let opts = MdOptions {
-            llm: Some(LlmOptions { emit_roles: true, emit_editable: true }),
+            llm: Some(LlmOptions { emit_roles: true, emit_editable: true, ..LlmOptions::default() }),
             ..MdOptions::default()
         };
         let md = to_llm_markdown(&doc, &opts);
@@ -675,7 +683,7 @@ mod tests {
             ..Section::default()
         });
         let opts = MdOptions {
-            llm: Some(LlmOptions { emit_roles: true, emit_editable: true }),
+            llm: Some(LlmOptions { emit_roles: true, emit_editable: true, ..LlmOptions::default() }),
             ..MdOptions::default()
         };
         let md = to_llm_markdown(&doc, &opts);
@@ -705,7 +713,7 @@ mod tests {
             ..Section::default()
         });
         let opts = MdOptions {
-            llm: Some(LlmOptions { emit_roles: true, emit_editable: true }),
+            llm: Some(LlmOptions { emit_roles: true, emit_editable: true, ..LlmOptions::default() }),
             ..MdOptions::default()
         };
         let md = to_llm_markdown(&doc, &opts);
@@ -735,12 +743,115 @@ mod tests {
             ..Section::default()
         });
         let opts = MdOptions {
-            llm: Some(LlmOptions { emit_roles: false, emit_editable: true }),
+            llm: Some(LlmOptions {
+                emit_roles: false,
+                emit_editable: true,
+                ..LlmOptions::default()
+            }),
             ..MdOptions::default()
         };
         let md = to_llm_markdown(&doc, &opts);
         assert!(md.contains("editable=true"), "got: {md}");
         assert!(!md.contains("role="), "role should NOT be emitted: {md}");
+    }
+
+    #[test]
+    fn domain_hint_attaches_to_table_when_flag_on() {
+        // Budget-like table (keyword hits: 정부지원 + 기관 현금 + 합계).
+        let t = TableControl {
+            rows: 1, cols: 4, row_cell_counts: vec![4],
+            cells: vec![
+                TableCell {
+                    col: 0, row: 0, col_span: 1, row_span: 1,
+                    paragraphs: vec![para_text("구분")],
+                    ..TableCell::default()
+                },
+                TableCell {
+                    col: 1, row: 0, col_span: 1, row_span: 1,
+                    paragraphs: vec![para_text("정부지원")],
+                    ..TableCell::default()
+                },
+                TableCell {
+                    col: 2, row: 0, col_span: 1, row_span: 1,
+                    paragraphs: vec![para_text("기관 현금")],
+                    ..TableCell::default()
+                },
+                TableCell {
+                    col: 3, row: 0, col_span: 1, row_span: 1,
+                    paragraphs: vec![para_text("합계")],
+                    ..TableCell::default()
+                },
+            ],
+            ..TableControl::default()
+        };
+        let mut doc = IrDocument::default();
+        doc.sections.push(Section {
+            paragraphs: vec![Paragraph {
+                controls: vec![Control { kind: ControlKind::Table(t) }],
+                ..Paragraph::default()
+            }],
+            ..Section::default()
+        });
+
+        // Flag off → no kind attribute.
+        let md_off = to_llm_markdown(&doc, &opts_llm());
+        assert!(!md_off.contains("kind="));
+
+        // Flag on → kind=budget on the TABLE marker.
+        let md_on = to_llm_markdown(
+            &doc,
+            &MdOptions {
+                llm: Some(LlmOptions {
+                    domain_hints: true,
+                    ..LlmOptions::default()
+                }),
+                ..MdOptions::default()
+            },
+        );
+        assert!(
+            md_on.contains("TABLE[id=tbl-s0-p0-c0,rows=1,cols=4,kind=budget]"),
+            "got: {md_on}"
+        );
+    }
+
+    #[test]
+    fn domain_hint_unknown_is_elided() {
+        // Cells have no domain keywords → Unknown → no `kind=` emitted.
+        let t = TableControl {
+            rows: 1, cols: 2, row_cell_counts: vec![2],
+            cells: vec![
+                TableCell {
+                    col: 0, row: 0, col_span: 1, row_span: 1,
+                    paragraphs: vec![para_text("A")],
+                    ..TableCell::default()
+                },
+                TableCell {
+                    col: 1, row: 0, col_span: 1, row_span: 1,
+                    paragraphs: vec![para_text("B")],
+                    ..TableCell::default()
+                },
+            ],
+            ..TableControl::default()
+        };
+        let mut doc = IrDocument::default();
+        doc.sections.push(Section {
+            paragraphs: vec![Paragraph {
+                controls: vec![Control { kind: ControlKind::Table(t) }],
+                ..Paragraph::default()
+            }],
+            ..Section::default()
+        });
+        let md = to_llm_markdown(
+            &doc,
+            &MdOptions {
+                llm: Some(LlmOptions {
+                    domain_hints: true,
+                    ..LlmOptions::default()
+                }),
+                ..MdOptions::default()
+            },
+        );
+        assert!(!md.contains("kind="), "unknown must elide: {md}");
     }
 
     #[test]

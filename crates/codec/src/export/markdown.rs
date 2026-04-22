@@ -47,6 +47,12 @@ pub struct LlmOptions {
     /// Emit `editable=true|false|unknown` on each CELL marker. Same
     /// placeholder status as `emit_roles`.
     pub emit_editable: bool,
+    /// Emit `kind=<domain>` on TABLE markers when the domain inferrer
+    /// classifies the table as something other than `Unknown`
+    /// (institution_info, budget, schedule, performance_metrics,
+    /// personnel). Off by default; enabling costs a per-table scan of
+    /// its cell text against a fixed keyword vocabulary.
+    pub domain_hints: bool,
 }
 
 pub fn to_markdown(doc: &IrDocument) -> String {
