@@ -18,4 +18,5 @@
 # the repo and may carry organisation-private content.
 /test/*.hwp
 /test/*.hwpx
+/test/*.md
 !/test/.gitkeep

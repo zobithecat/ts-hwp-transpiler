@@ -121,7 +121,7 @@ fn write_row(row: &[String], out: &mut String) {
     out.push('\n');
 }
 
-fn md_cell_content(doc: &IrDocument, cell: &TableCell) -> String {
+fn md_cell_content(_doc: &IrDocument, cell: &TableCell) -> String {
     let mut text = String::new();
     for (i, p) in cell.paragraphs.iter().enumerate() {
         if i > 0 {
