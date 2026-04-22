@@ -238,43 +238,98 @@ fn emit_table_as_list(doc: &IrDocument, t: &TableControl, out: &mut String, dept
             "complex"
         }
     ));
-    for cell in &t.cells {
-        out.push_str(&indent);
-        out.push_str("- ");
-        out.push_str(&format!("[{},{}]", cell.row, cell.col));
-        if cell.col_span != 1 || cell.row_span != 1 {
-            out.push_str(&format!(" span {}×{}", cell.row_span, cell.col_span));
-        }
-        out.push(':');
 
-        // Inline the cell's paragraphs; nested tables render after at a
-        // deeper indent.
-        let mut first_line = true;
-        let mut sub_tables: Vec<&TableControl> = Vec::new();
-        for p in &cell.paragraphs {
-            let t_text = clean_text(&p.text);
-            for c in &p.controls {
-                if let ControlKind::Table(nested) = &c.kind {
-                    sub_tables.push(nested);
-                }
-            }
-            if !t_text.is_empty() {
-                if first_line {
-                    out.push(' ');
-                    out.push_str(&t_text);
-                    first_line = false;
+    // Pre-pass: collapse runs of unspanned empty cells in the same row into
+    // a single `[r,c1..c2]: (empty)` line. Empty Gantt-style spreader cells
+    // can otherwise dominate the bullet list (one row × 9 cols = 9 lines of
+    // noise).
+    let mut i = 0;
+    while i < t.cells.len() {
+        let cell = &t.cells[i];
+        if is_simple_empty_cell(cell) {
+            let mut end_col = cell.col;
+            let mut j = i + 1;
+            while j < t.cells.len() {
+                let next = &t.cells[j];
+                if next.row == cell.row
+                    && next.col == end_col + 1
+                    && is_simple_empty_cell(next)
+                {
+                    end_col = next.col;
+                    j += 1;
                 } else {
-                    out.push_str(&format!("\n{indent}  {t_text}"));
+                    break;
                 }
             }
+            if j > i + 1 {
+                out.push_str(&indent);
+                out.push_str(&format!(
+                    "- [{},{}..{}]: (empty)\n",
+                    cell.row, cell.col, end_col
+                ));
+                i = j;
+                continue;
+            }
         }
-        out.push('\n');
+        emit_cell_line(doc, cell, out, &indent, depth);
+        i += 1;
+    }
 
-        for nested in sub_tables {
-            emit_table(doc, nested, out, depth + 1);
-        }
+    out.push('\n');
+}
+
+fn emit_cell_line(
+    doc: &IrDocument,
+    cell: &TableCell,
+    out: &mut String,
+    indent: &str,
+    depth: usize,
+) {
+    out.push_str(indent);
+    out.push_str("- ");
+    out.push_str(&format!("[{},{}]", cell.row, cell.col));
+    if cell.col_span != 1 || cell.row_span != 1 {
+        out.push_str(&format!(" span {}×{}", cell.row_span, cell.col_span));
+    }
+    out.push(':');
+
+    let inline = cell_text_for_bullet(cell);
+    if !inline.is_empty() {
+        out.push(' ');
+        out.push_str(&inline);
     }
     out.push('\n');
+
+    for p in &cell.paragraphs {
+        for c in &p.controls {
+            if let ControlKind::Table(nested) = &c.kind {
+                emit_table(doc, nested, out, depth + 1);
+            }
+        }
+    }
+}
+
+fn is_simple_empty_cell(cell: &TableCell) -> bool {
+    cell.col_span == 1
+        && cell.row_span == 1
+        && cell.paragraphs.iter().all(|p| {
+            p.controls.is_empty() && clean_text(&p.text).is_empty()
+        })
+}
+
+/// Single-line representation of a cell's text for the bullet path:
+/// paragraphs joined with ` · ` (middle dot, common Korean enumerator),
+/// intra-paragraph newlines flattened to spaces. Without this, multi-line
+/// cell text breaks out of the list item — CommonMark only treats the
+/// continuation as part of the bullet when it's indented under the marker,
+/// which our raw paragraph emit didn't preserve.
+fn cell_text_for_bullet(cell: &TableCell) -> String {
+    cell.paragraphs
+        .iter()
+        .map(|p| clean_text(&p.text).replace('\n', " "))
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 fn heading_level(doc: &IrDocument, para: &Paragraph) -> Option<u8> {
@@ -529,6 +584,91 @@ mod tests {
         let md = to_markdown(&doc);
         assert!(md.contains("<!-- table 2×2"), "got: {md}");
         assert!(md.contains("- [0,0] span 2×1: vmerged"));
+    }
+
+    #[test]
+    fn consecutive_empty_cells_collapse_into_range() {
+        // Gantt-style row: [r,1] has text, [r,2..5] are empty stubs.
+        // Forced to bullets via row_span=2 on cell [0,0].
+        let t = TableControl {
+            rows: 2, cols: 6,
+            row_cell_counts: vec![1, 5],
+            cells: vec![
+                TableCell {
+                    col: 0, row: 0, col_span: 1, row_span: 2,
+                    paragraphs: vec![para(0, "vmerged")],
+                    ..TableCell::default()
+                },
+                cell(1, 1, "task A"),
+                cell(2, 1, ""),
+                cell(3, 1, ""),
+                cell(4, 1, ""),
+                cell(5, 1, ""),
+            ],
+            ..TableControl::default()
+        };
+        let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
+        let md = to_markdown(&doc);
+        assert!(md.contains("- [1,1]: task A"), "got: {md}");
+        assert!(md.contains("- [1,2..5]: (empty)"), "got: {md}");
+        // The expanded version (4 separate `- [1,c]:` lines) must NOT
+        // appear.
+        assert!(!md.contains("- [1,2]:\n"));
+        assert!(!md.contains("- [1,5]:\n"));
+    }
+
+    #[test]
+    fn single_empty_cell_does_not_collapse() {
+        // Lone empty cell sandwiched between filled cells stays as-is.
+        let t = TableControl {
+            rows: 2, cols: 3,
+            row_cell_counts: vec![1, 3],
+            cells: vec![
+                TableCell {
+                    col: 0, row: 0, col_span: 1, row_span: 2,
+                    paragraphs: vec![para(0, "vmerged")],
+                    ..TableCell::default()
+                },
+                cell(1, 1, "left"),
+                cell(2, 1, ""),
+            ],
+            ..TableControl::default()
+        };
+        let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
+        let md = to_markdown(&doc);
+        assert!(md.contains("- [1,2]:"), "got: {md}");
+        assert!(!md.contains("(empty)"), "single empty must not be range-collapsed: {md}");
+    }
+
+    #[test]
+    fn multiline_cell_inlines_with_middle_dot() {
+        // Forced to bullets by row_span. Cell has 3 paragraphs that
+        // previously rendered as 3 separate un-indented lines (breaking
+        // out of the list item). Now they collapse to one line joined by
+        // ` · `.
+        let t = TableControl {
+            rows: 2, cols: 2,
+            row_cell_counts: vec![1, 1],
+            cells: vec![
+                TableCell {
+                    col: 0, row: 0, col_span: 1, row_span: 2,
+                    paragraphs: vec![
+                        para(0, "1차"),
+                        para(0, "예비"),
+                        para(0, "연구"),
+                    ],
+                    ..TableCell::default()
+                },
+                cell(1, 0, "x"),
+                cell(1, 1, "y"),
+            ],
+            ..TableControl::default()
+        };
+        let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
+        let md = to_markdown(&doc);
+        assert!(md.contains("- [0,0] span 2×1: 1차 · 예비 · 연구"), "got: {md}");
+        // Old broken form (raw newlines) must not reappear.
+        assert!(!md.contains("- [0,0] span 2×1: 1차\n예비"), "got: {md}");
     }
 
     #[test]
