@@ -12,13 +12,33 @@
 //! The complex-case heuristic follows the task spec: "복잡한 병합 표는
 //! 표준 MD 표 대신 Nested Bullet List로 변환".
 
-use hwp_transpiler_core::ir::{ControlKind, IrDocument, Paragraph, TableCell, TableControl};
+use hwp_transpiler_core::ir::{
+    ControlKind, IrDocument, Paragraph, PictureControl, TableCell, TableControl,
+};
+
+/// Knobs the caller passes to `to_markdown_with`. The bare `to_markdown`
+/// uses defaults (no asset link emitted; pictures collapse to bare
+/// `{{그림 N.}}` placeholders).
+#[derive(Debug, Clone, Default)]
+pub struct MdOptions {
+    /// Relative URL prefix for image references — typically the sidecar
+    /// asset directory. When set, each top-level picture emits
+    /// `![](<prefix>/BIN<id>.<ext>){width=Xmm; height=Ymm}` followed by
+    /// the `{{그림 N.}}` placeholder. When `None`, only the placeholder
+    /// is written.
+    pub assets_path: Option<String>,
+}
 
 pub fn to_markdown(doc: &IrDocument) -> String {
+    to_markdown_with(doc, &MdOptions::default())
+}
+
+pub fn to_markdown_with(doc: &IrDocument, opts: &MdOptions) -> String {
     let mut out = String::new();
+    let mut picture_counter: u32 = 0;
     for section in &doc.sections {
         for para in &section.paragraphs {
-            emit_paragraph(doc, para, &mut out, 0);
+            emit_paragraph(doc, para, &mut out, 0, opts, &mut picture_counter);
         }
     }
     while out.ends_with(|c: char| c.is_whitespace()) {
@@ -30,7 +50,14 @@ pub fn to_markdown(doc: &IrDocument) -> String {
     out
 }
 
-fn emit_paragraph(doc: &IrDocument, para: &Paragraph, out: &mut String, depth: usize) {
+fn emit_paragraph(
+    doc: &IrDocument,
+    para: &Paragraph,
+    out: &mut String,
+    depth: usize,
+    opts: &MdOptions,
+    picture_counter: &mut u32,
+) {
     let text = clean_text(&para.text);
     if !text.is_empty() {
         match heading_level(doc, para) {
@@ -44,10 +71,56 @@ fn emit_paragraph(doc: &IrDocument, para: &Paragraph, out: &mut String, depth: u
         out.push_str("\n\n");
     }
     for c in &para.controls {
-        if let ControlKind::Table(t) = &c.kind {
-            emit_table(doc, t, out, depth);
+        match &c.kind {
+            ControlKind::Table(t) => emit_table(doc, t, out, depth),
+            ControlKind::Picture(p) => {
+                *picture_counter += 1;
+                emit_picture(doc, p, out, opts, *picture_counter);
+            }
+            _ => {}
         }
     }
+}
+
+/// Emit one top-level picture: optional `![](path){…}` then a
+/// `{{그림 N.}}` placeholder block. Cell-embedded pictures are silently
+/// dropped (Phase 2 follow-up).
+fn emit_picture(
+    doc: &IrDocument,
+    pic: &PictureControl,
+    out: &mut String,
+    opts: &MdOptions,
+    n: u32,
+) {
+    if let Some(prefix) = &opts.assets_path {
+        let ext = resolve_bin_extension(doc, pic.bin_id);
+        let filename = format!("BIN{:04}.{}", pic.bin_id, ext);
+        let w = hwpunit_to_mm(pic.width_hwpu);
+        let h = hwpunit_to_mm(pic.height_hwpu);
+        out.push_str(&format!(
+            "![]({prefix}/{filename}){{width={w}mm; height={h}mm}}\n\n"
+        ));
+    }
+    out.push_str(&format!("{{{{그림 {n}.}}}}\n\n"));
+}
+
+/// Extension for `BIN<bin_id>` — looked up in the typed DocInfo BinData
+/// records. Returns `"bin"` as a safe fallback if the matching record is
+/// missing or has no extension (e.g. external link, or pre-Phase-1 IR).
+fn resolve_bin_extension(doc: &IrDocument, bin_id: u16) -> &str {
+    doc.doc_info
+        .bin_data
+        .iter()
+        .find(|bd| bd.bin_data_id == Some(bin_id))
+        .and_then(|bd| bd.extension.as_deref())
+        .unwrap_or("bin")
+}
+
+/// HWPUNIT → millimetres (rounded). Definition: 1 HWPUNIT = 1/7200 inch
+/// (Page Unit Inch), so `mm = hwpu × 25.4 / 7200`. Image dimensions are
+/// always positive in the IR, so a u32-out is safe.
+fn hwpunit_to_mm(hwpu: u32) -> u32 {
+    ((hwpu as f64) * 25.4 / 7200.0).round() as u32
 }
 
 fn emit_table(doc: &IrDocument, t: &TableControl, out: &mut String, depth: usize) {
