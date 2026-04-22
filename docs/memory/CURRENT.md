@@ -1,42 +1,44 @@
 # 현재 위치
 
-**지금**: L1 (LLM-friendly layer skeleton) opt-in 가능. `MdOptions.llm =
-Some(LlmOptions)` 또는 CLI `--llm` 으로 structured markdown 출력.
-stable positional id 기반. role/editable 은 현재 placeholder (`unknown`).
+**지금**: L2 (cell role 분류기) LLM 출력에 연결됨. `--llm --emit-roles`
+시 각 CELL 에 `role=header|label|value|spacer` 가 붙음. 기존 visual
+classifier (`semantics::visual::classify_roles`) 를 DocInfo/TableCell
+adapter 로 감싸서 연결.
 
 **최근 ship**:
-- `crates/codec/src/export/markdown_llm.rs` 신설. `to_llm_markdown(doc, opts)`
-  가 SECTION / PARAGRAPH / TABLE / CELL / TEXT / FIGURE / CAPTION /
-  END TABLE 마커로 구성된 record-style markdown 출력.
-- **ID scheme**: purely positional path, 주소 결정적 & globally unique.
-  - `sec-{si}`, `par-s{si}-p{pi}`
-  - `tbl-s{si}-p{pi}-c{ci}` (controls index within owning paragraph)
-  - `cell-<tbl_id>-r{r}c{c}`
-  - 중첩시 경로 누적: `tbl-s0-p5-c0-r2c3-p1-c0`
-  - `fig-{bin_id}`, `cap-fig-{bin_id}` (BinData 는 globally unique)
-- `instance_id` 는 사용하지 않음 — 한컴 문서에서 대부분 0x80000000
-  로 비유일하게 발견됨 (empirical on TRL). ID 안정성은 위치에서.
-- TRL fixture 실측: 12 paragraph id / 1062 cell id 100% unique.
-- CLI `--llm` 플래그 추가. Human / LLM 출력 상호배타.
+- `Fill::back_color() -> Option<(r,g,b,a)>` 추가. HWP5 ColorFill
+  body byte[3] 가 실제 alpha 가 아니라 reserved/flag byte (TRL 에서
+  E5E5E5 같은 불투명 회색이 byte[3]=0 으로 저장됨) 이므로 KIND_COLOR
+  fill 은 무조건 opaque `a=0xFF` 로 반환. Transparency 는 KIND 플래그
+  로만 판정.
+- `core::semantics::visual_adapter`: `DocInfoResolver`(BorderFillResolver
+  구현) + `VisualExtract for TableCell`. BorderFill id 는 1-indexed
+  (hwplib 관례), id=0 은 "no style" → None.
+- `markdown_llm::emit_table` 이 `emit_roles` 시 `classify_roles()` 를
+  한 번에 테이블 단위로 호출, 결과를 cell 별로 emit.
+- CLI `--emit-roles`, `--emit-editable` flag. `--llm` 없이 쓰면 오류.
+- TRL fixture 실측: 1062 cells → 115 header / 40 label / 907 value.
+  Unknown 없음.
 
 **알려진 갭**:
-- **role / editable 실제 분류기 미구현**. flag 을 켜도 전부 `unknown`
-  만 emit. 이후 작업: bg_fill / bold / 위치 / 텍스트 패턴 휴리스틱
-  기반 classifier. 보수적으로 unknown default.
-- **Non-picture gso 의 caption**: 여전히 버려짐 (Phase 2b 원래 갭).
-- **셀-임베드 picture MD**: human path 는 이번 세션에서 처리됨.
-  L1 path 는 셀 안의 FIGURE 도 계속 emit 한다.
+- **classifier 가 Yellow-centric**. TRL 은 연파란회색(#DFE6F7)
+  기반이라 label 판정이 보수적 (40/1062). Classifier 확장은 별도
+  tuning pass — "Cyan accent + first_col + short text" 같은 규칙
+  추가 필요. 하지만 안전 방향 (보수적 label, 나머지는 value) 이므로
+  즉시 위험 없음.
+- **editable 분류기 미구현** (L3 과제). `--emit-editable` 은 현재
+  `editable=unknown` placeholder 만 emit.
+- **Non-picture gso 의 caption** (Phase 2b 원래 갭).
 
 **다음 후보**:
-- L2: cell role 휴리스틱 (bg_fill / alignment / 짧은 텍스트 / 첫 행
-  행 / bold). 보수적으로 시작.
 - L3: editable 추정 (role=value + 단일 paragraph + 수식/숫자 아님).
-- L4: figure/caption 전역 domain hint (performance_metrics, budget 등).
+- L4: figure/caption 전역 domain hint (performance_metrics, budget).
+- Classifier tuning: non-Yellow label colour 대응.
 - Preview layer (render crate) — IR → HTML with rowspan/colspan.
 
 **막힌 것**: 없음.
 
-**작업 트리**: 깨끗. 테스트: 199/199 green.
+**작업 트리**: 깨끗. 테스트: 207/207 green.
 
 **빠른 컨텍스트**:
 - 라운드트립이 1순위 목표; 마크다운 품질은 2순위. 명시적 결정은

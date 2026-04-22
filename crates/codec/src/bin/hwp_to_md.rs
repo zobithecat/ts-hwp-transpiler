@@ -34,6 +34,10 @@ Options:
   --llm                Emit LLM-friendly structured Markdown with
                        stable ids instead of the human-readable form.
                        Targets LLM chunking/slot-rewrite/reinsertion.
+  --emit-roles         With --llm, add role=header|label|value|spacer
+                       to each CELL from the visual classifier.
+  --emit-editable      With --llm, add editable=unknown to each CELL
+                       (placeholder — classifier not wired yet).
   -h, --help           Print this help and exit.
 ";
 
@@ -71,7 +75,10 @@ fn main() -> ExitCode {
 
     let md_opts = markdown::MdOptions {
         assets_path: plan.assets_url_prefix.clone(),
-        llm: args.llm.then(markdown::LlmOptions::default),
+        llm: args.llm.then(|| markdown::LlmOptions {
+            emit_roles: args.emit_roles,
+            emit_editable: args.emit_editable,
+        }),
     };
     let md = markdown::to_markdown_with(&doc, &md_opts);
 
@@ -132,6 +139,8 @@ struct CliArgs {
     output: OutputSpec,
     assets: AssetsMode,
     llm: bool,
+    emit_roles: bool,
+    emit_editable: bool,
 }
 
 #[derive(Debug)]
@@ -163,6 +172,8 @@ fn parse_args(raw: &[String]) -> Result<Option<CliArgs>, String> {
     let mut positionals: Vec<&str> = Vec::new();
     let mut assets = AssetsMode::Auto;
     let mut llm = false;
+    let mut emit_roles = false;
+    let mut emit_editable = false;
 
     let mut i = 0;
     while i < raw.len() {
@@ -171,6 +182,12 @@ fn parse_args(raw: &[String]) -> Result<Option<CliArgs>, String> {
             "-h" | "--help" => return Ok(None),
             "--llm" => {
                 llm = true;
+            }
+            "--emit-roles" => {
+                emit_roles = true;
+            }
+            "--emit-editable" => {
+                emit_editable = true;
             }
             "--no-assets" => {
                 if matches!(assets, AssetsMode::Explicit(_)) {
@@ -231,11 +248,17 @@ fn parse_args(raw: &[String]) -> Result<Option<CliArgs>, String> {
         return Err(format!("unexpected extra argument: {}", positionals[2]));
     }
 
+    if (emit_roles || emit_editable) && !llm {
+        return Err("--emit-roles / --emit-editable require --llm".into());
+    }
+
     Ok(Some(CliArgs {
         input,
         output,
         assets,
         llm,
+        emit_roles,
+        emit_editable,
     }))
 }
 

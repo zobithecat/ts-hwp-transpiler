@@ -52,6 +52,9 @@
 use hwp_transpiler_core::ir::{
     ControlKind, IrDocument, Paragraph, PictureControl, TableCell, TableControl,
 };
+use hwp_transpiler_core::semantics::{
+    CellRole, DocInfoResolver, VisualExtract, classify_roles,
+};
 
 use super::markdown::{LlmOptions, MdOptions};
 
@@ -138,12 +141,51 @@ fn emit_table(
         out,
         &format!("TABLE[id={tbl_id},rows={},cols={}]", t.rows, t.cols),
     );
-    for cell in &t.cells {
+
+    // When role emission is on, run the visual classifier once per
+    // table so every cell gets its Header/Label/Content/Spacer verdict
+    // from the same global pass (classify_roles needs to see all cells
+    // to decide "is there any label tone in this table").
+    let roles = if llm.emit_roles {
+        compute_roles(doc, t)
+    } else {
+        Vec::new()
+    };
+
+    for (ci, cell) in t.cells.iter().enumerate() {
         let cell_path = format!("{path}-r{}c{}", cell.row, cell.col);
-        emit_cell(doc, cell, out, llm, &cell_path);
+        let role = roles.get(ci).copied();
+        emit_cell(doc, cell, out, llm, &cell_path, role);
     }
     line(out, &format!("END TABLE[{tbl_id}]"));
     out.push('\n');
+}
+
+/// Build a fingerprint for each cell in `t` against `doc`'s DocInfo
+/// resolver, then let `classify_roles` map them to the four semantic
+/// roles. Returns a vector parallel to `t.cells`. When the border-fill
+/// resolver can't find a colour (id == 0, missing entry, non-color
+/// fill), the fingerprint's `bg` falls to `BgTone::None` and the
+/// classifier collapses to its position-only fallback — which is
+/// correct for tables without colour-coded labels.
+fn compute_roles(doc: &IrDocument, t: &TableControl) -> Vec<CellRole> {
+    let resolver = DocInfoResolver::new(&doc.doc_info);
+    let fingerprints: Vec<_> = t
+        .cells
+        .iter()
+        .map(|c| c.fingerprint(&resolver, c.row == 0, c.col == 0))
+        .collect();
+    classify_roles(&fingerprints)
+}
+
+fn role_name(role: Option<CellRole>) -> &'static str {
+    match role {
+        Some(CellRole::Header) => "header",
+        Some(CellRole::Label) => "label",
+        Some(CellRole::Content) => "value",
+        Some(CellRole::Spacer) => "spacer",
+        None => "unknown",
+    }
 }
 
 fn emit_cell(
@@ -152,6 +194,7 @@ fn emit_cell(
     out: &mut String,
     llm: &LlmOptions,
     path: &str,
+    role: Option<CellRole>,
 ) {
     let cell_id = format!("cell-{path}");
     let mut header = format!(
@@ -159,13 +202,10 @@ fn emit_cell(
         cell.row, cell.col, cell.row_span, cell.col_span
     );
     if llm.emit_roles {
-        // Classifier not wired yet — always emit `unknown` so downstream
-        // consumers can lock onto the attribute without us having to
-        // guess. When the heuristic lands it flips per-cell to
-        // `label`/`value`/`mixed`.
-        header.push_str(",role=unknown");
+        header.push_str(&format!(",role={}", role_name(role)));
     }
     if llm.emit_editable {
+        // Editable classifier not wired yet; placeholder until L3.
         header.push_str(",editable=unknown");
     }
     header.push(']');
@@ -386,7 +426,10 @@ mod tests {
     }
 
     #[test]
-    fn role_and_editable_flags_emit_unknown_when_enabled() {
+    fn uncoloured_single_cell_gets_value_role() {
+        // No DocInfo border-fills → resolver returns None → BgTone::None.
+        // Cell at (0,0) is first_row AND first_col — classify_roles falls
+        // to the Content branch (value).
         let t = TableControl {
             rows: 1, cols: 1, row_cell_counts: vec![1],
             cells: vec![TableCell {
@@ -409,8 +452,99 @@ mod tests {
             ..MdOptions::default()
         };
         let md = to_llm_markdown(&doc, &opts);
-        assert!(md.contains("role=unknown"), "got: {md}");
+        assert!(md.contains("role=value"), "got: {md}");
         assert!(md.contains("editable=unknown"), "got: {md}");
+    }
+
+    #[test]
+    fn yellow_fill_cell_gets_label_role() {
+        use hwp_transpiler_core::ir::{BorderFill, Fill};
+        // DocInfo has one yellow border-fill at id=1. Cell references it.
+        let mut doc = IrDocument::default();
+        doc.doc_info.border_fills.push(BorderFill {
+            fill: Fill {
+                kind: Fill::KIND_COLOR,
+                // R=0xFF, G=0xFF, B=0x99, A=0xFF → pale yellow → Hue::Yellow
+                body: vec![0xFF, 0xFF, 0x99, 0xFF, 0, 0, 0, 0],
+            },
+            ..BorderFill::default()
+        });
+        let t = TableControl {
+            rows: 1, cols: 2, row_cell_counts: vec![2],
+            cells: vec![
+                TableCell {
+                    col: 0, row: 0, col_span: 1, row_span: 1,
+                    border_fill_id: 1,
+                    paragraphs: vec![para_text("항목")],
+                    ..TableCell::default()
+                },
+                TableCell {
+                    col: 1, row: 0, col_span: 1, row_span: 1,
+                    border_fill_id: 0,
+                    paragraphs: vec![para_text("내용")],
+                    ..TableCell::default()
+                },
+            ],
+            ..TableControl::default()
+        };
+        doc.sections.push(Section {
+            paragraphs: vec![Paragraph {
+                controls: vec![Control { kind: ControlKind::Table(t) }],
+                ..Paragraph::default()
+            }],
+            ..Section::default()
+        });
+        let opts = MdOptions {
+            llm: Some(LlmOptions { emit_roles: true, ..LlmOptions::default() }),
+            ..MdOptions::default()
+        };
+        let md = to_llm_markdown(&doc, &opts);
+        // First cell (yellow) → label. Second cell → header (first_row
+        // non-first_col path); content has to wait for a row-2 example.
+        assert!(
+            md.contains("CELL[id=cell-s0-p0-c0-r0c0,row=0,col=0,rowspan=1,colspan=1,role=label]"),
+            "expected label on yellow cell; got: {md}"
+        );
+    }
+
+    #[test]
+    fn dark_fill_cell_gets_header_role() {
+        use hwp_transpiler_core::ir::{BorderFill, Fill};
+        let mut doc = IrDocument::default();
+        doc.doc_info.border_fills.push(BorderFill {
+            fill: Fill {
+                kind: Fill::KIND_COLOR,
+                // Near-gray with luminance ~30 → BgTone::Dark
+                body: vec![0x1E, 0x1E, 0x1E, 0xFF, 0, 0, 0, 0],
+            },
+            ..BorderFill::default()
+        });
+        let t = TableControl {
+            rows: 1, cols: 1, row_cell_counts: vec![1],
+            cells: vec![TableCell {
+                col: 0, row: 0, col_span: 1, row_span: 1,
+                border_fill_id: 1,
+                paragraphs: vec![para_text("구분")],
+                ..TableCell::default()
+            }],
+            ..TableControl::default()
+        };
+        doc.sections.push(Section {
+            paragraphs: vec![Paragraph {
+                controls: vec![Control { kind: ControlKind::Table(t) }],
+                ..Paragraph::default()
+            }],
+            ..Section::default()
+        });
+        let opts = MdOptions {
+            llm: Some(LlmOptions { emit_roles: true, ..LlmOptions::default() }),
+            ..MdOptions::default()
+        };
+        let md = to_llm_markdown(&doc, &opts);
+        assert!(
+            md.contains("role=header"),
+            "dark fill must classify as header; got: {md}"
+        );
     }
 
     #[test]

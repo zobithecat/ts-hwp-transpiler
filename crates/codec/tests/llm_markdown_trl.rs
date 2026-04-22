@@ -86,6 +86,45 @@ fn trl_llm_output_has_globally_unique_ids() {
 }
 
 #[test]
+fn trl_llm_with_roles_produces_mixed_distribution() {
+    // L2 integration: emit_roles flag must surface Header/Label/Content
+    // from the visual classifier, not all the same role. TRL's Korean-
+    // government layout yields a clear majority of values with a
+    // meaningful header row and some coloured label cells.
+    let fixture = repo_path(
+        "test/260420-1. 연구개발계획서(서식)[TRL점프업 1단계]_대진대_수정_1430_fin.hwp",
+    );
+    let Ok(bytes) = std::fs::read(&fixture) else {
+        eprintln!("skipping: TRL fixture not present");
+        return;
+    };
+    let doc = HwpReader.read(&bytes).expect("read");
+    let md = markdown::to_markdown_with(
+        &doc,
+        &markdown::MdOptions {
+            llm: Some(markdown::LlmOptions {
+                emit_roles: true,
+                ..markdown::LlmOptions::default()
+            }),
+            ..markdown::MdOptions::default()
+        },
+    );
+
+    let headers = md.match_indices("role=header").count();
+    let labels = md.match_indices("role=label").count();
+    let values = md.match_indices("role=value").count();
+    let unknowns = md.match_indices("role=unknown").count();
+
+    assert!(headers > 0, "expected at least one header, got {headers}");
+    assert!(values > headers, "values ({values}) should dominate headers ({headers})");
+    assert!(labels > 0, "expected at least one label; classifier wiring regressed?");
+    assert_eq!(
+        unknowns, 0,
+        "unknowns should not appear when classifier is wired: {unknowns}"
+    );
+}
+
+#[test]
 fn trl_llm_output_is_deterministic() {
     let fixture = repo_path(
         "test/260420-1. 연구개발계획서(서식)[TRL점프업 1단계]_대진대_수정_1430_fin.hwp",

@@ -168,6 +168,25 @@ impl Fill {
     pub fn is_color(&self) -> bool { self.kind & Self::KIND_COLOR != 0 }
     pub fn is_gradation(&self) -> bool { self.kind & Self::KIND_GRADATION != 0 }
     pub fn is_image(&self) -> bool { self.kind & Self::KIND_IMAGE != 0 }
+
+    /// Decode the back-colour of a solid-color fill. HWP5's `ColorFill`
+    /// body starts with a u32 `backColor`: byte 0 = R, byte 1 = G,
+    /// byte 2 = B. Byte 3 is **not** a straight alpha channel — TRL
+    /// fixture has solid colours like `#E5E5E5` stored with byte[3]=0,
+    /// and the alpha-like bit there is a reserved/pattern flag rather
+    /// than transparency. A solid `KIND_COLOR` fill IS always opaque;
+    /// transparency is modelled by the kind bits (`is_color()` = false
+    /// for no fill). So we hard-set `a = 0xFF` for any colour fill to
+    /// match the observed on-screen semantic.
+    ///
+    /// Returns `None` when the fill isn't `KIND_COLOR` or the body is
+    /// too short.
+    pub fn back_color(&self) -> Option<(u8, u8, u8, u8)> {
+        if !self.is_color() || self.body.len() < 3 {
+            return None;
+        }
+        Some((self.body[0], self.body[1], self.body[2], 0xFF))
+    }
 }
 
 /// HWP5 CharShape record.
