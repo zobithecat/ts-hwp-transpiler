@@ -43,3 +43,40 @@ things must be revisited" list.
 
 **Open questions**: anything deferred.
 ```
+
+## Reverted-decision template
+
+When something gets built, validated, then thrown out, file a separate
+entry named `YYYY-MM-DD-<topic>-reverted.md`. Specifically:
+
+```markdown
+# YYYY-MM-DD — <thing> tried, reverted
+
+**Context**: what motivated the attempt; which Open question it closes.
+
+**Built**: one paragraph on what shipped (and the commit that did,
+since reset).
+
+**Why reverted**: the axis the attempt failed on. Round-trip safety,
+LLM readability, scope creep — be specific about *which* goal it
+violated, not just "felt wrong".
+
+**Decision**: the new resting state.
+
+**Consequence**: who else is affected; whether the reverted approach
+should ever be reconsidered (and under what condition).
+
+**Open**: what's left to figure out.
+```
+
+Reverts are valuable evidence — they prevent the same idea from being
+re-tried in a later session without the prior context. `2026-04-22-
+rowspan-marker-reverted.md` is the format reference.
+
+## Live reference docs
+
+For knowledge that accumulates across sessions (binary spec details,
+hwplib porting map, current session pointer), use `docs/memory/`
+instead of journal entries. Journal = "what we decided, when, and why";
+memory = "what is true now". Update memory when state changes; never
+amend it for opinion.
