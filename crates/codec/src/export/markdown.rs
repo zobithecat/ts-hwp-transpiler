@@ -72,7 +72,7 @@ fn emit_paragraph(
     }
     for c in &para.controls {
         match &c.kind {
-            ControlKind::Table(t) => emit_table(doc, t, out, depth),
+            ControlKind::Table(t) => emit_table(doc, t, out, depth, opts, picture_counter),
             ControlKind::Picture(p) => {
                 *picture_counter += 1;
                 emit_picture(doc, p, out, opts, *picture_counter);
@@ -82,25 +82,29 @@ fn emit_paragraph(
     }
 }
 
-/// Emit one top-level picture: optional `![](path){…}` then a
-/// `{{그림 N. <caption>}}` placeholder block. Cell-embedded pictures are
-/// silently dropped (Phase 2 follow-up).
-fn emit_picture(
+/// Build the `![](prefix/BIN<id>.<ext>){width=Xmm; height=Ymm}` line for
+/// a picture. Returns `None` when `assets_path` is unset — callers then
+/// emit only the placeholder.
+fn picture_image_line(
     doc: &IrDocument,
     pic: &PictureControl,
-    out: &mut String,
     opts: &MdOptions,
-    n: u32,
-) {
-    if let Some(prefix) = &opts.assets_path {
-        let ext = resolve_bin_extension(doc, pic.bin_id);
-        let filename = format!("BIN{:04}.{}", pic.bin_id, ext);
-        let w = hwpunit_to_mm(pic.width_hwpu);
-        let h = hwpunit_to_mm(pic.height_hwpu);
-        out.push_str(&format!(
-            "![]({prefix}/{filename}){{width={w}mm; height={h}mm}}\n\n"
-        ));
-    }
+) -> Option<String> {
+    let prefix = opts.assets_path.as_deref()?;
+    let ext = resolve_bin_extension(doc, pic.bin_id);
+    let filename = format!("BIN{:04}.{}", pic.bin_id, ext);
+    let w = hwpunit_to_mm(pic.width_hwpu);
+    let h = hwpunit_to_mm(pic.height_hwpu);
+    Some(format!(
+        "![]({prefix}/{filename}){{width={w}mm; height={h}mm}}"
+    ))
+}
+
+/// Build the `{{그림 N. <caption>}}` placeholder string (no trailing
+/// newline). Caption text is cleaned and the HWP auto-numbering
+/// `"그림 . "` prefix — left stranded after `clean_text` drops U+FFFC —
+/// is removed.
+fn picture_caption_line(pic: &PictureControl, n: u32) -> String {
     let caption_suffix = pic
         .caption_text
         .as_deref()
@@ -109,7 +113,49 @@ fn emit_picture(
         .filter(|s| !s.is_empty())
         .map(|s| format!(" {s}"))
         .unwrap_or_default();
-    out.push_str(&format!("{{{{그림 {n}.{caption_suffix}}}}}\n\n"));
+    format!("{{{{그림 {n}.{caption_suffix}}}}}")
+}
+
+/// Emit one top-level picture as its own block: optional image ref
+/// followed by the caption placeholder, each separated by the usual
+/// paragraph blank line.
+fn emit_picture(
+    doc: &IrDocument,
+    pic: &PictureControl,
+    out: &mut String,
+    opts: &MdOptions,
+    n: u32,
+) {
+    if let Some(img) = picture_image_line(doc, pic, opts) {
+        out.push_str(&img);
+        out.push_str("\n\n");
+    }
+    out.push_str(&picture_caption_line(pic, n));
+    out.push_str("\n\n");
+}
+
+/// Emit a picture as sub-bullets of a bullet-list cell. Keeps the list
+/// structure intact — no blank-line separators that would break out of
+/// the parent `- [r,c]:` item — and surfaces both the image ref and the
+/// caption placeholder in order.
+fn emit_picture_bullet(
+    indent: &str,
+    doc: &IrDocument,
+    pic: &PictureControl,
+    out: &mut String,
+    opts: &MdOptions,
+    n: u32,
+) {
+    if let Some(img) = picture_image_line(doc, pic, opts) {
+        out.push_str(indent);
+        out.push_str("- ");
+        out.push_str(&img);
+        out.push('\n');
+    }
+    out.push_str(indent);
+    out.push_str("- ");
+    out.push_str(&picture_caption_line(pic, n));
+    out.push('\n');
 }
 
 /// HWP captions authored via the built-in "그림" / "표" auto-numbering
@@ -147,12 +193,19 @@ fn hwpunit_to_mm(hwpu: u32) -> u32 {
     ((hwpu as f64) * 25.4 / 7200.0).round() as u32
 }
 
-fn emit_table(doc: &IrDocument, t: &TableControl, out: &mut String, depth: usize) {
+fn emit_table(
+    doc: &IrDocument,
+    t: &TableControl,
+    out: &mut String,
+    depth: usize,
+    opts: &MdOptions,
+    picture_counter: &mut u32,
+) {
     if let Some(inner) = try_unwrap_wrapper_table(t) {
         // Pure decorative wrapper (1×1 with one nested table, no own
         // text). Skip the outer frame — emit the inner directly at the
         // same depth so it doesn't gain a useless extra indent.
-        emit_table(doc, inner, out, depth);
+        emit_table(doc, inner, out, depth, opts, picture_counter);
         return;
     }
     if let Some((level, text)) = try_table_as_heading(t) {
@@ -172,7 +225,7 @@ fn emit_table(doc: &IrDocument, t: &TableControl, out: &mut String, depth: usize
     if let Some(grid) = try_build_md_grid(t) {
         emit_md_grid(&grid, out);
     } else {
-        emit_table_as_list(doc, t, out, depth);
+        emit_table_as_list(doc, t, out, depth, opts, picture_counter);
     }
 }
 
@@ -359,9 +412,14 @@ fn try_build_md_grid(t: &TableControl) -> Option<Vec<Vec<String>>> {
         if r >= rows || c + cs > cols {
             return None;
         }
+        // GFM grid can't host nested blocks; pictures and nested tables
+        // both force the bullet path so their structure survives.
         for p in &cell.paragraphs {
             for ctrl in &p.controls {
-                if matches!(&ctrl.kind, ControlKind::Table(_)) {
+                if matches!(
+                    &ctrl.kind,
+                    ControlKind::Table(_) | ControlKind::Picture(_)
+                ) {
                     return None;
                 }
             }
@@ -427,7 +485,14 @@ fn cell_text_inline(cell: &TableCell) -> String {
     text.replace('|', "\\|").replace('\n', " ")
 }
 
-fn emit_table_as_list(doc: &IrDocument, t: &TableControl, out: &mut String, depth: usize) {
+fn emit_table_as_list(
+    doc: &IrDocument,
+    t: &TableControl,
+    out: &mut String,
+    depth: usize,
+    opts: &MdOptions,
+    picture_counter: &mut u32,
+) {
     let indent = "  ".repeat(depth);
     out.push_str(&indent);
     out.push_str(&format!(
@@ -475,7 +540,7 @@ fn emit_table_as_list(doc: &IrDocument, t: &TableControl, out: &mut String, dept
                 continue;
             }
         }
-        emit_cell_line(doc, cell, out, &indent, depth);
+        emit_cell_line(doc, cell, out, &indent, depth, opts, picture_counter);
         i += 1;
     }
 
@@ -488,6 +553,8 @@ fn emit_cell_line(
     out: &mut String,
     indent: &str,
     depth: usize,
+    opts: &MdOptions,
+    picture_counter: &mut u32,
 ) {
     out.push_str(indent);
     out.push_str("- ");
@@ -522,10 +589,28 @@ fn emit_cell_line(
         }
     }
 
+    // Sub-indent for child blocks belonging to this cell line: two
+    // spaces deeper than the bullet itself so Markdown associates them
+    // with the parent list item.
+    let child_indent = format!("{indent}  ");
     for p in &cell.paragraphs {
         for c in &p.controls {
-            if let ControlKind::Table(nested) = &c.kind {
-                emit_table(doc, nested, out, depth + 1);
+            match &c.kind {
+                ControlKind::Table(nested) => {
+                    emit_table(doc, nested, out, depth + 1, opts, picture_counter);
+                }
+                ControlKind::Picture(pic) => {
+                    *picture_counter += 1;
+                    emit_picture_bullet(
+                        &child_indent,
+                        doc,
+                        pic,
+                        out,
+                        opts,
+                        *picture_counter,
+                    );
+                }
+                _ => {}
             }
         }
     }
@@ -802,6 +887,145 @@ mod tests {
             md.contains("{{그림 1. 시스템 전체 아키텍처}}"),
             "expected caption-suffixed placeholder; got: {md}"
         );
+    }
+
+    #[test]
+    fn picture_inside_cell_emits_bullet_subitem() {
+        use hwp_transpiler_core::ir::{BinData, PictureControl};
+
+        let mut doc = IrDocument::default();
+        doc.doc_info.bin_data.push(BinData {
+            bin_data_id: Some(7),
+            extension: Some("jpg".into()),
+            ..BinData::default()
+        });
+        // 2×1 with row_span on col 0 to force the bullet path. Col 1
+        // cell has a picture inside its paragraph.
+        let cell_with_pic = TableCell {
+            col: 1, row: 0, col_span: 1, row_span: 1,
+            paragraphs: vec![Paragraph {
+                text: "caption nearby".into(),
+                controls: vec![Control {
+                    kind: ControlKind::Picture(PictureControl {
+                        bin_id: 7,
+                        width_hwpu: 7200,
+                        height_hwpu: 3600,
+                        caption_text: Some("그림 \u{FFFC}. 연구팀 구성 도식".into()),
+                    }),
+                }],
+                ..Paragraph::default()
+            }],
+            ..TableCell::default()
+        };
+        let t = TableControl {
+            rows: 2, cols: 2, row_cell_counts: vec![2, 1],
+            cells: vec![
+                TableCell {
+                    col: 0, row: 0, col_span: 1, row_span: 2,
+                    paragraphs: vec![para(0, "anchor")],
+                    ..TableCell::default()
+                },
+                cell_with_pic,
+                cell(0, 1, "row2"),
+            ],
+            ..TableControl::default()
+        };
+        doc.doc_info.styles = vec![style("본문")];
+        doc.sections.push(Section {
+            paragraphs: vec![para_with_table(t)],
+            ..Section::default()
+        });
+        let md = to_markdown_with(
+            &doc,
+            &MdOptions { assets_path: Some("x.assets".into()), ..MdOptions::default() },
+        );
+        assert!(md.contains("- ![](x.assets/BIN0007.jpg)"), "image bullet missing: {md}");
+        assert!(
+            md.contains("- {{그림 1. 연구팀 구성 도식}}"),
+            "caption bullet missing / wrong number: {md}"
+        );
+    }
+
+    #[test]
+    fn picture_in_grid_candidate_forces_bullet_fallback() {
+        // Without the picture, this 2×2 would render as a GFM grid.
+        // With one, try_build_md_grid must reject so the picture has
+        // somewhere to land.
+        use hwp_transpiler_core::ir::PictureControl;
+        let pic_cell = TableCell {
+            col: 0, row: 0, col_span: 1, row_span: 1,
+            paragraphs: vec![Paragraph {
+                controls: vec![Control {
+                    kind: ControlKind::Picture(PictureControl {
+                        bin_id: 1, width_hwpu: 0, height_hwpu: 0,
+                        caption_text: None,
+                    }),
+                }],
+                ..Paragraph::default()
+            }],
+            ..TableCell::default()
+        };
+        let t = TableControl {
+            rows: 2, cols: 2, row_cell_counts: vec![2, 2],
+            cells: vec![pic_cell, cell(1, 0, "b"), cell(0, 1, "c"), cell(1, 1, "d")],
+            ..TableControl::default()
+        };
+        let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
+        let md = to_markdown(&doc);
+        assert!(
+            md.contains("<!-- table 2×2"),
+            "picture should force bullet fallback, not grid: {md}"
+        );
+        assert!(md.contains("{{그림 1.}}"), "got: {md}");
+    }
+
+    #[test]
+    fn picture_counter_spans_top_level_and_cell_pictures() {
+        // Verifies the shared mutable counter: one top-level picture,
+        // then a picture inside a table — must be N=1 and N=2 in order.
+        use hwp_transpiler_core::ir::PictureControl;
+
+        let top_pic = Paragraph {
+            controls: vec![Control {
+                kind: ControlKind::Picture(PictureControl {
+                    bin_id: 1, width_hwpu: 0, height_hwpu: 0, caption_text: None,
+                }),
+            }],
+            ..Paragraph::default()
+        };
+        let in_cell = TableCell {
+            col: 1, row: 0, col_span: 1, row_span: 1,
+            paragraphs: vec![Paragraph {
+                controls: vec![Control {
+                    kind: ControlKind::Picture(PictureControl {
+                        bin_id: 2, width_hwpu: 0, height_hwpu: 0, caption_text: None,
+                    }),
+                }],
+                ..Paragraph::default()
+            }],
+            ..TableCell::default()
+        };
+        let t = TableControl {
+            rows: 2, cols: 2, row_cell_counts: vec![2, 1],
+            cells: vec![
+                TableCell {
+                    col: 0, row: 0, col_span: 1, row_span: 2,
+                    paragraphs: vec![para(0, "anchor")],
+                    ..TableCell::default()
+                },
+                in_cell,
+                cell(0, 1, "row2"),
+            ],
+            ..TableControl::default()
+        };
+        let doc = make_doc(
+            vec![style("본문")],
+            vec![top_pic, para_with_table(t)],
+        );
+        let md = to_markdown(&doc);
+        let n1 = md.find("{{그림 1.}}").expect("top-level N=1");
+        let n2 = md.find("{{그림 2.}}").expect("cell-embedded N=2");
+        assert!(n1 < n2, "counter order broken: {md}");
     }
 
     #[test]

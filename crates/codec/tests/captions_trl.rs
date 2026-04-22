@@ -60,13 +60,6 @@ fn trl_pictures_have_captions_extracted() {
         "expected ≥6 captions, got {with_caption} (of 9)"
     );
 
-    // Caption text from one of the known figures must survive end-to-end.
-    let md = markdown::to_markdown(&doc);
-    // The first captioned figure in the TRL fixture is "시스템 전체 아키텍처".
-    // It appears inside a table cell, so it currently doesn't emit through
-    // the top-level `emit_picture` path — caption_text still lives on the
-    // IR picture, but Markdown emission for cell-embedded pictures is a
-    // Phase 2 follow-up. Smoke-check on the IR side instead.
     let any_caption = pics
         .iter()
         .filter_map(|(_, c)| c.as_deref())
@@ -77,9 +70,33 @@ fn trl_pictures_have_captions_extracted() {
         pics
     );
 
-    // Sanity: Markdown doesn't accidentally leak the raw FFFC field code.
+    let md = markdown::to_markdown(&doc);
+    // All 9 pictures must now surface as numbered placeholders
+    // (cell-embedded emission shipped after Phase 2b caption extraction).
+    let placeholder_count = md.match_indices("{{그림 ").count();
+    assert_eq!(
+        placeholder_count, 9,
+        "expected 9 picture placeholders; got {placeholder_count}. MD:\n{md}"
+    );
+    // Known captions should be surfaced in the MD via the
+    // `{{그림 N. <caption>}}` form.
+    assert!(
+        md.contains("시스템 전체 아키텍처"),
+        "caption 'system 전체 아키텍처' missing from MD"
+    );
+    assert!(
+        md.contains("연구팀 구성 도식"),
+        "caption '연구팀 구성 도식' missing from MD"
+    );
+    // Sanity: Markdown doesn't accidentally leak the raw FFFC field code
+    // or the stranded "그림 . " prefix that would appear if the strip
+    // logic regressed.
     assert!(
         !md.contains('\u{FFFC}'),
         "raw FFFC field-code must not appear in MD output"
+    );
+    assert!(
+        !md.contains("그림 . "),
+        "stranded '그림 . ' prefix should be stripped"
     );
 }

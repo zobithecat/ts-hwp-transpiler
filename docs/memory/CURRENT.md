@@ -1,42 +1,41 @@
 # 현재 위치
 
-**지금**: Phase 2b (caption IR surface) 완료. `PictureControl.caption_text`
-가 gso 체인 안의 LIST_HEADER + 자식 PARA_TEXT 로부터 추출되어
-타입된 IR 로 올라옴. TRL fixture 9개 picture 중 6개 caption 실 추출.
+**지금**: Phase 2b 완결 (caption IR + MD surface). 셀-임베드 picture
+emission 까지 붙어 TRL fixture 9/9 picture 가 MD 에서 번호·캡션과
+함께 표시됨. 다음은 L1 (LLM-friendly layer skeleton).
 
 **최근 ship**:
-- `PictureControl` 에 `caption_text: Option<String>` 필드 추가.
-- `body_text::parse_paragraph` 의 gso 상태머신 확장: CTRL_HEADER "gso "
-  → LIST_HEADER (at child_lvl+1) 를 만나면 caption 수집 모드 진입,
-  deeper PARA_TEXT 를 수집, SHAPE_COMPONENT 에서 종료. raw_records 는
-  변경하지 않으므로 라운드트립 불변.
-- `markdown::emit_picture` 가 `{{그림 N. <caption>}}` 로 emit.
-  HWP 자동 번호 필드 (`"그림 ￼. ..."`) 의 FFFC 제거 후 생기는 `"그림 . "`
-  prefix 를 `strip_caption_label_prefix` 로 제거 (그림/표/Figure/Table).
-- Phase 2a-ii 완료: `hwp-to-md` CLI `--no-assets`, `--assets-dir=<path>`.
-- Heading fix: multi-paragraph 박스 제목도 `##` 승격 (TRL 7장 이슈).
+- **Cell-embedded picture MD emission**: `emit_table_as_list` →
+  `emit_cell_line` 이 `ControlKind::Picture` 도 iterate 하여
+  bullet sub-item (`- ![](…)` + `- {{그림 N. caption}}`) 으로 emit.
+  `picture_counter` 를 table pipeline 전체에 mut ref 로 threading.
+  `try_build_md_grid` 는 셀에 picture 가 있으면 reject → bullet
+  fallback 강제 (nested table 과 동일 정책).
+- **Phase 2b caption IR**: `PictureControl.caption_text` 를 gso
+  체인의 LIST_HEADER + 자식 PARA_TEXT 에서 추출. HWP 자동 번호
+  필드 `"그림 ￼. ..."` 의 FFFC 제거 후 `"그림 . "` prefix 를
+  strip_caption_label_prefix 로 제거.
+- **Phase 2a-ii**: CLI `--no-assets`, `--assets-dir=<path>`, `<stem>.assets/`
+  sidecar dump.
+- **Heading fix**: multi-paragraph 박스 제목도 `##` 승격 (TRL 7장).
 
-**알려진 갭** (다음 follow-up):
-- **셀-임베드 picture 의 MD emission**: 현재 `emit_picture` 는 top-level
-  paragraph 의 picture control 만 emit. TRL 에서는 9개 중 8개가 표
-  안에 있어 MD 에 placeholder 가 나오지 않음 (IR 에는 존재). 캡션은
-  저장되어 있으나 MD 표면으로 안 올라옴. 기존 "Cell-embedded pictures
-  are silently dropped (Phase 2 follow-up)" 주석에 이미 기록된 별도
-  작업. 해결하려면 `emit_table_as_list` / `emit_cell_line` 에 picture
-  emit 분기 추가 필요.
+**알려진 갭**:
 - **Non-picture gso 의 caption**: line/rect/ole 같은 비-picture shape 은
-  pending_picture 가 clear 되면서 caption 도 같이 버려짐. 이 도형
-  type 들에 독립적인 IR control 타입이 생기면 그때 연결.
+  pending_picture 가 clear 되면서 caption 도 같이 버려짐. 해당 도형
+  타입들에 독립적인 IR control 타입이 생기면 그때 연결.
+- **Caption 라벨 외국어 prefix**: `strip_caption_label_prefix` 는 현재
+  "그림/표/Figure/Table" 네 가지만 처리. 다른 언어 확장 시 여기서.
 
 **다음 후보**:
-- 위 follow-up (셀-임베드 picture MD emission) — Phase 2b 의 자연스러운
-  완결
-- L1 (LLM-friendly layer skeleton): `MdOptions.llm: Option<LlmOptions>`,
-  section/table/cell/figure id 만 emit. 기존 human 출력 불변 (opt-in).
+- **L1 (LLM-friendly layer skeleton)**: `MdOptions.llm: Option<LlmOptions>`
+  추가. section/table/cell/figure id 만 emit, role/editable 은 전부
+  `unknown` 으로 시작. 기존 human 출력 불변 (opt-in). stable id 설계는
+  HWP5 native 식별자 (`ParagraphHeader.instance_id`, `BinData.bin_data_id`,
+  TableCell.row/col) 에서 결정적 파생.
 
 **막힌 것**: 없음.
 
-**작업 트리**: 깨끗. 테스트: 186/186 green.
+**작업 트리**: 깨끗. 테스트: 189/189 green.
 
 **빠른 컨텍스트**:
 - 라운드트립이 1순위 목표; 마크다운 품질은 2순위. 명시적 결정은
