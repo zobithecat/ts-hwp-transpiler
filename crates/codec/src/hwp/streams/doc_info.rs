@@ -1,7 +1,7 @@
 //! `/DocInfo` — compressed record tree carrying document-wide metadata
 //! (shapes, styles, fonts, id mappings, …).
 //!
-//! Known record tags (from HWP5 spec / hwplib):
+//! Known record tags (from HWP5 spec / hwplib `HWPTag.java`):
 //!
 //! | tag    | meaning              |
 //! |--------|----------------------|
@@ -20,6 +20,11 @@
 //! | 0x001C | DistributeDocData    |
 //! | 0x001E | CompatibleDocument   |
 //! | 0x001F | LayoutCompatibility  |
+//! | 0x0020 | TrackChange (info)   |
+//! | 0x005C | MemoShape            |
+//! | 0x005E | ForbiddenChar        |
+//! | 0x0060 | TrackChange (body)   |
+//! | 0x0061 | TrackChangeAuthor    |
 //!
 //! Compression: when FileHeader.compressed = 1, the stream body is raw
 //! DEFLATE (RFC 1951) — *no* zlib header.
@@ -50,6 +55,16 @@ pub mod tag {
     pub const DISTRIBUTE_DOC_DATA: u16 = 0x001C;
     pub const COMPATIBLE_DOCUMENT: u16 = 0x001E;
     pub const LAYOUT_COMPATIBILITY: u16 = 0x001F;
+    /// Track-changes metadata block. Layout undocumented in the public
+    /// HWP5 spec; preserved verbatim via `raw_records` until typed.
+    pub const TRACK_CHANGE_INFO: u16 = 0x0020;
+    pub const MEMO_SHAPE: u16 = 0x005C;
+    /// Korean line-break forbidden-character set. Like the others below,
+    /// preserved verbatim until a fixture exercises it.
+    pub const FORBIDDEN_CHAR: u16 = 0x005E;
+    /// Track-changes body record (paired with TRACK_CHANGE_AUTHOR).
+    pub const TRACK_CHANGE: u16 = 0x0060;
+    pub const TRACK_CHANGE_AUTHOR: u16 = 0x0061;
 }
 
 pub fn decompress(compressed: &[u8]) -> Result<Vec<u8>, IrError> {
