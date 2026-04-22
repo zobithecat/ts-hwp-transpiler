@@ -1,30 +1,33 @@
 # 현재 위치
 
-**지금**: Phase 2a-i 완료; Phase 2a-ii 진행 중 (마크다운 측 emit_picture
-완료, CLI 사이드카 dump는 미완성).
+**지금**: Phase 2a-ii 완료. CLI sidecar dump + MD ↔ 파일 교차검증까지
+green. 다음은 Phase 2b (caption 추출) 또는 L1 LLM skeleton.
 
-**최근 ship**: PictureControl 와이어링 — body_text parse_paragraph가
-`CTRL_HEADER "gso " → SHAPE_COMPONENT → SHAPE_COMPONENT_PICTURE` 체인
-에서 `bin_id` + `width_hwpu` + `height_hwpu` 추출. TRL fixture에서
-9개 `ControlKind::Picture` 컨트롤 surface (이미지 1:1 매칭).
+**최근 ship**:
+- `hwp-to-md` CLI 에 `--no-assets`, `--assets-dir=<path>`, `-h/--help`
+  플래그 추가. 기본 동작: `doc.hwp` → `doc.md` + sibling `doc.assets/`
+  디렉토리에 모든 `BinaryEntry` dump. stdout (`-`) 모드는 자동으로
+  assets 를 비활성 (명시적 `--assets-dir` 로 override 가능).
+- `crates/codec/src/export/assets.rs` 신설 — pure `dump_assets(doc, dir)`.
+  Path traversal 가드 (id 에 `/`, `\`, `.`, NUL 포함 시 reject).
+- Multi-paragraph 박스 제목이 `##` 로 승격되도록 `try_table_as_heading`
+  relax. TRL fixture 7장 "연구개발성과의 활용방안 및 기대효과
+  (기술성·시장성 및 사업성 검토 방안 등)" 이 본문으로 내려앉던
+  이슈 수정 — cell.paragraphs.len() != 1 가드가 원인이었고, 이미
+  존재하던 `try_table_as_passage` 의 space-join 패턴과 동일하게 처리.
 
-이후 `markdown::to_markdown_with` + `MdOptions { assets_path }` 추가:
-`assets_path` 가 주어지면 각 top-level picture가
-`![](<prefix>/BIN<id>.<ext>){width=Xmm; height=Ymm}` + `{{그림 N.}}`
-형태로 emit. assets_path 없으면 placeholder만 emit.
-
-**다음**: Phase 2a-ii 완성 — `hwp-to-md` CLI가
-- `<doc>.assets/` 디렉토리 생성
-- `IrDocument.bin_data` 의 모든 BinaryEntry → `<assets>/<id>` 파일 dump
-- `MdOptions { assets_path: Some(...) }` 로 `to_markdown_with` 호출
-- `--no-assets` 옵션으로 끄기 가능
-
-**이후**: Phase 2b — 캡션 텍스트 추출 (캡션은 gso 컨트롤 안의
-sub-paragraph). placeholder가 `{{그림 N. <caption text>}}` 가 됨.
+**다음 후보** (병렬 가능):
+- Phase 2b: caption 추출 — gso 컨트롤 안의 sub-paragraph 에서
+  caption text 를 surface, `PictureControl` 과 연결 (`{{그림 N.}}`
+  placeholder 가 `{{그림 N. <caption>}}` 이 되도록)
+- L1 (LLM-friendly layer skeleton): `MdOptions` 에 `llm: Option<LlmOptions>`
+  추가, section/paragraph/table/cell id 만 emit, role/editable 은 전부
+  `unknown` 으로 시작. 기존 human 출력 불변 (opt-in).
 
 **막힌 것**: 없음.
 
-**작업 트리**: 깨끗. 테스트: 155/155 green.
+**작업 트리**: 깨끗. 테스트: 182/182 green (신규 27: assets 5 + CLI
+17 + heading 3 + xref 2).
 
 **빠른 컨텍스트**:
 - 라운드트립이 1순위 목표; 마크다운 품질은 2순위. 명시적 결정은
