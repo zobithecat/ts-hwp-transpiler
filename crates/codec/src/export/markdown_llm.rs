@@ -142,11 +142,13 @@ fn emit_table(
         &format!("TABLE[id={tbl_id},rows={},cols={}]", t.rows, t.cols),
     );
 
-    // When role emission is on, run the visual classifier once per
-    // table so every cell gets its Header/Label/Content/Spacer verdict
-    // from the same global pass (classify_roles needs to see all cells
-    // to decide "is there any label tone in this table").
-    let roles = if llm.emit_roles {
+    // Run the visual classifier whenever either role or editable is
+    // requested — editable inference depends on role, so even when the
+    // user only asks for editable output we compute roles internally.
+    // classify_roles must see every cell at once to decide "is there
+    // any label tone in this table", so it's a per-table call.
+    let need_roles = llm.emit_roles || llm.emit_editable;
+    let roles = if need_roles {
         compute_roles(doc, t)
     } else {
         Vec::new()
@@ -188,6 +190,96 @@ fn role_name(role: Option<CellRole>) -> &'static str {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Editable {
+    Yes,
+    No,
+    Unknown,
+}
+
+fn editable_name(e: Editable) -> &'static str {
+    match e {
+        Editable::Yes => "true",
+        Editable::No => "false",
+        Editable::Unknown => "unknown",
+    }
+}
+
+/// Conservative editable inference. Errs toward `false` — if we can't
+/// be sure the cell is a free-form text slot, we shouldn't suggest an
+/// LLM rewrite it. Rules (all must hold for `true`):
+///
+///   1. Role is `Content` (value). Header / Label / Spacer describe
+///      form structure and must never change.
+///   2. At most one paragraph in the cell. Multi-paragraph cells hold
+///      structured content (bullet lists, subheadings) where blind
+///      rewrite risks losing the layering.
+///   3. No inline controls — any nested table, picture, or equation
+///      means the cell is a container, not a plain text slot.
+///   4. Text is not purely numeric/punctuation (`80%+` such chars).
+///      Numeric-only cells are typically calculated totals or fixed
+///      dates that shouldn't be re-authored.
+///
+/// Empty value cells *are* editable (fill-in slots). `None` role (when
+/// classifier didn't run) yields `Unknown`.
+fn infer_editable(cell: &TableCell, role: Option<CellRole>) -> Editable {
+    match role {
+        None => return Editable::Unknown,
+        Some(CellRole::Header) | Some(CellRole::Label) | Some(CellRole::Spacer) => {
+            return Editable::No;
+        }
+        Some(CellRole::Content) => {}
+    }
+
+    if cell.paragraphs.len() > 1 {
+        return Editable::No;
+    }
+    let has_controls = cell
+        .paragraphs
+        .iter()
+        .any(|p| !p.controls.is_empty());
+    if has_controls {
+        return Editable::No;
+    }
+
+    let text: String = cell
+        .paragraphs
+        .first()
+        .map(|p| super::markdown::clean_text(&p.text))
+        .unwrap_or_default();
+    if text.is_empty() {
+        // Empty value cell — a fill-in slot.
+        return Editable::Yes;
+    }
+    if is_mostly_numeric(&text) {
+        return Editable::No;
+    }
+    Editable::Yes
+}
+
+/// Heuristic: ≥90% of non-whitespace characters fall into the numeric
+/// / punctuation / currency set → treat as a calculated/formatted
+/// value that shouldn't be rewritten. Tuned against TRL fixture
+/// patterns like `"134,500"`, `"100%"`, `"2026-04-22"`.
+fn is_mostly_numeric(s: &str) -> bool {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let total = trimmed.chars().count();
+    let numeric_like = trimmed
+        .chars()
+        .filter(|c| {
+            c.is_ascii_digit()
+                || matches!(
+                    *c,
+                    '.' | ',' | '-' | '+' | '%' | '/' | '(' | ')' | ' ' | ':'
+                )
+        })
+        .count();
+    numeric_like * 10 >= total * 9
+}
+
 fn emit_cell(
     doc: &IrDocument,
     cell: &TableCell,
@@ -205,8 +297,8 @@ fn emit_cell(
         header.push_str(&format!(",role={}", role_name(role)));
     }
     if llm.emit_editable {
-        // Editable classifier not wired yet; placeholder until L3.
-        header.push_str(",editable=unknown");
+        let ed = infer_editable(cell, role);
+        header.push_str(&format!(",editable={}", editable_name(ed)));
     }
     header.push(']');
     line(out, &header);
@@ -426,10 +518,11 @@ mod tests {
     }
 
     #[test]
-    fn uncoloured_single_cell_gets_value_role() {
+    fn uncoloured_single_cell_is_editable_value() {
         // No DocInfo border-fills → resolver returns None → BgTone::None.
         // Cell at (0,0) is first_row AND first_col — classify_roles falls
-        // to the Content branch (value).
+        // to the Content branch (value). Single plain-text paragraph,
+        // not numeric → editable.
         let t = TableControl {
             rows: 1, cols: 1, row_cell_counts: vec![1],
             cells: vec![TableCell {
@@ -453,7 +546,219 @@ mod tests {
         };
         let md = to_llm_markdown(&doc, &opts);
         assert!(md.contains("role=value"), "got: {md}");
-        assert!(md.contains("editable=unknown"), "got: {md}");
+        assert!(md.contains("editable=true"), "got: {md}");
+    }
+
+    #[test]
+    fn empty_value_cell_is_editable() {
+        let t = TableControl {
+            rows: 1, cols: 1, row_cell_counts: vec![1],
+            cells: vec![TableCell {
+                col: 0, row: 0, col_span: 1, row_span: 1,
+                paragraphs: vec![para_text("")],
+                ..TableCell::default()
+            }],
+            ..TableControl::default()
+        };
+        let mut doc = IrDocument::default();
+        doc.sections.push(Section {
+            paragraphs: vec![Paragraph {
+                controls: vec![Control { kind: ControlKind::Table(t) }],
+                ..Paragraph::default()
+            }],
+            ..Section::default()
+        });
+        let opts = MdOptions {
+            llm: Some(LlmOptions { emit_roles: true, emit_editable: true }),
+            ..MdOptions::default()
+        };
+        let md = to_llm_markdown(&doc, &opts);
+        assert!(md.contains("editable=true"), "empty slot should be editable; got: {md}");
+    }
+
+    #[test]
+    fn numeric_only_cell_is_not_editable() {
+        let t = TableControl {
+            rows: 1, cols: 1, row_cell_counts: vec![1],
+            cells: vec![TableCell {
+                col: 0, row: 0, col_span: 1, row_span: 1,
+                paragraphs: vec![para_text("134,500")],
+                ..TableCell::default()
+            }],
+            ..TableControl::default()
+        };
+        let mut doc = IrDocument::default();
+        doc.sections.push(Section {
+            paragraphs: vec![Paragraph {
+                controls: vec![Control { kind: ControlKind::Table(t) }],
+                ..Paragraph::default()
+            }],
+            ..Section::default()
+        });
+        let opts = MdOptions {
+            llm: Some(LlmOptions { emit_roles: true, emit_editable: true }),
+            ..MdOptions::default()
+        };
+        let md = to_llm_markdown(&doc, &opts);
+        assert!(md.contains("editable=false"), "numeric-only must be non-editable; got: {md}");
+    }
+
+    #[test]
+    fn label_cell_is_never_editable() {
+        use hwp_transpiler_core::ir::{BorderFill, Fill};
+        let mut doc = IrDocument::default();
+        doc.doc_info.border_fills.push(BorderFill {
+            fill: Fill {
+                kind: Fill::KIND_COLOR,
+                body: vec![0xFF, 0xFF, 0x99, 0x00, 0, 0, 0, 0],
+            },
+            ..BorderFill::default()
+        });
+        let t = TableControl {
+            rows: 1, cols: 1, row_cell_counts: vec![1],
+            cells: vec![TableCell {
+                col: 0, row: 0, col_span: 1, row_span: 1,
+                border_fill_id: 1,
+                paragraphs: vec![para_text("항목")],
+                ..TableCell::default()
+            }],
+            ..TableControl::default()
+        };
+        doc.sections.push(Section {
+            paragraphs: vec![Paragraph {
+                controls: vec![Control { kind: ControlKind::Table(t) }],
+                ..Paragraph::default()
+            }],
+            ..Section::default()
+        });
+        let opts = MdOptions {
+            llm: Some(LlmOptions { emit_roles: true, emit_editable: true }),
+            ..MdOptions::default()
+        };
+        let md = to_llm_markdown(&doc, &opts);
+        assert!(md.contains("role=label"));
+        assert!(
+            md.contains("editable=false"),
+            "label cells must be non-editable; got: {md}"
+        );
+    }
+
+    #[test]
+    fn cell_with_nested_control_is_not_editable() {
+        use hwp_transpiler_core::ir::PictureControl;
+        // Cell holds a picture control → structural, not a text slot.
+        let t = TableControl {
+            rows: 1, cols: 1, row_cell_counts: vec![1],
+            cells: vec![TableCell {
+                col: 0, row: 0, col_span: 1, row_span: 1,
+                paragraphs: vec![Paragraph {
+                    controls: vec![Control {
+                        kind: ControlKind::Picture(PictureControl {
+                            bin_id: 1,
+                            width_hwpu: 0,
+                            height_hwpu: 0,
+                            caption_text: None,
+                        }),
+                    }],
+                    ..Paragraph::default()
+                }],
+                ..TableCell::default()
+            }],
+            ..TableControl::default()
+        };
+        let mut doc = IrDocument::default();
+        doc.sections.push(Section {
+            paragraphs: vec![Paragraph {
+                controls: vec![Control { kind: ControlKind::Table(t) }],
+                ..Paragraph::default()
+            }],
+            ..Section::default()
+        });
+        let opts = MdOptions {
+            llm: Some(LlmOptions { emit_roles: true, emit_editable: true }),
+            ..MdOptions::default()
+        };
+        let md = to_llm_markdown(&doc, &opts);
+        assert!(
+            md.contains("editable=false"),
+            "cell with picture must be non-editable; got: {md}"
+        );
+    }
+
+    #[test]
+    fn multi_paragraph_cell_is_not_editable() {
+        let t = TableControl {
+            rows: 1, cols: 1, row_cell_counts: vec![1],
+            cells: vec![TableCell {
+                col: 0, row: 0, col_span: 1, row_span: 1,
+                paragraphs: vec![para_text("첫 문단"), para_text("둘째 문단")],
+                ..TableCell::default()
+            }],
+            ..TableControl::default()
+        };
+        let mut doc = IrDocument::default();
+        doc.sections.push(Section {
+            paragraphs: vec![Paragraph {
+                controls: vec![Control { kind: ControlKind::Table(t) }],
+                ..Paragraph::default()
+            }],
+            ..Section::default()
+        });
+        let opts = MdOptions {
+            llm: Some(LlmOptions { emit_roles: true, emit_editable: true }),
+            ..MdOptions::default()
+        };
+        let md = to_llm_markdown(&doc, &opts);
+        assert!(md.contains("editable=false"), "got: {md}");
+    }
+
+    #[test]
+    fn editable_flag_alone_still_computes_roles_internally() {
+        // emit_editable=true, emit_roles=false. User should see editable
+        // but not role; internal role computation still happens so the
+        // editable verdict is meaningful.
+        let t = TableControl {
+            rows: 1, cols: 1, row_cell_counts: vec![1],
+            cells: vec![TableCell {
+                col: 0, row: 0, col_span: 1, row_span: 1,
+                paragraphs: vec![para_text("일반 텍스트")],
+                ..TableCell::default()
+            }],
+            ..TableControl::default()
+        };
+        let mut doc = IrDocument::default();
+        doc.sections.push(Section {
+            paragraphs: vec![Paragraph {
+                controls: vec![Control { kind: ControlKind::Table(t) }],
+                ..Paragraph::default()
+            }],
+            ..Section::default()
+        });
+        let opts = MdOptions {
+            llm: Some(LlmOptions { emit_roles: false, emit_editable: true }),
+            ..MdOptions::default()
+        };
+        let md = to_llm_markdown(&doc, &opts);
+        assert!(md.contains("editable=true"), "got: {md}");
+        assert!(!md.contains("role="), "role should NOT be emitted: {md}");
+    }
+
+    #[test]
+    fn is_mostly_numeric_covers_common_patterns() {
+        // Calculated / formatted values — numeric-only set.
+        assert!(is_mostly_numeric("134,500"));
+        assert!(is_mostly_numeric("100%"));
+        assert!(is_mostly_numeric("2026-04-22"));
+        assert!(is_mostly_numeric("3.14"));
+        assert!(is_mostly_numeric("1/2"));
+
+        // Korean-heavy — editable candidates.
+        assert!(!is_mostly_numeric("연구개발계획서"));
+        assert!(!is_mostly_numeric("1단계"));
+        assert!(!is_mostly_numeric("2024 연구"));
+
+        // Edge: empty.
+        assert!(!is_mostly_numeric(""));
     }
 
     #[test]

@@ -125,6 +125,56 @@ fn trl_llm_with_roles_produces_mixed_distribution() {
 }
 
 #[test]
+fn trl_llm_with_editable_splits_value_cells() {
+    // L3 integration: emit_editable must tag every cell. Header / label
+    // are always false. Value cells split — some are editable text
+    // slots, others (numeric, multi-paragraph, control-bearing) are
+    // not. TRL has a healthy split of both, so both counts must be
+    // non-zero; the exact ratio is left loose so classifier tuning
+    // doesn't break this test.
+    let fixture = repo_path(
+        "test/260420-1. 연구개발계획서(서식)[TRL점프업 1단계]_대진대_수정_1430_fin.hwp",
+    );
+    let Ok(bytes) = std::fs::read(&fixture) else {
+        eprintln!("skipping: TRL fixture not present");
+        return;
+    };
+    let doc = HwpReader.read(&bytes).expect("read");
+    let md = markdown::to_markdown_with(
+        &doc,
+        &markdown::MdOptions {
+            llm: Some(markdown::LlmOptions {
+                emit_roles: true,
+                emit_editable: true,
+            }),
+            ..markdown::MdOptions::default()
+        },
+    );
+
+    let ed_true = md.match_indices("editable=true").count();
+    let ed_false = md.match_indices("editable=false").count();
+    let ed_unknown = md.match_indices("editable=unknown").count();
+
+    assert!(ed_true > 100, "expected many editable text slots, got {ed_true}");
+    assert!(ed_false > 100, "expected many non-editable cells, got {ed_false}");
+    assert_eq!(
+        ed_unknown, 0,
+        "unknowns only appear when classifier is off; got {ed_unknown}"
+    );
+
+    // Header cells must never be editable.
+    // Grep pattern matches a full role,editable pair.
+    assert!(
+        !md.contains("role=header,editable=true"),
+        "header cells must be non-editable"
+    );
+    assert!(
+        !md.contains("role=label,editable=true"),
+        "label cells must be non-editable"
+    );
+}
+
+#[test]
 fn trl_llm_output_is_deterministic() {
     let fixture = repo_path(
         "test/260420-1. 연구개발계획서(서식)[TRL점프업 1단계]_대진대_수정_1430_fin.hwp",

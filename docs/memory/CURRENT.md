@@ -1,44 +1,41 @@
 # 현재 위치
 
-**지금**: L2 (cell role 분류기) LLM 출력에 연결됨. `--llm --emit-roles`
-시 각 CELL 에 `role=header|label|value|spacer` 가 붙음. 기존 visual
-classifier (`semantics::visual::classify_roles`) 를 DocInfo/TableCell
-adapter 로 감싸서 연결.
+**지금**: L3 (editable 추정) LLM 출력에 연결됨. `--llm --emit-editable`
+시 각 CELL 에 `editable=true|false|unknown` 추가. 보수적 규칙
+(role=value + 단일 paragraph + no controls + 숫자 아님).
 
 **최근 ship**:
-- `Fill::back_color() -> Option<(r,g,b,a)>` 추가. HWP5 ColorFill
-  body byte[3] 가 실제 alpha 가 아니라 reserved/flag byte (TRL 에서
-  E5E5E5 같은 불투명 회색이 byte[3]=0 으로 저장됨) 이므로 KIND_COLOR
-  fill 은 무조건 opaque `a=0xFF` 로 반환. Transparency 는 KIND 플래그
-  로만 판정.
-- `core::semantics::visual_adapter`: `DocInfoResolver`(BorderFillResolver
-  구현) + `VisualExtract for TableCell`. BorderFill id 는 1-indexed
-  (hwplib 관례), id=0 은 "no style" → None.
-- `markdown_llm::emit_table` 이 `emit_roles` 시 `classify_roles()` 를
-  한 번에 테이블 단위로 호출, 결과를 cell 별로 emit.
-- CLI `--emit-roles`, `--emit-editable` flag. `--llm` 없이 쓰면 오류.
-- TRL fixture 실측: 1062 cells → 115 header / 40 label / 907 value.
-  Unknown 없음.
+- `markdown_llm::infer_editable` 추가. 규칙:
+  1. role=Header/Label/Spacer → `false`
+  2. paragraphs > 1 → `false`
+  3. cell 안에 control (Table/Picture/Equation) → `false`
+  4. 비어 있음 → `true` (fill-in slot)
+  5. 텍스트의 ≥90% 가 숫자/구두점/공백 → `false` (계산값·날짜)
+  6. 그 외 value → `true`
+  7. role 없음 (classifier 비활성) → `unknown`
+- `emit_editable` 활성시 자동으로 role 계산 (emit_roles 안 켜져도 내부
+  계산). 사용자에게는 `role=` 안 보이지만 editable 판정은 유효.
+- L2 (cell role 분류기): TRL 1062 cells → 115 header / 40 label /
+  907 value.
+- L3 (editable): TRL → 546 true / 516 false (header+label 155 +
+  value-but-numeric/multi/control 361).
 
 **알려진 갭**:
-- **classifier 가 Yellow-centric**. TRL 은 연파란회색(#DFE6F7)
-  기반이라 label 판정이 보수적 (40/1062). Classifier 확장은 별도
-  tuning pass — "Cyan accent + first_col + short text" 같은 규칙
-  추가 필요. 하지만 안전 방향 (보수적 label, 나머지는 value) 이므로
-  즉시 위험 없음.
-- **editable 분류기 미구현** (L3 과제). `--emit-editable` 은 현재
-  `editable=unknown` placeholder 만 emit.
-- **Non-picture gso 의 caption** (Phase 2b 원래 갭).
+- **classifier tuning**: TRL #DFE6F7 연파란회색이 Label 로 안 잡힘.
+  Yellow-tuned. 후속 tuning pass 에서 확장.
+- **Non-picture gso 의 caption** (Phase 2b 갭).
+- **`is_mostly_numeric` 임계치 90% 가 너무 빡빡/관대할 수 있음**.
+  튜닝은 실제 사용 feedback 으로.
 
 **다음 후보**:
-- L3: editable 추정 (role=value + 단일 paragraph + 수식/숫자 아님).
-- L4: figure/caption 전역 domain hint (performance_metrics, budget).
-- Classifier tuning: non-Yellow label colour 대응.
-- Preview layer (render crate) — IR → HTML with rowspan/colspan.
+- **Classifier tuning**: Cyan/Pale accent 도 label 로 승격.
+- **L4**: figure/caption 전역 domain hint.
+- **Preview layer** (render crate) — IR → HTML with rowspan/colspan.
+- **Non-picture gso caption** — line/rect/ole shape 의 caption 살리기.
 
 **막힌 것**: 없음.
 
-**작업 트리**: 깨끗. 테스트: 207/207 green.
+**작업 트리**: 깨끗. 테스트: 214/214 green.
 
 **빠른 컨텍스트**:
 - 라운드트립이 1순위 목표; 마크다운 품질은 2순위. 명시적 결정은
