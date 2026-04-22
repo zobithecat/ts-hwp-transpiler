@@ -1,6 +1,6 @@
 # 2026-04-21 — 스코프 확정 + strangler-fig 라운드트립 전략
 
-## Context
+## 맥락
 
 `task.md` 한 장 외에 아무것도 없는 상태에서 시작. 첫 턴에는 HWP → MD
 단방향 추출기 전제로 스캐폴드(core: semantics/hint/formula, 7 tests pass).
@@ -12,7 +12,7 @@
 4. "B로 가즈아" — fixture-first 바이트 동일성 전략 확정
 5. "반-자동 러너 고" — 다이프 러너 binary 추가
 
-## Decision
+## 결정
 
 **Crate 구성 (최종)**
 
@@ -41,7 +41,7 @@ crates/wasm       wasm-bindgen glue
 - rhwp(edwardkim)의 serializer는 HWPX만, HWPX-source save는 v0.7.3에서
   disable됨 → binary HWP writer는 rhwp 참조 불가
 
-## Why
+## 이유
 
 alternatives considered:
 
@@ -56,7 +56,7 @@ alternatives considered:
 HWPX 우회 save 옵션은 사용자가 명시적으로 거부
 (`memory/feedback_no_shortcuts.md`).
 
-## Consequence
+## 결과
 
 - **task #10 (DocInfo writer 포팅)이 모든 binary HWP 경로의 게이트**.
   진입 전에 fixture `blank.hwp` 필요 — `crates/codec/tests/fixtures/README.md`에 hwplib `BlankFileMaker` 사용법 문서화됨.
@@ -67,7 +67,7 @@ HWPX 우회 save 옵션은 사용자가 명시적으로 거부
 - IR의 `unknown_streams`와 `UnknownRecord`는 영구적 round-trip 장치 —
   신규 레코드 타입 발견 시 여기를 통과시키면 바이트 손실 없음.
 
-## Verified
+## 검증됨
 
 - `cargo build --workspace --exclude hwp-transpiler-wasm` green
 - core 기존 7 tests pass (formula tokenizer + semantic grid/visual)
@@ -81,7 +81,7 @@ HWPX 우회 save 옵션은 사용자가 명시적으로 거부
   가 writer.rs에 살아있음.
 - `blank_hwp_per_stream_match`는 fixture 부재로 skip (예상 경로)
 
-## Open questions
+## 미해결 질문
 
 - **Phase 2 hwplib DocInfo 포팅 단위** — 한 레코드 타입씩(예: CharShape
   먼저) 가는 게 좋을지, 한 스트림 전체(DocInfo) 한번에 가는 게 좋을지.

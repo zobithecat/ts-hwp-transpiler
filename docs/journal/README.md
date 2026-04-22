@@ -1,82 +1,79 @@
-# Engineering Journal
+# 엔지니어링 저널
 
-Append-only log of architectural decisions, scope shifts, and learnings. Not
-a PR changelog (git handles that), not a task list (see TaskList). What
-belongs here:
+아키텍처 결정·스코프 변경·발견 사항을 추가-전용으로 기록. PR 변경
+로그가 아니며 (git이 처리), 태스크 리스트도 아님 (TaskList 사용).
+여기 들어갈 것:
 
-- **Scope commitments and reversals** — why a direction was chosen, what
-  alternatives were rejected, what the tradeoffs were.
-- **Verified constraints** — "cfb does X, not Y", "hwplib rounds off
-  padding bytes here", grounded in a specific test run or source read.
-- **Dead ends with reasons** — if we tried something and backed out, record
-  it so we don't repeat.
-- **Open questions waiting on a human** — so the next session can pick them
-  up without re-deriving.
+- **스코프 약속과 번복** — 왜 이 방향을 골랐고, 어떤 대안을 기각했고,
+  어떤 트레이드오프가 있었는지.
+- **검증된 제약** — "cfb는 X를 하지만 Y는 못 한다", "hwplib는 여기서
+  패딩 바이트를 잘라낸다" 등, 특정 테스트 실행이나 소스 읽기에 근거한
+  사실.
+- **이유와 함께 기록한 막다른 길** — 시도했다가 되돌렸다면 다음에
+  반복하지 않도록 기록.
+- **사람을 기다리는 미해결 질문** — 다음 세션이 다시 derive 안 하고
+  바로 이어갈 수 있도록.
 
-What does NOT belong here:
+여기 들어가지 *않을* 것:
 
-- Commit messages, PR descriptions, or "what changed" summaries derivable
-  from `git log`.
-- Current task state — use TaskList.
-- Step-by-step debugging traces — those die with the bug; only the
-  takeaway-level conclusion is worth preserving.
+- 커밋 메시지·PR 설명·`git log`로 derivable한 "무엇이 바뀌었나" 요약.
+- 현재 태스크 상태 — TaskList를 사용.
+- 단계별 디버깅 trace — 버그와 함께 죽음. 결론 수준의 takeaway만 기록
+  가치 있음.
 
-## File layout
+## 파일 구성
 
-- One file per session / material decision, named `YYYY-MM-DD[-slug].md`.
-- Entries are additive — amend a prior entry only to correct a factual
-  error, not to reflect changed opinions (write a new entry instead).
+- 세션·핵심 결정 단위로 한 파일, 이름은 `YYYY-MM-DD[-slug].md`.
+- 엔트리는 추가형 — 사실 오류 정정 외 amend 금지 (의견 변화는 새
+  엔트리로 기록).
 
-## Entry template
-
-```markdown
-# YYYY-MM-DD — short title
-
-**Context**: one paragraph, why we were working on this.
-
-**Decision / Finding**: the durable bit.
-
-**Why**: tradeoffs considered; alternatives rejected and why.
-
-**Consequence**: what now depends on this — the "if this changes, these
-things must be revisited" list.
-
-**Open questions**: anything deferred.
-```
-
-## Reverted-decision template
-
-When something gets built, validated, then thrown out, file a separate
-entry named `YYYY-MM-DD-<topic>-reverted.md`. Specifically:
+## 엔트리 템플릿
 
 ```markdown
-# YYYY-MM-DD — <thing> tried, reverted
+# YYYY-MM-DD — 짧은 제목
 
-**Context**: what motivated the attempt; which Open question it closes.
+**맥락**: 한 문단, 왜 이 작업을 하고 있었는지.
 
-**Built**: one paragraph on what shipped (and the commit that did,
-since reset).
+**결정 / 발견**: 영구적 부분.
 
-**Why reverted**: the axis the attempt failed on. Round-trip safety,
-LLM readability, scope creep — be specific about *which* goal it
-violated, not just "felt wrong".
+**이유**: 고려한 트레이드오프; 기각된 대안과 그 이유.
 
-**Decision**: the new resting state.
+**결과**: 이로 인해 무엇이 종속되는가 — "이게 바뀌면 다시 봐야 할 것"
+목록.
 
-**Consequence**: who else is affected; whether the reverted approach
-should ever be reconsidered (and under what condition).
-
-**Open**: what's left to figure out.
+**미해결 질문**: 보류된 것들.
 ```
 
-Reverts are valuable evidence — they prevent the same idea from being
-re-tried in a later session without the prior context. `2026-04-22-
-rowspan-marker-reverted.md` is the format reference.
+## 되돌림 결정 (Reverted) 템플릿
 
-## Live reference docs
+만들었다가 검증한 후 폐기한 경우, `YYYY-MM-DD-<주제>-reverted.md`
+이름으로 별도 엔트리. 구체적으로:
 
-For knowledge that accumulates across sessions (binary spec details,
-hwplib porting map, current session pointer), use `docs/memory/`
-instead of journal entries. Journal = "what we decided, when, and why";
-memory = "what is true now". Update memory when state changes; never
-amend it for opinion.
+```markdown
+# YYYY-MM-DD — <대상> 시도, 되돌림
+
+**맥락**: 시도를 촉발한 동기; 어떤 미해결 질문을 닫으려 했는지.
+
+**구현됨**: 무엇이 ship됐고 (이후 리셋됐다면) 어떤 커밋이었는지.
+
+**되돌린 이유**: 어떤 축에서 실패했는지. 라운드트립 안전성·LLM 가독성·
+스코프 비대 — "감"이 아니라 *어떤 목표*를 위반했는지 구체적으로.
+
+**결정**: 새 안정 상태.
+
+**결과**: 누가 영향을 받는지; 이 접근을 다시 시도해야 한다면 (그리고
+어떤 조건에서) 어떤지.
+
+**미해결**: 풀어야 할 것들.
+```
+
+되돌림은 가치 있는 증거 — 후속 세션이 동일한 아이디어를 prior context
+없이 재시도하는 걸 막아준다. `2026-04-22-rowspan-marker-reverted.md` 가
+포맷 레퍼런스.
+
+## 라이브 레퍼런스 문서
+
+세션 사이로 누적되는 지식 (binary 스펙 디테일, hwplib 포팅 맵, 현재
+세션 포인터)은 저널 엔트리가 아니라 `docs/memory/`를 사용. 저널 =
+"언제·왜 결정했나"; memory = "지금 무엇이 사실인가". 상태 변하면 memory
+업데이트; 의견으로 amend 절대 금지.

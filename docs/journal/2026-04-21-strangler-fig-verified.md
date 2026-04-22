@@ -1,6 +1,6 @@
 # 2026-04-21 — Strangler-fig pass-through: 실측 검증 완료
 
-## Context
+## 맥락
 
 앞선 엔트리(`2026-04-21-scope-and-strangler-fig.md`)에서 선택한 전략이 이론상
 성립하는지, 실제 HWP 파일에서도 성립하는지 확인이 필요했음. 사용자가
@@ -11,7 +11,7 @@
 - `test/260420-1. 연구개발계획서(서식)[TRL점프업 1단계]_대진대_수정_1430_fin.hwp`
   (5,144,576 B) — 실제 국가 R&D 계획서. 9개 임베디드 이미지 + 복잡한 표.
 
-## Finding
+## 발견
 
 **모든 스트림이 바이트 동일 수준 round-trip PASS.** 다이프 러너 결과:
 
@@ -42,7 +42,7 @@ test/260420-1. ...TRL점프업...대진대_수정_1430_fin   18 streams, all =
 
 3/3 PASS in 0.10s.
 
-## Why this matters
+## 이게 중요한 이유
 
 Strangler-fig 전략의 기본 가정 두 가지가 실측 검증됨:
 
@@ -59,7 +59,7 @@ Markdown export 나 렌더러가 작동하지 않음 — 타입드 인코더가 
 **각 타입드 인코더 PR의 수락 기준은 동일**: "round-trip 테스트 3개 모두
 초록 유지". 이것만 지키면 언제든 프로덕션 배포 가능한 상태를 보존.
 
-## Consequence
+## 결과
 
 - Fixture는 `test/*.hwp` 경로에 살고, `.gitignore`가 커밋 방지.
   `/test/.gitkeep` 으로 디렉토리만 추적.
@@ -67,7 +67,7 @@ Markdown export 나 렌더러가 작동하지 않음 — 타입드 인코더가 
 - Semi-auto 러너를 실행하면 (0.1초 이내 완료) 개발자가 저장할 때마다
   회귀 즉시 포착.
 
-## Open questions (carry-over + new)
+## 미해결 질문 (이월 + 신규)
 
 - 5 MB TRL 문서를 매 `cargo test`마다 메모리에 올리는 비용 용인 가능 범위?
   향후 fixture가 수십 개로 늘어나면 `#[ignore]` + 전용 CI job 분리 필요.

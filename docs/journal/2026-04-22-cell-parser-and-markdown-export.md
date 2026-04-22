@@ -1,25 +1,20 @@
-# 2026-04-22 — cell LIST_HEADER fix + Markdown export quality round
+# 2026-04-22 — cell LIST_HEADER 버그 수정 + 마크다운 export 품질 라운드
 
-**Context**: First end-to-end run of `hwp-to-md` on the TRL R&D
-form fixture (`260420-1. 연구개발계획서…fin.hwp`, 5 MB, 1648 paragraphs,
-53 tables incl. nested) surfaced two large-scale defects that no unit
-test had caught: every table cell coordinate was garbage
-(`[65024,11] span 36097×65025`), and once that was fixed every
-real-world table either dumped to a flat bullet list or rendered as a
-single 6 KB-wide row. Both classes of bug were addressed in a series
-of commits this session.
+**맥락**: scaffold 이후 첫 실문서 (TRL R&D 계획서) 변환 결과 검수. 어떤
+유닛 테스트도 잡지 못한 두 가지 대형 결함 발견: 모든 표 셀 좌표가 깨지고
+(`[65024,11] span 36097×65025`), 수정 후에는 실제 표 대부분이 bullet 리스트로
+덤프되거나 6KB짜리 한 줄로 평탄화됨. 두 종류의 버그를 이번 세션에서 모두
+처리.
 
-## Verified — hwplib `ListHeaderForCell` byte layout
+## 검증됨 — hwplib `ListHeaderForCell` 바이트 레이아웃
 
-Our `streams/list_header.rs::parse_cell` had assumed:
+`streams/list_header.rs::parse_cell` 에 두 가지 잘못된 가정 존재:
 
-  - a `u16` `paraCount` preamble (so an ~21-byte head before the cell
-    suffix), and
-  - a fixed 26-byte cell suffix consisting of col/row/span × 4
-    `u16` + width/height `u32` + 4 × padding `u16` + borderFillId.
+- `paraCount` 을 `u16` 으로 가정 → 실제는 `sInt4` (preamble이 21이 아니라 8 bytes)
+- `textWidth (uInt4)` 필드 누락 → fixed 영역이 26이 아니라 38 bytes
 
-Reading the canonical hwplib source
-(`reader/.../tbl/ForCell.java::listHeader`) showed the real layout is:
+hwplib `reader/.../tbl/ForCell.java::listHeader` 소스 읽기로 실제 레이아웃
+확인:
 
 ```
 sInt4  paraCount        (4)
@@ -29,110 +24,75 @@ uInt4  width / height                                   (2 × 4 = 8)
 uInt2  leftMargin / rightMargin / topMargin / bottomMargin  (8)
 uInt2  borderFillId     (2)
 uInt4  textWidth        (4)
-                                              (38 bytes fixed)
+                                                  (38 bytes 고정)
 [opt]  uInt1 fieldNameFlag (0xff → ParameterSet) + 8-byte zero pad
 ```
 
-— `paraCount` is `sInt4`, not `u16`; preamble is **8 bytes**, not 21.
-The fixed region is **38 bytes** (we were missing `textWidth`). And the
-trailing `flag + ParameterSet + 8-byte zero pad` (always emitted by
-hwplib's writer) makes the previous "read from the end of the record"
-strategy unsafe — the suffix landed inside the trailer, producing the
-~1-byte-shifted garbage we observed.
+끝에서 자르는 전략이 unsafe한 이유: hwplib writer는 항상 `flag(1B) + 8B zero
+pad` trailing을 붙임 (fieldName 없을 때 47 bytes 총). offset-from-start로
+재작성.
 
-The fix re-reads from offset 0 with the canonical layout.
+**결과**: `TableCell` IR에 `para_count`, `property`, `text_width_hwpu` 필드
+추가. `parses_47_byte_cell_with_trailer` 회귀 테스트로 trailer 내성 고정.
 
-**Consequence**: The same offset-from-end trap likely exists in our
-yet-unwritten readers for the other LIST_HEADER variants (footnote,
-endnote, header, footer, text-box). When wiring those, port the
-canonical writer/reader pair from hwplib and parse from the start.
+## 결정 — 마크다운 export 표 분류 휴리스틱
 
-## Verified — Hancom PUA bullet ranges
+`emit_table` 에서 top-down 순서로 확인:
 
-한컴 fonts encode `①..⑳` (and likely several other enumeration glyphs)
-as PUA codepoints. We expected only the BMP range `U+F2B1+`, but the
-TRL fixture's `① 과제 개요` actually arrived as `U+F02B1` —
-**Supplementary PUA-A** (U+F0000+). Both ranges encode the same glyphs
-at the same offsets:
+1. `try_unwrap_wrapper_table` — 본문 텍스트 없이 nested table 하나만 있는
+   1×1. wrapper를 strip하고 inner를 동일 depth에서 재귀.
+2. `try_table_as_heading` — 비어있지 않은 셀 1개, 짧은 한 줄,
+   `<숫자>. ` prefix (→ `##`) 또는 `(...) ` prefix (→ `###`).
+3. `try_table_as_passage` (top-level 전용) — 단일 행, 비어있지 않은 셀
+   1개, space-join 후 ≤ 100자, controls 없음. 일반 산문으로 emit.
+4. `try_build_md_grid` — 모든 `row_span == 1`; 셀이 (col_span 확장 후)
+   겹침·구멍 없이 grid를 채움; nested table 없음. MD grid로 emit.
+5. 그 외 → `emit_table_as_list`. bullet 경로에서:
+   - 같은 row의 unspanned 빈 셀 연속은 `[r,c1..c2]: (empty)` 로 압축;
+   - join 결과 ≤ 200자면 ` · ` 인라인, 초과하면 paragraph당 `  - …`
+     sub-bullet.
 
-  - `U+F02B1..U+F02C4` → `U+2460..U+2473` (`①..⑳`)
-  - `U+F2B1..U+F2C4`   → same
+세 개의 숫자 임계값 (80 / 100 / 200 chars) 은 이 fixture 하나 기준으로 조정.
 
-The supplementary range is what newer hwp.exe emits; the BMP form is
-in older docs. Both should be normalised in `clean_text` so the result
-survives outside HCR Dotum / Batang.
+**이유**: 보수적-후 허용 방향. 이른 exit (unwrap / heading / passage) 는 표
+추상화를 완전히 버리므로 조건이 가장 엄격. grid 경로는 GFM이 표현 가능할 때
+table-ness를 유지. bullet 경로는 데이터 손실 없이 나머지를 처리 — 빈 범위
+압축과 길이 인식 inline/explode 쌍은 이전 형태 (모든 빈 셀 별도 줄, 또는 모든
+내러티브를 ` · ` 한 줄로 평탄화) 의 노이즈 문제를 없앤다.
 
-**Open question**: There are likely Hancom PUA codepoints for other
-enumeration styles (`㉠..㉭`, `㊀..㊉`, parenthesised `⑴..⒇`, etc.).
-Discovery is fixture-driven — when one shows up as tofu, look at its
-codepoint, find the corresponding standard glyph, extend the
-translator. No comprehensive table is publicly documented.
+**결과**: 임계값은 corpus-of-one. 다음 fixture에서 재평가.
 
-## Decision — table classification heuristic for Markdown export
+## 검증됨 — 한컴 PUA 글머리표 범위
 
-Final dispatch order in `emit_table`, all conditions checked top-down:
+한컴 폰트는 `①..⑳` (그리고 다른 열거 글리프) 를 PUA codepoint로 인코딩;
+HCR Dotum / Batang 외에서는 tofu로 표시됨. BMP 범위 `U+F2B1+` 만 있을 것이라
+예상했으나 TRL fixture의 `① 과제 개요` 는 실제로 **Supplementary PUA-A**
+`U+F02B1` 로 도착. 두 범위가 동일 offset에서 같은 글리프를 인코딩:
 
-  1. `try_unwrap_wrapper_table` — 1×1 with no body text + exactly one
-     nested Table. Strip the wrapper; recurse into the inner at the
-     same depth.
-  2. `try_table_as_heading` — exactly one non-empty cell, single short
-     line ≤ 80 chars, prefix matches `<digits>. ` (→ `##`) or
-     `(...) ` (→ `###`).
-  3. `try_table_as_passage` (top-level only) — single row, exactly one
-     non-empty cell, ≤ 100 chars after joining paragraphs with spaces,
-     no controls. Emit as plain prose.
-  4. `try_build_md_grid` — every `row_span == 1`; cells (after
-     expanding `col_span` with empty siblings) tile the grid without
-     overlaps or holes; no nested tables. Emit as MD grid.
-  5. Otherwise → `emit_table_as_list`. In the bullet path:
-     - runs of unspanned empty cells in the same row collapse into
-       `[r,c1..c2]: (empty)`;
-     - cell text inlines with ` · ` if joined length ≤ 200 chars,
-       else explodes into nested `  - …` sub-bullets per paragraph.
+- `U+F02B1..U+F02C4` → `U+2460..U+2473` (`①..⑳`)
+- `U+F2B1..U+F2C4`   → 동일
 
-Three numeric thresholds (80 / 100 / 200 chars) were tuned against
-this single fixture only.
+Supplementary 범위가 최신 hwp.exe 출력; BMP 형태는 구 문서.
 
-**Why this shape**: Conservative-then-permissive. Each early-exit
-(unwrap / heading / passage) discards the table abstraction entirely,
-so they have the strictest predicates. The grid path preserves
-table-ness when GFM can express it (no rowspan, no holes). The bullet
-path handles everything else without losing data — its empty-range
-collapse and length-aware inline/explode pair existed in earlier forms
-that either drowned in noise (every empty cell on its own line) or
-flattened narrative copy (the §2 box of this fixture used to render
-as one ~6 KB-wide ` · `-joined line).
+**미해결 질문**: `㉠..㉭`, 괄호형 `⑴..⒇` 등 추가 PUA 매핑은 fixture-driven
+발견 방식 — 나타나면 추가.
 
-**Consequence**: The thresholds are corpus-of-one. The next fixture we
-add (especially anything academic — KSII, Springer Korean templates)
-should re-evaluate.
+## 미해결 — row_span > 1 → bullet 경로; lossy-but-readable 대안 미탐색
 
-## Open — row_span > 1 forces bullet path; lossy-but-readable
-alternative not yet explored
+GFM은 rowspan을 지원하지 않아서 세로 병합 셀이 있으면 표 전체가 bullet로
+가버림. TRL fixture에서 가장 명확한 피해자는 §1 12×6 개요 표: `[8,0] span
+2×1` 단 하나 때문에 12×6 전체가 bullet.
 
-GFM has no rowspan, so any vertically merged cell currently routes
-through the bullet path even when the rest of the table would render
-cleanly as a grid. On the TRL fixture the §1 12×6 form table is the
-clearest victim: only one cell (`[8,0] span 2×1: 개발 방법`) has
-`row_span=2`, but that's enough to push the entire 12×6 onto the
-bullet path.
+후보 접근:
+- 병합 텍스트를 모든 row에 복제 (lossy: 레이블 시각 중복, 그러나 표 표시 가능)
+- 방향 마커 `↑` / `←` / `↖` 으로 extension 채우기 (lossy: 병합 정보
+  시각화되지만 원본 md → hwp 역방향에서 재병합 어려움)
 
-Two viable approaches:
+실제 시도됨 (커밋 `7c6f81a`, 이후 reset) — `2026-04-22-rowspan-marker-
+reverted.md` 참고.
 
-  - Expand row_span by repeating the merged text in every covered row
-    (lossy: visually duplicates the label, but the table renders).
-  - Expand row_span by emitting the text once and filling the lower
-    rows with ` ↑ ` or empty (lossy: viewer can't tell whether the
-    blank means merged or genuinely empty).
+## 미해결 — 단일 fixture corpus
 
-Decision deferred until we see whether the bullet rendering of large
-form tables is actually a problem in user-facing previews — for raw
-Markdown export it may be acceptable.
-
-## Open — single-fixture corpus
-
-Round-trip and quality verification ride on one HWP file. Adding a
-second fixture with a different style (free-form long-form, heavy
-images, equation-heavy academic, password-protected) would be the
-fastest way to find the next class of bug. The journal's earlier
-`fixture_tables_populate_from_trl` is the template.
+라운드트립·품질 검증이 HWP 파일 1개에 의존. 두 번째 fixture (자유 서식
+장문, 이미지 집중, 수식 집중, 암호화 문서) 를 추가하면 다음 버그 분류를 가장
+빠르게 찾을 수 있음.
