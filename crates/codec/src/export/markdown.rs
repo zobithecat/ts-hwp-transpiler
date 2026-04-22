@@ -51,6 +51,13 @@ fn emit_paragraph(doc: &IrDocument, para: &Paragraph, out: &mut String, depth: u
 }
 
 fn emit_table(doc: &IrDocument, t: &TableControl, out: &mut String, depth: usize) {
+    if let Some(inner) = try_unwrap_wrapper_table(t) {
+        // Pure decorative wrapper (1×1 with one nested table, no own
+        // text). Skip the outer frame — emit the inner directly at the
+        // same depth so it doesn't gain a useless extra indent.
+        emit_table(doc, inner, out, depth);
+        return;
+    }
     if let Some((level, text)) = try_table_as_heading(t) {
         out.push_str(&"#".repeat(level as usize));
         out.push(' ');
@@ -63,6 +70,41 @@ fn emit_table(doc: &IrDocument, t: &TableControl, out: &mut String, depth: usize
     } else {
         emit_table_as_list(doc, t, out, depth);
     }
+}
+
+/// Detect a "decorative wrapper" 1×1 table: one cell, no body text, and
+/// exactly one inline table as the only control. HWP often nests a real
+/// table inside such a wrapper to inherit a border/background style; for
+/// us the wrapper just adds a useless `- [0,0]:` line and indent depth.
+fn try_unwrap_wrapper_table(t: &TableControl) -> Option<&TableControl> {
+    if t.cells.len() != 1 {
+        return None;
+    }
+    let cell = &t.cells[0];
+    if cell.paragraphs.iter().any(|p| !clean_text(&p.text).is_empty()) {
+        return None;
+    }
+    let mut nested: Option<&TableControl> = None;
+    for p in &cell.paragraphs {
+        for c in &p.controls {
+            match &c.kind {
+                ControlKind::Table(inner) => {
+                    if nested.is_some() {
+                        return None;
+                    }
+                    nested = Some(inner);
+                }
+                // Tolerate opaque inline markers (CTRL_HEADER codes we
+                // haven't typed yet — anchors, page breaks, etc.); they
+                // don't carry user-visible content. Reject anything we
+                // *do* know about (Picture / Equation) since dropping
+                // those would lose data.
+                ControlKind::Unknown { .. } => {}
+                _ => return None,
+            }
+        }
+    }
+    nested
 }
 
 /// Detect HWP's "decorative box heading" pattern: a table with exactly one
@@ -730,6 +772,70 @@ mod tests {
             !md.contains("- [0,0]: ○ 첫 번째"),
             "long passage must not be inlined: {md}"
         );
+    }
+
+    #[test]
+    fn empty_1x1_wrapper_table_is_unwrapped() {
+        // Outer 1×1 with no body text + one nested table. The wrapper
+        // would normally print `- [0,0]:` and indent everything below it
+        // by one level — pure visual noise. Strip it.
+        let inner = TableControl {
+            rows: 1, cols: 1, row_cell_counts: vec![1],
+            cells: vec![cell(0, 0, "real content")],
+            ..TableControl::default()
+        };
+        let outer = TableControl {
+            rows: 1, cols: 1, row_cell_counts: vec![1],
+            cells: vec![TableCell {
+                col: 0, row: 0, col_span: 1, row_span: 1,
+                paragraphs: vec![Paragraph {
+                    controls: vec![Control {
+                        kind: ControlKind::Table(inner),
+                    }],
+                    ..Paragraph::default()
+                }],
+                ..TableCell::default()
+            }],
+            ..TableControl::default()
+        };
+        let doc = make_doc(vec![style("본문")], vec![para_with_table(outer)]);
+        let md = to_markdown(&doc);
+        // Inner cell text appears at the top level — no `[0,0]:` wrapper
+        // line, no nested-indent indent.
+        assert!(md.contains("| real content |"), "got: {md}");
+        assert!(!md.contains("- [0,0]:"), "wrapper must be stripped: {md}");
+    }
+
+    #[test]
+    fn wrapper_with_text_is_not_unwrapped() {
+        // 1×1 cell that has its own body text alongside a nested table —
+        // the text would be lost if we unwrapped, so keep the wrapper.
+        let inner = TableControl {
+            rows: 1, cols: 1, row_cell_counts: vec![1],
+            cells: vec![cell(0, 0, "inner")],
+            ..TableControl::default()
+        };
+        let outer = TableControl {
+            rows: 1, cols: 1, row_cell_counts: vec![1],
+            cells: vec![TableCell {
+                col: 0, row: 0, col_span: 1, row_span: 1,
+                paragraphs: vec![
+                    para(0, "outer caption"),
+                    Paragraph {
+                        controls: vec![Control {
+                            kind: ControlKind::Table(inner),
+                        }],
+                        ..Paragraph::default()
+                    },
+                ],
+                ..TableCell::default()
+            }],
+            ..TableControl::default()
+        };
+        let doc = make_doc(vec![style("본문")], vec![para_with_table(outer)]);
+        let md = to_markdown(&doc);
+        assert!(md.contains("outer caption"), "outer text must survive: {md}");
+        assert!(md.contains("inner"));
     }
 
     #[test]
