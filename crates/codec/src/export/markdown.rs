@@ -51,54 +51,143 @@ fn emit_paragraph(doc: &IrDocument, para: &Paragraph, out: &mut String, depth: u
 }
 
 fn emit_table(doc: &IrDocument, t: &TableControl, out: &mut String, depth: usize) {
-    if is_simple_table(t) {
-        emit_md_table(doc, t, out);
+    if let Some((level, text)) = try_table_as_heading(t) {
+        out.push_str(&"#".repeat(level as usize));
+        out.push(' ');
+        out.push_str(&text);
+        out.push_str("\n\n");
+        return;
+    }
+    if let Some(grid) = try_build_md_grid(t) {
+        emit_md_grid(&grid, out);
     } else {
         emit_table_as_list(doc, t, out, depth);
     }
 }
 
-/// A table is "simple" when it maps cleanly to Markdown syntax: rectangular
-/// grid, no merged cells, no nested tables, cells contain at most one
-/// paragraph (since MD cells are one line).
-fn is_simple_table(t: &TableControl) -> bool {
-    if t.rows as usize * t.cols as usize != t.cells.len() {
-        return false;
+/// Detect HWP's "decorative box heading" pattern: a table with exactly one
+/// non-empty cell whose text is a single short line beginning with a numeric
+/// prefix (`1. ...`) or parenthetical (`(1) ...`). This is how 한컴 documents
+/// typically render top-level section headers — borders + padded box around
+/// the title — and the only signal we have without DocInfo style names.
+fn try_table_as_heading(t: &TableControl) -> Option<(u8, String)> {
+    let non_empty: Vec<&TableCell> = t
+        .cells
+        .iter()
+        .filter(|c| c.paragraphs.iter().any(|p| !clean_text(&p.text).is_empty()))
+        .collect();
+    if non_empty.len() != 1 {
+        return None;
     }
-    for cell in &t.cells {
-        if cell.col_span != 1 || cell.row_span != 1 {
-            return false;
+    let cell = non_empty[0];
+    if cell.paragraphs.len() != 1 {
+        return None;
+    }
+    let para = &cell.paragraphs[0];
+    if !para.controls.is_empty() {
+        return None;
+    }
+    let text = clean_text(&para.text);
+    if text.is_empty() || text.contains('\n') || text.chars().count() > 80 {
+        return None;
+    }
+    let level = heading_level_from_prefix(&text)?;
+    Some((level, text))
+}
+
+/// Map "1. X" → ##, "(1) X" → ###. Returns `None` when no prefix matches —
+/// that's intentional: we'd rather miss a heading than promote arbitrary
+/// short box text to a section break.
+fn heading_level_from_prefix(s: &str) -> Option<u8> {
+    let s = s.trim_start();
+
+    if let Some(idx) = s.find('.') {
+        let head = &s[..idx];
+        let after = &s[idx + '.'.len_utf8()..];
+        if !head.is_empty()
+            && head.chars().all(|c| c.is_ascii_digit())
+            && after.starts_with(' ')
+        {
+            return Some(2);
         }
-        if cell.paragraphs.len() > 1 {
-            return false;
-        }
-        for p in &cell.paragraphs {
-            for c in &p.controls {
-                if matches!(&c.kind, ControlKind::Table(_)) {
-                    return false;
-                }
+    }
+
+    if let Some(rest) = s.strip_prefix('(') {
+        if let Some(end) = rest.find(") ") {
+            let inside = &rest[..end];
+            if !inside.is_empty()
+                && inside
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || ('가'..='힣').contains(&c))
+            {
+                return Some(3);
             }
         }
     }
-    true
+
+    None
 }
 
-fn emit_md_table(doc: &IrDocument, t: &TableControl, out: &mut String) {
+/// Try to fold a table into a Markdown grid. Succeeds when:
+///
+///   - all `row_span` are 1 (GFM has no rowspan, so any vertical merge
+///     forces the bullet path),
+///   - cells (after expanding `col_span`) tile the grid without overlaps
+///     and without holes,
+///   - no cell contains a nested table (those need their own block).
+///
+/// Returns the rectangular grid; merged-cell extents are filled with empty
+/// strings so the row still has the right column count.
+fn try_build_md_grid(t: &TableControl) -> Option<Vec<Vec<String>>> {
     let rows = t.rows as usize;
     let cols = t.cols as usize;
     if rows == 0 || cols == 0 {
-        return;
+        return None;
     }
-    let mut grid: Vec<Vec<String>> = vec![vec![String::new(); cols]; rows];
+    let mut grid: Vec<Vec<Option<String>>> = vec![vec![None; cols]; rows];
     for cell in &t.cells {
+        if cell.row_span != 1 {
+            return None;
+        }
         let r = cell.row as usize;
         let c = cell.col as usize;
-        if r < rows && c < cols {
-            grid[r][c] = md_cell_content(doc, cell);
+        let cs = (cell.col_span as usize).max(1);
+        if r >= rows || c + cs > cols {
+            return None;
+        }
+        for p in &cell.paragraphs {
+            for ctrl in &p.controls {
+                if matches!(&ctrl.kind, ControlKind::Table(_)) {
+                    return None;
+                }
+            }
+        }
+        let text = cell_text_inline(cell);
+        if grid[r][c].replace(text).is_some() {
+            return None;
+        }
+        for k in 1..cs {
+            if grid[r][c + k].replace(String::new()).is_some() {
+                return None;
+            }
         }
     }
+    let mut full: Vec<Vec<String>> = Vec::with_capacity(rows);
+    for row in grid {
+        let mut new_row = Vec::with_capacity(cols);
+        for col in row {
+            new_row.push(col?);
+        }
+        full.push(new_row);
+    }
+    Some(full)
+}
 
-    // First row as header (Markdown tables always have one).
+fn emit_md_grid(grid: &[Vec<String>], out: &mut String) {
+    if grid.is_empty() || grid[0].is_empty() {
+        return;
+    }
+    let cols = grid[0].len();
     write_row(&grid[0], out);
     out.push('|');
     for _ in 0..cols {
@@ -121,23 +210,16 @@ fn write_row(row: &[String], out: &mut String) {
     out.push('\n');
 }
 
-fn md_cell_content(_doc: &IrDocument, cell: &TableCell) -> String {
+/// Inline form of a cell's paragraphs, suitable for a single MD table cell:
+/// paragraphs joined with spaces, pipes/newlines escaped.
+fn cell_text_inline(cell: &TableCell) -> String {
     let mut text = String::new();
     for (i, p) in cell.paragraphs.iter().enumerate() {
         if i > 0 {
             text.push(' ');
         }
         text.push_str(&clean_text(&p.text));
-        // Nested tables inside a cell force the complex path — they won't
-        // actually reach this function because `is_simple_table` filters
-        // them out. But be defensive: if they do, mark them.
-        for c in &p.controls {
-            if matches!(&c.kind, ControlKind::Table(_)) {
-                text.push_str(" [nested-table]");
-            }
-        }
     }
-    // Escape MD table-specific characters.
     text.replace('|', "\\|").replace('\n', " ")
 }
 
@@ -338,11 +420,73 @@ mod tests {
     }
 
     #[test]
-    fn ragged_table_emits_bullet_list() {
+    fn box_table_with_numeric_prefix_becomes_heading() {
+        // 1×2 simple table where only the first cell has text — the very
+        // common HWP pattern for top-level section titles.
+        let t = TableControl {
+            rows: 1,
+            cols: 2,
+            row_cell_counts: vec![2],
+            cells: vec![
+                cell(0, 0, "1. 기술개발 목표"),
+                cell(1, 0, ""),
+            ],
+            ..TableControl::default()
+        };
+        let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
+        assert_eq!(to_markdown(&doc), "## 1. 기술개발 목표\n");
+    }
+
+    #[test]
+    fn box_table_with_paren_prefix_becomes_subheading() {
+        let t = TableControl {
+            rows: 1, cols: 1, row_cell_counts: vec![1],
+            cells: vec![cell(0, 0, "(1) 선행연구개발 이력")],
+            ..TableControl::default()
+        };
+        let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
+        assert_eq!(to_markdown(&doc), "### (1) 선행연구개발 이력\n");
+    }
+
+    #[test]
+    fn box_table_with_long_body_stays_a_table() {
+        // 1×1 ragged with multi-line body — the "blockquote-like" usage,
+        // not a heading. Should NOT collapse to ##.
+        let t = TableControl {
+            rows: 1, cols: 1, row_cell_counts: vec![1],
+            cells: vec![cell(
+                0, 0,
+                "○ 첫째 항목 ○ 둘째 항목 ○ 셋째 항목 ○ 넷째 항목 ○ 다섯째 항목 더 길게 길게",
+            )],
+            ..TableControl::default()
+        };
+        let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
+        let md = to_markdown(&doc);
+        assert!(!md.starts_with("## "), "long body must not become heading: {md:?}");
+    }
+
+    #[test]
+    fn box_table_without_numeric_prefix_stays_a_table() {
+        let t = TableControl {
+            rows: 1, cols: 1, row_cell_counts: vec![1],
+            cells: vec![cell(0, 0, "그냥 평범한 짧은 문구")],
+            ..TableControl::default()
+        };
+        let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
+        let md = to_markdown(&doc);
+        assert!(!md.starts_with("## "), "no prefix must not promote to heading");
+        assert!(!md.starts_with("### "));
+    }
+
+    #[test]
+    fn colspan_only_table_collapses_into_md_grid() {
+        // row 0 is one merged 1×3 header; row 1 has three plain cells.
+        // GFM has no colspan, so the merge widens the first column with
+        // empty siblings — the table still parses correctly downstream.
         let t = TableControl {
             rows: 2,
             cols: 3,
-            row_cell_counts: vec![1, 3], // row 0 has 1 merged cell
+            row_cell_counts: vec![1, 3],
             cells: vec![
                 TableCell {
                     col: 0, row: 0, col_span: 3, row_span: 1,
@@ -357,10 +501,51 @@ mod tests {
         };
         let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
         let md = to_markdown(&doc);
-        assert!(md.contains("<!-- table 2×3"));
-        assert!(md.contains("- [0,0] span 1×3: merged header"));
-        assert!(md.contains("- [1,0]: x"));
-        assert!(md.contains("- [1,2]: z"));
+        assert!(md.contains("| merged header |  |  |"), "got: {md}");
+        assert!(md.contains("| --- | --- | --- |"));
+        assert!(md.contains("| x | y | z |"));
+    }
+
+    #[test]
+    fn rowspan_table_falls_back_to_bullets() {
+        // Any row_span > 1 forces the bullet path because GFM cannot
+        // express vertical merges.
+        let t = TableControl {
+            rows: 2,
+            cols: 2,
+            row_cell_counts: vec![1, 1],
+            cells: vec![
+                TableCell {
+                    col: 0, row: 0, col_span: 1, row_span: 2,
+                    paragraphs: vec![para(0, "vmerged")],
+                    ..TableCell::default()
+                },
+                cell(1, 0, "a"),
+                cell(1, 1, "b"),
+            ],
+            ..TableControl::default()
+        };
+        let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
+        let md = to_markdown(&doc);
+        assert!(md.contains("<!-- table 2×2"), "got: {md}");
+        assert!(md.contains("- [0,0] span 2×1: vmerged"));
+    }
+
+    #[test]
+    fn ragged_table_with_holes_falls_back_to_bullets() {
+        // 2×2 declared but only 2 cells exist (row 1 is missing entirely).
+        // Without a way to express "no cell here", we must NOT fabricate
+        // empty rows in the MD grid — fall back to bullets so the gap is
+        // visible to the reader.
+        let t = TableControl {
+            rows: 2, cols: 2,
+            row_cell_counts: vec![2, 0],
+            cells: vec![cell(0, 0, "a"), cell(1, 0, "b")],
+            ..TableControl::default()
+        };
+        let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
+        let md = to_markdown(&doc);
+        assert!(md.contains("<!-- table 2×2"));
     }
 
     #[test]
