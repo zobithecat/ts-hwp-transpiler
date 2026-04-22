@@ -293,12 +293,30 @@ fn emit_cell_line(
     }
     out.push(':');
 
-    let inline = cell_text_for_bullet(cell);
-    if !inline.is_empty() {
-        out.push(' ');
-        out.push_str(&inline);
+    let lines = cell_text_lines(cell);
+    if lines.is_empty() {
+        out.push('\n');
+    } else {
+        let inline = lines.join(" · ");
+        // Inline ` · `-joined form when the cell is short enough that the
+        // structure is obvious at a glance. For long passages — typical of
+        // 한컴's "wrap a whole section in a 1×1 box" pattern — emit each
+        // paragraph as its own sub-bullet so headings like `○`, `-`, and
+        // numbered lists inside the cell remain visible.
+        if lines.len() == 1 || inline.chars().count() <= INLINE_CELL_LIMIT {
+            out.push(' ');
+            out.push_str(&inline);
+            out.push('\n');
+        } else {
+            out.push('\n');
+            for line in &lines {
+                out.push_str(indent);
+                out.push_str("  - ");
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
     }
-    out.push('\n');
 
     for p in &cell.paragraphs {
         for c in &p.controls {
@@ -309,6 +327,8 @@ fn emit_cell_line(
     }
 }
 
+const INLINE_CELL_LIMIT: usize = 200;
+
 fn is_simple_empty_cell(cell: &TableCell) -> bool {
     cell.col_span == 1
         && cell.row_span == 1
@@ -317,19 +337,15 @@ fn is_simple_empty_cell(cell: &TableCell) -> bool {
         })
 }
 
-/// Single-line representation of a cell's text for the bullet path:
-/// paragraphs joined with ` · ` (middle dot, common Korean enumerator),
-/// intra-paragraph newlines flattened to spaces. Without this, multi-line
-/// cell text breaks out of the list item — CommonMark only treats the
-/// continuation as part of the bullet when it's indented under the marker,
-/// which our raw paragraph emit didn't preserve.
-fn cell_text_for_bullet(cell: &TableCell) -> String {
+/// Per-paragraph text for a cell, with intra-paragraph newlines flattened
+/// to spaces and empty paragraphs dropped. Used by the bullet path to
+/// decide between inline ` · ` joining and nested sub-bullets.
+fn cell_text_lines(cell: &TableCell) -> Vec<String> {
     cell.paragraphs
         .iter()
         .map(|p| clean_text(&p.text).replace('\n', " "))
         .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join(" · ")
+        .collect()
 }
 
 fn heading_level(doc: &IrDocument, para: &Paragraph) -> Option<u8> {
@@ -669,6 +685,51 @@ mod tests {
         assert!(md.contains("- [0,0] span 2×1: 1차 · 예비 · 연구"), "got: {md}");
         // Old broken form (raw newlines) must not reappear.
         assert!(!md.contains("- [0,0] span 2×1: 1차\n예비"), "got: {md}");
+    }
+
+    #[test]
+    fn long_cell_text_breaks_into_sub_bullets() {
+        // HWP "section-in-a-box" pattern: a table cell holds many
+        // paragraphs of body copy. ` · ` inlining would flatten them into
+        // one massive line and erase the structure (○, -, etc.) inside.
+        // We force the bullet path here with a row_span=2 sibling so the
+        // long-cell heuristic actually runs.
+        let long = "이것은 비교적 긴 한 단락의 본문이며 가운데 아주 많은 글자를 가지고 있어서 임계치 200자에 도달하기 위한 충분한 길이를 확보합니다.";
+        let t = TableControl {
+            rows: 2, cols: 2, row_cell_counts: vec![2, 1],
+            cells: vec![
+                TableCell {
+                    col: 0, row: 0, col_span: 1, row_span: 1,
+                    paragraphs: vec![
+                        para(0, "○ 첫 번째 단락"),
+                        para(0, long),
+                        para(0, long),
+                        para(0, long),
+                        para(0, long),
+                        para(0, "○ 마지막 단락"),
+                    ],
+                    ..TableCell::default()
+                },
+                // row_span=2 sibling forces the whole table to bullets.
+                TableCell {
+                    col: 1, row: 0, col_span: 1, row_span: 2,
+                    paragraphs: vec![para(0, "side")],
+                    ..TableCell::default()
+                },
+                cell(0, 1, "next"),
+            ],
+            ..TableControl::default()
+        };
+        let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
+        let md = to_markdown(&doc);
+        assert!(md.contains("- [0,0]:\n"), "got: {md}");
+        assert!(md.contains("  - ○ 첫 번째 단락\n"), "got: {md}");
+        assert!(md.contains("  - ○ 마지막 단락\n"), "got: {md}");
+        // The inline form (` · `-joined into one line) must not appear.
+        assert!(
+            !md.contains("- [0,0]: ○ 첫 번째"),
+            "long passage must not be inlined: {md}"
+        );
     }
 
     #[test]
