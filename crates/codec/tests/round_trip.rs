@@ -94,6 +94,23 @@ fn trl_bin_data_populates_typed_slot() {
     for entry in &doc.bin_data {
         assert!(!entry.id.is_empty(), "binary entry missing id");
         assert!(!entry.bytes.is_empty(), "binary entry {} empty", entry.id);
+        // Anything with a recognised image extension should have its
+        // mime resolved by the reader (Phase 1.5). Storage-type entries
+        // without an extension are allowed to be `None`.
+        if entry.id.contains('.') {
+            let ext = entry.id.rsplit_once('.').unwrap().1.to_ascii_lowercase();
+            if matches!(
+                ext.as_str(),
+                "png" | "jpg" | "jpeg" | "gif" | "bmp" | "tif" | "tiff"
+                    | "webp" | "svg" | "wmf" | "emf"
+            ) {
+                assert!(
+                    entry.mime.is_some(),
+                    "expected mime for {} (ext={ext})",
+                    entry.id
+                );
+            }
+        }
     }
     for path in doc.unknown_streams.keys() {
         assert!(

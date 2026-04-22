@@ -66,11 +66,8 @@ impl Reader for HwpReader {
             }
 
             if let Some(id) = bin_data_id_from_path(&path) {
-                doc.bin_data.push(BinaryEntry {
-                    id,
-                    mime: None, // populated by Phase 2 from extension
-                    bytes,
-                });
+                let mime = mime_from_id(&id).map(String::from);
+                doc.bin_data.push(BinaryEntry { id, mime, bytes });
                 continue;
             }
 
@@ -114,6 +111,63 @@ fn bin_data_id_from_path(path: &str) -> Option<String> {
         return None;
     }
     Some(rest.to_owned())
+}
+
+/// Best-effort MIME guess from a `/BinData/<id>` filename's extension.
+/// Covers the formats hwp.exe actually embeds (PNG/JPEG dominant, plus
+/// the legacy WMF/EMF vector formats and a handful of others). Returns
+/// `None` for unknown or extension-less ids — caller's responsibility to
+/// decide what to do (Phase-2 markdown export will fall back to a
+/// generic `application/octet-stream` for `<img>` rendering).
+fn mime_from_id(id: &str) -> Option<&'static str> {
+    let ext = id.rsplit_once('.')?.1.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        "tif" | "tiff" => "image/tiff",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "wmf" => "image/wmf",
+        "emf" => "image/emf",
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{bin_data_id_from_path, mime_from_id};
+
+    #[test]
+    fn mime_from_known_extensions() {
+        assert_eq!(mime_from_id("BIN0001.png"), Some("image/png"));
+        assert_eq!(mime_from_id("BIN0002.JPG"), Some("image/jpeg")); // case-insensitive
+        assert_eq!(mime_from_id("BIN0003.jpeg"), Some("image/jpeg"));
+        assert_eq!(mime_from_id("BIN0004.bmp"), Some("image/bmp"));
+        assert_eq!(mime_from_id("BIN0005.wmf"), Some("image/wmf"));
+        assert_eq!(mime_from_id("BIN0006.emf"), Some("image/emf"));
+    }
+
+    #[test]
+    fn mime_unknown_extension_returns_none() {
+        assert_eq!(mime_from_id("BIN0001.ole"), None);
+        assert_eq!(mime_from_id("BIN0001.xyz"), None);
+        assert_eq!(mime_from_id("BIN0001"), None); // no extension
+        assert_eq!(mime_from_id(""), None);
+    }
+
+    #[test]
+    fn bin_data_id_strips_prefix_and_rejects_subpaths() {
+        assert_eq!(
+            bin_data_id_from_path("/BinData/BIN0001.png"),
+            Some("BIN0001.png".into())
+        );
+        assert_eq!(bin_data_id_from_path("/BinData/"), None); // empty
+        assert_eq!(bin_data_id_from_path("/BinData/sub/x.png"), None); // nested
+        assert_eq!(bin_data_id_from_path("/Other/BIN0001.png"), None); // wrong prefix
+        assert_eq!(bin_data_id_from_path("/DocInfo"), None);
+    }
 }
 
 fn populate_document_properties(info: &mut DocInfo) -> Result<(), IrError> {
