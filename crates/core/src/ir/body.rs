@@ -177,9 +177,13 @@ pub struct EquationControl {
     pub size_hwpu: i32,
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct PictureControl {
-    pub bin_id: String,
+    /// `binItemID` from the picture's `SHAPE_COMPONENT_PICTURE` record's
+    /// `PictureInfo` block. Cross-references `DocInfo.bin_data[i]
+    /// .bin_data_id` to find the matching `/BinData/BIN<id>.<ext>` entry
+    /// in `IrDocument.bin_data`.
+    pub bin_id: u16,
     pub width_hwpu: u32,
     pub height_hwpu: u32,
 }

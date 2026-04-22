@@ -74,6 +74,53 @@ fn fixture_path(name: &str) -> PathBuf {
         .join(name)
 }
 
+/// `body_text::parse_paragraph`'s gso state machine should produce
+/// `ControlKind::Picture` controls with non-zero bin_id / size for the
+/// TRL fixture's 9 embedded images.
+#[test]
+fn trl_picture_controls_populate_from_gso_chain() {
+    use hwp_transpiler_core::ir::ControlKind;
+
+    let Ok(fixture) = std::fs::read(repo_path(
+        "test/260420-1. 연구개발계획서(서식)[TRL점프업 1단계]_대진대_수정_1430_fin.hwp",
+    )) else {
+        eprintln!("skipping: TRL fixture not present");
+        return;
+    };
+    let doc = HwpReader.read(&fixture).expect("read");
+
+    let mut pictures = Vec::new();
+    fn walk(controls: &[hwp_transpiler_core::ir::Control], out: &mut Vec<u16>) {
+        for c in controls {
+            match &c.kind {
+                ControlKind::Picture(p) => out.push(p.bin_id),
+                ControlKind::Table(t) => {
+                    for cell in &t.cells {
+                        for para in &cell.paragraphs {
+                            walk(&para.controls, out);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    for s in &doc.sections {
+        for p in &s.paragraphs {
+            walk(&p.controls, &mut pictures);
+        }
+    }
+
+    eprintln!("[TRL] PictureControl entries: {}", pictures.len());
+    assert!(
+        !pictures.is_empty(),
+        "TRL fixture has 9 embedded images; PictureControl must be non-empty"
+    );
+    for bin_id in &pictures {
+        assert!(*bin_id > 0, "bin_id should be the 1-indexed BinData id");
+    }
+}
+
 /// `/BinData/*` streams should land in the typed `bin_data` slot on the
 /// IR, not in `unknown_streams`. The TRL fixture is the only corpus file
 /// known to contain embedded images.

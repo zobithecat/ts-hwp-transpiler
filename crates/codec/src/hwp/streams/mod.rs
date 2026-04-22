@@ -11,6 +11,7 @@ pub mod doc_info;
 pub mod document_properties;
 pub mod face_name;
 pub mod file_header;
+pub mod gso_picture;
 pub mod id_mappings;
 pub mod list_header;
 pub mod para_shape;

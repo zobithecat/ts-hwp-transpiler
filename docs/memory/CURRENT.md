@@ -1,22 +1,26 @@
 # Where we are
 
-**Now**: Phase 2a-i — body_text PictureControl wiring, in progress.
+**Now**: Phase 2a-i complete; Phase 2a-ii pending.
 
-**Last shipped** (HEAD = `7cbed20`): BinData Phase 1.5 — `/BinData/<id>`
-extension → `image/*` mime resolved at read time.
+**Last shipped**: PictureControl wiring — body_text parse_paragraph
+extracts `bin_id` + `width_hwpu` + `height_hwpu` from the
+`CTRL_HEADER "gso " → SHAPE_COMPONENT → SHAPE_COMPONENT_PICTURE` chain.
+TRL fixture surfaces 9 `ControlKind::Picture` controls (one per image).
 
-**Next**: Parse `CTRL_HEADER "gso "` + `SHAPE_COMPONENT_PICTURE` records
-in `body_text::parse_paragraph` so `PictureControl.bin_id`,
-`width_hwpu`, `height_hwpu` come out non-default. hwplib references:
-`reader/bodytext/paragraph/control/gso/{ForGsoControl,ForControlPicture}.java`.
+**Next**: Phase 2a-ii — `hwp-to-md` writes `<doc>.assets/BIN<N>.<ext>`
+sidecar files + markdown emits `![](./<doc>.assets/BIN<N>.<ext>)
+{width=Xmm; height=Ymm}` followed by `{{그림 N.}}` placeholder.
+Cross-reference `PictureControl.bin_id` against `DocInfo.bin_data` to
+get the extension, then look up the actual stream bytes in
+`IrDocument.bin_data`.
 
-**After**: Phase 2a-ii — `hwp-to-md` writes `<doc>.assets/BIN<N>.png`
-sidecar + markdown emits `![](./<doc>.assets/...){width=Xmm; height=Ymm}`
-+ `{{그림 N.}}` placeholder. Caption text is Phase 2b.
+**After**: Phase 2b — caption text extraction (caption is a
+sub-paragraph inside the gso control). The placeholder body becomes
+`{{그림 N. <caption text>}}`.
 
 **Blockers**: none.
 
-**Working tree**: clean. Tests: 149/149 green.
+**Working tree**: clean. Tests: 155/155 green.
 
 **Quick context**:
 - Round-trip is the primary goal; markdown quality is secondary. See

@@ -46,8 +46,10 @@ we need to follow, this is the diff target.
 | `reader/.../paragraph/control/ForCtrlHeader`     | `streams/ctrl_header` (code only; body Unknown for non-table) |
 | `reader/.../paragraph/control/tbl/ForTable`      | `streams/table` |
 | `reader/.../paragraph/control/tbl/ForCell`       | `streams/list_header::parse_cell` |
-| `reader/.../paragraph/control/gso/ForGsoControl` | **Phase 2a-i — TBD** |
-| `reader/.../paragraph/control/gso/ForControlPicture` | **Phase 2a-i — TBD** |
+| `reader/.../paragraph/control/gso/part/ForCtrlHeaderGso` | `streams/gso_picture::parse_gso_size` (width/height only) |
+| `reader/.../paragraph/control/gso/part/ForShapeComponent` | `streams/gso_picture::parse_shape_component_id` (gsoId only) |
+| `reader/.../paragraph/control/gso/ForControlPicture` | `streams/gso_picture::parse_picture_bin_id` (binItemID only) |
+| `reader/.../paragraph/control/gso/ForGsoControl` (state machine) | `streams/body_text::parse_paragraph` pending_picture branch |
 | `reader/.../paragraph/control/gso/Other Controls`| — passthrough (line/rect/ellipse/arc/polygon/curve/OLE/textart/container) |
 
 ## Writers

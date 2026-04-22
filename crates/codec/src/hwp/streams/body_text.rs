@@ -15,10 +15,12 @@
 use std::iter::Peekable;
 use std::vec::IntoIter;
 
-use hwp_transpiler_core::ir::{ControlKind, IrError, Paragraph, Record, Section, TableControl};
+use hwp_transpiler_core::ir::{
+    ControlKind, IrError, Paragraph, PictureControl, Record, Section, TableControl,
+};
 
 use super::{
-    ctrl_header, doc_info, list_header, paragraph_char_shape, paragraph_header,
+    ctrl_header, doc_info, gso_picture, list_header, paragraph_char_shape, paragraph_header,
     paragraph_line_seg, paragraph_text, record, table,
 };
 
@@ -37,6 +39,7 @@ pub mod tag {
     pub const PAGE_BORDER_FILL: u16 = 0x004B;
     pub const SHAPE_COMPONENT: u16 = 0x004C;
     pub const TABLE: u16 = 0x004D;
+    pub const SHAPE_COMPONENT_PICTURE: u16 = 0x0055;
 }
 
 type RecIter = Peekable<IntoIter<Record>>;
@@ -87,6 +90,7 @@ fn parse_paragraph(iter: &mut RecIter, level: u16) -> Result<Paragraph, IrError>
 
     let child_lvl = level + 1;
     let mut pending_table: Option<usize> = None;
+    let mut pending_picture: Option<PendingPicture> = None;
 
     while let Some(peek) = iter.peek() {
         // Scope exit: another top-level PARA_HEADER or a record shallower
@@ -113,14 +117,34 @@ fn parse_paragraph(iter: &mut RecIter, level: u16) -> Result<Paragraph, IrError>
                 }
                 tag::CTRL_HEADER => {
                     let ctrl = ctrl_header::parse(&rec)?;
-                    let is_table = matches!(
-                        &ctrl.kind,
-                        ControlKind::Unknown { code, .. }
-                            if ctrl_header::display_code(code) == "tbl "
-                    );
+                    let code = match &ctrl.kind {
+                        ControlKind::Unknown { code, .. } => Some(*code),
+                        _ => None,
+                    };
+                    let display = code.as_ref().map(|c| ctrl_header::display_code(c));
+                    let is_table = display.as_deref() == Some("tbl ");
+                    let is_gso = display.as_deref() == Some("gso ");
+
                     para.controls.push(ctrl);
-                    pending_table = if is_table {
-                        Some(para.controls.len() - 1)
+                    let ctrl_idx = para.controls.len() - 1;
+
+                    pending_table = is_table.then_some(ctrl_idx);
+                    pending_picture = if is_gso {
+                        // CTRL_HEADER body holds the gso width/height; the
+                        // shape kind is decided later by SHAPE_COMPONENT's
+                        // gsoId.
+                        let body = match &para.controls[ctrl_idx].kind {
+                            ControlKind::Unknown { data, .. } => data.as_slice(),
+                            _ => &[],
+                        };
+                        let (width_hwpu, height_hwpu) =
+                            gso_picture::parse_gso_size(body).unwrap_or((0, 0));
+                        Some(PendingPicture {
+                            ctrl_idx,
+                            width_hwpu,
+                            height_hwpu,
+                            is_pic_confirmed: false,
+                        })
                     } else {
                         None
                     };
@@ -135,12 +159,50 @@ fn parse_paragraph(iter: &mut RecIter, level: u16) -> Result<Paragraph, IrError>
                 para.controls[idx].kind = ControlKind::Table(tc);
                 continue;
             }
+        } else if rec.level == child_lvl + 1 && rec.tag == tag::SHAPE_COMPONENT {
+            if let Some(p) = pending_picture.as_mut() {
+                match gso_picture::parse_shape_component_id(&rec.data) {
+                    Some(id) if id == gso_picture::GSO_ID_PICTURE => {
+                        p.is_pic_confirmed = true;
+                    }
+                    _ => {
+                        // Some other shape (line / rect / OLE / …); leave
+                        // the control as Unknown and stop tracking.
+                        pending_picture = None;
+                    }
+                }
+            }
+        } else if rec.level == child_lvl + 2 && rec.tag == tag::SHAPE_COMPONENT_PICTURE {
+            // SHAPE_COMPONENT_PICTURE sits one level deeper than its
+            // parent SHAPE_COMPONENT (which is at child_lvl + 1) — it's a
+            // child of the shape, not a sibling.
+            if let Some(p) = pending_picture.take() {
+                if p.is_pic_confirmed {
+                    if let Some(bin_id) = gso_picture::parse_picture_bin_id(&rec.data) {
+                        para.controls[p.ctrl_idx].kind =
+                            ControlKind::Picture(PictureControl {
+                                bin_id,
+                                width_hwpu: p.width_hwpu,
+                                height_hwpu: p.height_hwpu,
+                            });
+                    }
+                }
+            }
         }
 
         para.raw_records.push(rec);
     }
 
     Ok(para)
+}
+
+/// State carried between the CTRL_HEADER "gso " marker and the
+/// SHAPE_COMPONENT / SHAPE_COMPONENT_PICTURE child records that follow it.
+struct PendingPicture {
+    ctrl_idx: usize,
+    width_hwpu: u32,
+    height_hwpu: u32,
+    is_pic_confirmed: bool,
 }
 
 /// Starting at the record after TABLE, read `LIST_HEADER × N` + the cell

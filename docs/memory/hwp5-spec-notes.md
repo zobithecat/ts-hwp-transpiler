@@ -89,9 +89,9 @@ original.
 | 0x0049 | PAGE_DEF                   | no           |
 | 0x004A | FOOTNOTE_SHAPE             | no           |
 | 0x004B | PAGE_BORDER_FILL           | no           |
-| 0x004C | SHAPE_COMPONENT            | **next** (Phase 2a-i) |
+| 0x004C | SHAPE_COMPONENT            | partial — gsoId only (picture detection) |
 | 0x004D | TABLE                      | yes          |
-| 0x0055 | SHAPE_COMPONENT_PICTURE    | **next** (Phase 2a-i) |
+| 0x0055 | SHAPE_COMPONENT_PICTURE    | partial — binItemID only |
 
 ---
 
@@ -116,6 +116,30 @@ uInt4  textWidth        (4)
 **Gotcha**: `paraCount` is sInt4 not u16; the trailer's optional ×9
 bytes mean offset-from-end parsing is unsafe — read offset-from-start.
 See `2026-04-22-cell-parser-and-markdown-export.md` for the bug history.
+
+### GSO picture chain (BodyText)
+
+A picture in body text is a 3-record chain rooted at a `CTRL_HEADER`:
+
+```
+level n     CTRL_HEADER       code "gso ", body has width/height @ 12,16
+  level n+1 [LIST_HEADER]     optional caption container
+  level n+1 [CTRL_DATA]       optional ctrl data
+  level n+1 SHAPE_COMPONENT   first 4 bytes (LE-reversed) = gsoId
+                              "$pic" → picture; "$lin"/"$rec"/etc. → other
+    level n+2 [CTRL_DATA]     optional
+    level n+2 SHAPE_COMPONENT_PICTURE  PictureInfo @ offset 68
+                                       binItemID (u16 LE) @ offset 71
+```
+
+`SHAPE_COMPONENT_PICTURE` lives one level **deeper** than its sibling
+`SHAPE_COMPONENT` (it's a child of the shape, not a peer). The GSO ID
+discriminator at the start of `SHAPE_COMPONENT` is little-endian, so on
+disk "$pic" appears as `c`,`i`,`p`,`$` — same convention as
+`CTRL_HEADER` codes (handled by `ctrl_header::display_code`).
+
+`binItemID` cross-references `DocInfo.bin_data[i].bin_data_id` to
+resolve the actual `/BinData/BIN<id>.<ext>` stream.
 
 ### BinData (DocInfo tag 0x0012)
 
