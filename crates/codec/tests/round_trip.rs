@@ -243,8 +243,6 @@ fn fixture_body_text_parses_paragraphs() {
 /// count per table must match `row_cell_counts` sum.
 #[test]
 fn fixture_tables_populate_from_trl() {
-    use hwp_transpiler_core::ir::ControlKind;
-
     let Ok(fixture) = std::fs::read(repo_path(
         "test/260420-1. 연구개발계획서(서식)[TRL점프업 1단계]_대진대_수정_1430_fin.hwp",
     )) else {
