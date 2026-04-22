@@ -39,6 +39,19 @@ impl Writer for HwpWriter {
             write_stream(&mut comp, &path, &bytes)?;
         }
 
+        // Typed: /BinData/<id> — embedded image / OLE blobs. Reader peels
+        // these off `unknown_streams`; writer puts them back. The
+        // `bin_data` field on `IrDocument` is the source of truth.
+        if !doc.bin_data.is_empty() {
+            comp.create_storage_all("/BinData").map_err(|e| {
+                IrError::Invalid(format!("create storage /BinData: {e}"))
+            })?;
+            for entry in &doc.bin_data {
+                let path = format!("/BinData/{}", entry.id);
+                write_stream(&mut comp, &path, &entry.bytes)?;
+            }
+        }
+
         // Passthrough: anything not yet typed
         for (path, bytes) in &doc.unknown_streams {
             if is_typed_path(path) {
@@ -97,6 +110,7 @@ fn is_typed_path(path: &str) -> bool {
     path == streams::file_header::STREAM_NAME
         || path == streams::doc_info::STREAM_NAME
         || streams::body_text::section_index_of(path).is_some()
+        || path.starts_with("/BinData/")
 }
 
 fn parent_storage_of(path: &str) -> Option<String> {

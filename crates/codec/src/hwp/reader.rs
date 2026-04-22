@@ -3,7 +3,7 @@
 //! `/BodyText/Section{N}` stream flow into typed IR slots; remaining
 //! streams stay in `IrDocument::unknown_streams` for verbatim round-trip.
 
-use hwp_transpiler_core::ir::{DocInfo, FontFace, IrDocument, IrError, Reader};
+use hwp_transpiler_core::ir::{BinaryEntry, DocInfo, FontFace, IrDocument, IrError, Reader};
 use std::io::{Cursor, Read};
 
 use super::streams;
@@ -65,6 +65,15 @@ impl Reader for HwpReader {
                 continue;
             }
 
+            if let Some(id) = bin_data_id_from_path(&path) {
+                doc.bin_data.push(BinaryEntry {
+                    id,
+                    mime: None, // populated by Phase 2 from extension
+                    bytes,
+                });
+                continue;
+            }
+
             doc.unknown_streams.insert(path, bytes);
         }
 
@@ -77,11 +86,34 @@ impl Reader for HwpReader {
 fn populate_typed_views(info: &mut DocInfo) -> Result<(), IrError> {
     populate_document_properties(info)?;
     populate_font_faces(info)?;
+    populate_bin_data(info)?;
     populate_border_fills(info)?;
     populate_char_shapes(info)?;
     populate_para_shapes(info)?;
     populate_styles(info)?;
     Ok(())
+}
+
+fn populate_bin_data(info: &mut DocInfo) -> Result<(), IrError> {
+    info.bin_data = info
+        .raw_records
+        .iter()
+        .filter(|r| r.tag == streams::doc_info::tag::BIN_DATA)
+        .map(streams::bin_data::parse)
+        .collect::<Result<_, _>>()?;
+    Ok(())
+}
+
+/// `/BinData/BIN0001.png` → `Some("BIN0001.png")`. Anything else → `None`.
+/// Used to peel `/BinData/*` storage members out of the generic
+/// `unknown_streams` bucket and into the typed `bin_data` list.
+fn bin_data_id_from_path(path: &str) -> Option<String> {
+    const PREFIX: &str = "/BinData/";
+    let rest = path.strip_prefix(PREFIX)?;
+    if rest.is_empty() || rest.contains('/') {
+        return None;
+    }
+    Some(rest.to_owned())
 }
 
 fn populate_document_properties(info: &mut DocInfo) -> Result<(), IrError> {

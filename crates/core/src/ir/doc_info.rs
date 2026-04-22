@@ -21,6 +21,7 @@ pub struct DocInfo {
     pub char_shapes: Vec<CharShape>,
     pub para_shapes: Vec<ParaShape>,
     pub styles: Vec<Style>,
+    pub bin_data: Vec<BinData>,
     pub unknown_records: Vec<UnknownRecord>,
 
     /// Parsed record stream (primary source of truth until typed encoders
@@ -273,6 +274,46 @@ pub struct Style {
     pub lang_id: i16,
     pub para_shape_id: u16,
     pub char_shape_id: u16,
+}
+
+/// HWP5 BinData record (DocInfo tag 0x0012). Describes one entry in the
+/// document's binary-content table — typically an image, but also OLE
+/// objects and external file links.
+///
+/// `property` is the raw u16 bitfield (low nibble = type, next 4 bits =
+/// compression hint, next 4 = status, top 4 = reserved). The `Option`
+/// fields are populated only for the type they apply to:
+///
+///   - Link        → `absolute_path` + `relative_path`
+///   - Embedding   → `bin_data_id` (matches `/BinData/BIN<N>` storage
+///                                  stream) + `extension`
+///   - Storage     → `bin_data_id` + `extension`
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BinData {
+    pub property: u16,
+    pub absolute_path: Option<String>,
+    pub relative_path: Option<String>,
+    pub bin_data_id: Option<u16>,
+    pub extension: Option<String>,
+}
+
+impl BinData {
+    pub const TYPE_LINK: u16 = 0;
+    pub const TYPE_EMBEDDING: u16 = 1;
+    pub const TYPE_STORAGE: u16 = 2;
+
+    pub fn type_kind(&self) -> u16 {
+        self.property & 0x000F
+    }
+    pub fn is_link(&self) -> bool {
+        self.type_kind() == Self::TYPE_LINK
+    }
+    pub fn is_embedding(&self) -> bool {
+        self.type_kind() == Self::TYPE_EMBEDDING
+    }
+    pub fn is_storage(&self) -> bool {
+        self.type_kind() == Self::TYPE_STORAGE
+    }
 }
 
 /// Tagged record whose decoder isn't implemented yet. Held verbatim by

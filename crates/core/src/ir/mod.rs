@@ -11,7 +11,7 @@ pub use body::{
     PictureControl, Section, SectionProperties, TableCell, TableControl, ValidZone,
 };
 pub use doc_info::{
-    Border, BorderFill, CharShape, DocInfo, DocProperties, Fill, FontFace, FontFaces,
+    BinData, Border, BorderFill, CharShape, DocInfo, DocProperties, Fill, FontFace, FontFaces,
     FontTypeInfo, ParaShape, Record, Style, SubstituteFont, UnknownRecord,
 };
 

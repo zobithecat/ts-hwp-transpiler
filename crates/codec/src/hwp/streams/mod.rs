@@ -2,6 +2,7 @@
 //! exactly one of (`STREAM_NAME`, `parse()`, `emit()`) is visible per stream.
 //! Streams not covered here travel through `IrDocument::unknown_streams`.
 
+pub mod bin_data;
 pub mod body_text;
 pub mod border_fill;
 pub mod char_shape;

@@ -74,6 +74,46 @@ fn fixture_path(name: &str) -> PathBuf {
         .join(name)
 }
 
+/// `/BinData/*` streams should land in the typed `bin_data` slot on the
+/// IR, not in `unknown_streams`. The TRL fixture is the only corpus file
+/// known to contain embedded images.
+#[test]
+fn trl_bin_data_populates_typed_slot() {
+    let Ok(fixture) = std::fs::read(repo_path(
+        "test/260420-1. 연구개발계획서(서식)[TRL점프업 1단계]_대진대_수정_1430_fin.hwp",
+    )) else {
+        eprintln!("skipping: TRL fixture not present");
+        return;
+    };
+    let doc = HwpReader.read(&fixture).expect("read");
+
+    assert!(
+        !doc.bin_data.is_empty(),
+        "TRL fixture known to contain embedded images; bin_data must be non-empty"
+    );
+    for entry in &doc.bin_data {
+        assert!(!entry.id.is_empty(), "binary entry missing id");
+        assert!(!entry.bytes.is_empty(), "binary entry {} empty", entry.id);
+    }
+    for path in doc.unknown_streams.keys() {
+        assert!(
+            !path.starts_with("/BinData/"),
+            "/BinData/ stream {path} leaked into unknown_streams"
+        );
+    }
+    eprintln!("[TRL] bin_data entries: {}", doc.bin_data.len());
+
+    // DocInfo BinData records describe each /BinData/ stream entry.
+    assert!(
+        !doc.doc_info.bin_data.is_empty(),
+        "DocInfo.bin_data should have matching BinData records for each image"
+    );
+    eprintln!(
+        "[TRL] DocInfo.bin_data records: {}",
+        doc.doc_info.bin_data.len()
+    );
+}
+
 fn assert_fixture_roundtrips(path: &Path) {
     let Ok(fixture) = std::fs::read(path) else {
         eprintln!("skipping: {} not present", path.display());
