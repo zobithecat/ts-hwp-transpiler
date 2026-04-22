@@ -65,11 +65,61 @@ fn emit_table(doc: &IrDocument, t: &TableControl, out: &mut String, depth: usize
         out.push_str("\n\n");
         return;
     }
+    if depth == 0 {
+        if let Some(passage) = try_table_as_passage(t) {
+            out.push_str(&passage);
+            out.push_str("\n\n");
+            return;
+        }
+    }
     if let Some(grid) = try_build_md_grid(t) {
         emit_md_grid(&grid, out);
     } else {
         emit_table_as_list(doc, t, out, depth);
     }
+}
+
+/// Detect a single-row table whose only meaningful content is one short
+/// line of text (the rest of the cells, if any, are empty). HWP frequently
+/// uses such tables purely for visual framing — a doc title in a bordered
+/// box, an interstitial section banner — and they don't read as tables in
+/// Markdown. Emit them as plain prose instead.
+///
+/// Limited to top-level (`depth == 0`) so nested headers inside complex
+/// tables still render inside their parent's bullet structure.
+fn try_table_as_passage(t: &TableControl) -> Option<String> {
+    if t.rows != 1 {
+        return None;
+    }
+    let non_empty: Vec<&TableCell> = t
+        .cells
+        .iter()
+        .filter(|c| c.paragraphs.iter().any(|p| !clean_text(&p.text).is_empty()))
+        .collect();
+    if non_empty.len() != 1 {
+        return None;
+    }
+    let cell = non_empty[0];
+    // Reject anything with controls (nested tables, pictures, equations).
+    if cell.paragraphs.iter().any(|p| !p.controls.is_empty()) {
+        return None;
+    }
+    // Multi-paragraph short cells (HWP often splits a title across two
+    // paragraphs for line wrapping) are fine — join with spaces.
+    let parts: Vec<String> = cell
+        .paragraphs
+        .iter()
+        .map(|p| clean_text(&p.text))
+        .filter(|s| !s.is_empty())
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    let text = parts.join(" ");
+    if text.contains('\n') || text.chars().count() > 100 {
+        return None;
+    }
+    Some(text)
 }
 
 /// Detect a "decorative wrapper" 1×1 table: one cell, no body text, and
@@ -800,9 +850,10 @@ mod tests {
         };
         let doc = make_doc(vec![style("본문")], vec![para_with_table(outer)]);
         let md = to_markdown(&doc);
-        // Inner cell text appears at the top level — no `[0,0]:` wrapper
-        // line, no nested-indent indent.
-        assert!(md.contains("| real content |"), "got: {md}");
+        // Inner content surfaces at the top level — no `[0,0]:` wrapper
+        // line, no extra indent. (After unwrap the inner 1×1 then takes
+        // the passage path and renders as plain prose.)
+        assert!(md.contains("real content"), "got: {md}");
         assert!(!md.contains("- [0,0]:"), "wrapper must be stripped: {md}");
     }
 
@@ -839,6 +890,78 @@ mod tests {
     }
 
     #[test]
+    fn single_row_box_without_prefix_becomes_passage() {
+        // Doc-title pattern: 1×1 frame holding a long run-on title.
+        // No `1. `/`(1) ` prefix → not a heading, but rendering it as a
+        // 1-cell MD table would produce `| ... |\n| --- |` which reads
+        // badly. Emit as plain text instead.
+        let t = TableControl {
+            rows: 1, cols: 1, row_cell_counts: vec![1],
+            cells: vec![cell(0, 0, "민관공동기술사업화 연구개발계획서 1단계")],
+            ..TableControl::default()
+        };
+        let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
+        let md = to_markdown(&doc);
+        assert_eq!(md, "민관공동기술사업화 연구개발계획서 1단계\n");
+    }
+
+    #[test]
+    fn multi_paragraph_passage_joins_with_spaces() {
+        // HWP splits long titles across paragraphs for line wrapping. The
+        // joined result must still go through the passage path (joined
+        // length is ~45 chars, under the 100-char limit).
+        let t = TableControl {
+            rows: 1, cols: 1, row_cell_counts: vec![1],
+            cells: vec![TableCell {
+                col: 0, row: 0, col_span: 1, row_span: 1,
+                paragraphs: vec![
+                    para(0, "민관공동기술사업화 연구개발계획서"),
+                    para(0, "1단계 (PoC·PoM)"),
+                ],
+                ..TableCell::default()
+            }],
+            ..TableControl::default()
+        };
+        let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
+        let md = to_markdown(&doc);
+        assert_eq!(md, "민관공동기술사업화 연구개발계획서 1단계 (PoC·PoM)\n");
+    }
+
+    #[test]
+    fn single_row_with_empty_companion_becomes_passage() {
+        // Same pattern but the box was authored as 1×2 with a blank
+        // sibling cell — equally common as a layout trick.
+        let t = TableControl {
+            rows: 1, cols: 2, row_cell_counts: vec![2],
+            cells: vec![cell(0, 0, "문서 제목"), cell(1, 0, "")],
+            ..TableControl::default()
+        };
+        let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
+        let md = to_markdown(&doc);
+        assert_eq!(md, "문서 제목\n");
+    }
+
+    #[test]
+    fn multi_row_table_is_not_a_passage() {
+        // Real 2×2 data table — must stay as a table, not collapse into
+        // its first non-empty cell's text.
+        let t = TableControl {
+            rows: 2, cols: 2, row_cell_counts: vec![2, 2],
+            cells: vec![
+                cell(0, 0, "header"),
+                cell(1, 0, ""),
+                cell(0, 1, "left"),
+                cell(1, 1, "right"),
+            ],
+            ..TableControl::default()
+        };
+        let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
+        let md = to_markdown(&doc);
+        assert!(md.contains("| header"), "got: {md}");
+        assert!(md.contains("| --- "), "got: {md}");
+    }
+
+    #[test]
     fn ragged_table_with_holes_falls_back_to_bullets() {
         // 2×2 declared but only 2 cells exist (row 1 is missing entirely).
         // Without a way to express "no cell here", we must NOT fabricate
@@ -857,15 +980,17 @@ mod tests {
 
     #[test]
     fn cell_pipe_is_escaped() {
+        // 2×1 — must take the MD-grid path (not the 1-row passage one),
+        // so we can verify pipe escaping inside an actual table cell.
         let t = TableControl {
-            rows: 1,
+            rows: 2,
             cols: 1,
-            row_cell_counts: vec![1],
-            cells: vec![cell(0, 0, "a|b")],
+            row_cell_counts: vec![1, 1],
+            cells: vec![cell(0, 0, "a|b"), cell(0, 1, "x")],
             ..TableControl::default()
         };
         let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
         let md = to_markdown(&doc);
-        assert!(md.contains("| a\\|b |"));
+        assert!(md.contains("| a\\|b |"), "got: {md}");
     }
 }
