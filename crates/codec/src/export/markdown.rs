@@ -231,10 +231,18 @@ fn try_unwrap_wrapper_table(t: &TableControl) -> Option<&TableControl> {
 }
 
 /// Detect HWP's "decorative box heading" pattern: a table with exactly one
-/// non-empty cell whose text is a single short line beginning with a numeric
+/// non-empty cell whose text is a short line beginning with a numeric
 /// prefix (`1. ...`) or parenthetical (`(1) ...`). This is how 한컴 documents
 /// typically render top-level section headers — borders + padded box around
 /// the title — and the only signal we have without DocInfo style names.
+///
+/// Accepts multi-paragraph cells (joined with spaces) because HWP authors
+/// occasionally break a long title across paragraphs for visual line
+/// wrapping — observed in the TRL fixture's chapter-7 heading where
+/// `7. 연구개발성과의 활용방안 및 기대효과` and
+/// `(기술성·시장성 및 사업성 검토 방안 등)` sit in the same cell as
+/// paragraph 0 and paragraph 1. A strict one-paragraph gate dropped such
+/// cases to the passage path and erased the `##` marker.
 fn try_table_as_heading(t: &TableControl) -> Option<(u8, String)> {
     let non_empty: Vec<&TableCell> = t
         .cells
@@ -245,15 +253,22 @@ fn try_table_as_heading(t: &TableControl) -> Option<(u8, String)> {
         return None;
     }
     let cell = non_empty[0];
-    if cell.paragraphs.len() != 1 {
+    // Any control anywhere in the cell (nested table, picture) would be
+    // lost if we collapse to a heading — reject.
+    if cell.paragraphs.iter().any(|p| !p.controls.is_empty()) {
         return None;
     }
-    let para = &cell.paragraphs[0];
-    if !para.controls.is_empty() {
+    let parts: Vec<String> = cell
+        .paragraphs
+        .iter()
+        .map(|p| clean_text(&p.text))
+        .filter(|s| !s.is_empty())
+        .collect();
+    if parts.is_empty() {
         return None;
     }
-    let text = clean_text(&para.text);
-    if text.is_empty() || text.contains('\n') || text.chars().count() > 80 {
+    let text = parts.join(" ");
+    if text.contains('\n') || text.chars().count() > 80 {
         return None;
     }
     let level = heading_level_from_prefix(&text)?;
@@ -711,6 +726,83 @@ mod tests {
         };
         let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
         assert_eq!(to_markdown(&doc), "## 1. 기술개발 목표\n");
+    }
+
+    #[test]
+    fn multi_paragraph_heading_box_still_promotes() {
+        // Regression: TRL chapter-7 pattern. HWP broke a long title
+        // across two paragraphs in the same cell; the old single-para
+        // gate refused to promote, so the heading fell through to the
+        // passage path and lost its `##` marker.
+        let t = TableControl {
+            rows: 1,
+            cols: 2,
+            row_cell_counts: vec![2],
+            cells: vec![
+                TableCell {
+                    col: 0,
+                    row: 0,
+                    col_span: 1,
+                    row_span: 1,
+                    paragraphs: vec![
+                        para(0, "7. 연구개발성과의 활용방안 및 기대효과"),
+                        para(0, "(기술성·시장성 및 사업성 검토 방안 등)"),
+                    ],
+                    ..TableCell::default()
+                },
+                cell(1, 0, ""),
+            ],
+            ..TableControl::default()
+        };
+        let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
+        let md = to_markdown(&doc);
+        assert_eq!(
+            md,
+            "## 7. 연구개발성과의 활용방안 및 기대효과 (기술성·시장성 및 사업성 검토 방안 등)\n"
+        );
+    }
+
+    #[test]
+    fn multi_paragraph_heading_with_blank_in_between_still_joins() {
+        // A stray empty paragraph between the two title lines must not
+        // break promotion — filtered out before the space-join.
+        let t = TableControl {
+            rows: 1, cols: 1, row_cell_counts: vec![1],
+            cells: vec![TableCell {
+                col: 0, row: 0, col_span: 1, row_span: 1,
+                paragraphs: vec![
+                    para(0, "1. 기술개발"),
+                    para(0, ""),
+                    para(0, "목표"),
+                ],
+                ..TableCell::default()
+            }],
+            ..TableControl::default()
+        };
+        let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
+        assert_eq!(to_markdown(&doc), "## 1. 기술개발 목표\n");
+    }
+
+    #[test]
+    fn multi_paragraph_without_numeric_prefix_still_not_a_heading() {
+        // Guard against over-promotion: multi-para cell whose joined
+        // text has no chapter prefix must stay out of the heading path.
+        let t = TableControl {
+            rows: 1, cols: 1, row_cell_counts: vec![1],
+            cells: vec![TableCell {
+                col: 0, row: 0, col_span: 1, row_span: 1,
+                paragraphs: vec![
+                    para(0, "민관공동기술사업화"),
+                    para(0, "연구개발계획서"),
+                ],
+                ..TableCell::default()
+            }],
+            ..TableControl::default()
+        };
+        let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
+        let md = to_markdown(&doc);
+        assert!(!md.starts_with("## "), "got: {md}");
+        assert!(!md.starts_with("### "), "got: {md}");
     }
 
     #[test]
