@@ -1,0 +1,9 @@
+[package]
+name = "hwp-transpiler-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hwp-transpiler-core = { path = "../core" }
+serde = { workspace = true }

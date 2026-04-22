@@ -1,0 +1,20 @@
+[package]
+name = "hwp-transpiler-codec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hwp-transpiler-core = { path = "../core" }
+cfb = { workspace = true }
+flate2 = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[[bin]]
+name = "hwp-roundtrip"
+path = "src/bin/roundtrip.rs"
+
+[[bin]]
+name = "hwp-to-md"
+path = "src/bin/hwp_to_md.rs"

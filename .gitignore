@@ -1,0 +1,21 @@
+/target
+**/*.rs.bk
+/node_modules
+/pkg
+/dist
+/ts/dist
+.DS_Store
+.idea/
+.vscode/
+*.log
+
+# Local AI agent session state.
+/.claude/
+/.omc/
+
+# Fixture corpus: keep .hwp out of git unless explicitly checked in.
+# Large real-world samples (e.g. TRL report ~5MB + 9 JPEG blobs) balloon
+# the repo and may carry organisation-private content.
+/test/*.hwp
+/test/*.hwpx
+!/test/.gitkeep

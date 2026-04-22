@@ -1,0 +1,17 @@
+[package]
+name = "hwp-transpiler-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+hwp = { workspace = true, optional = true }
+
+[features]
+default = []
+# Activates crates/core/src/adapters/hwp_rs.rs, which implements
+# `VisualExtract`, `BorderFillResolver`, `Hintable` for hahnlee/hwp-rs types.
+hwp-rs-adapter = ["dep:hwp"]
