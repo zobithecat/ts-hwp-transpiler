@@ -53,6 +53,27 @@ fn trl_report_per_stream_match() {
     ));
 }
 
+/// hwplib's canonical `BlankFileMaker.make()` output, vendored under
+/// `crates/codec/tests/fixtures/`. Always available (committed), unlike the
+/// personal fixtures under `/test/` which are gitignored.
+#[test]
+fn hwplib_blank_per_stream_match() {
+    assert_fixture_roundtrips(&fixture_path("blank.hwp"));
+}
+
+/// hwplib `merging-cell.hwp` — small file with explicit row/col span
+/// merges. Useful regression guard for the cell LIST_HEADER parser.
+#[test]
+fn hwplib_merging_cell_per_stream_match() {
+    assert_fixture_roundtrips(&fixture_path("merging-cell.hwp"));
+}
+
+fn fixture_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name)
+}
+
 fn assert_fixture_roundtrips(path: &Path) {
     let Ok(fixture) = std::fs::read(path) else {
         eprintln!("skipping: {} not present", path.display());
