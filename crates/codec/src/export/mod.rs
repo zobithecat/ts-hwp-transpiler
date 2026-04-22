@@ -6,3 +6,4 @@
 
 pub mod assets;
 pub mod markdown;
+pub mod markdown_llm;

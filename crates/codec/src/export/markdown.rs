@@ -27,6 +27,26 @@ pub struct MdOptions {
     /// the `{{그림 N.}}` placeholder. When `None`, only the placeholder
     /// is written.
     pub assets_path: Option<String>,
+    /// When `Some`, `to_markdown_with` dispatches to the LLM-friendly
+    /// structured emitter (see `markdown_llm`) instead of the human
+    /// Markdown path. Opt-in so existing callers keep the same output.
+    pub llm: Option<LlmOptions>,
+}
+
+/// Capability flags for the LLM-friendly Markdown layer. Kept minimal on
+/// purpose — the first skeleton always emits stable ids; role /
+/// editable / domain-hint annotations land as follow-up fields and
+/// default to off so existing snapshots stay stable.
+#[derive(Debug, Clone, Default)]
+pub struct LlmOptions {
+    /// Emit `role=label|value|unknown` on each CELL marker. Off by
+    /// default — heuristic not wired yet; enabling it today is a no-op
+    /// placeholder so the flag can be plumbed in before the classifier
+    /// lands.
+    pub emit_roles: bool,
+    /// Emit `editable=true|false|unknown` on each CELL marker. Same
+    /// placeholder status as `emit_roles`.
+    pub emit_editable: bool,
 }
 
 pub fn to_markdown(doc: &IrDocument) -> String {
@@ -34,6 +54,9 @@ pub fn to_markdown(doc: &IrDocument) -> String {
 }
 
 pub fn to_markdown_with(doc: &IrDocument, opts: &MdOptions) -> String {
+    if opts.llm.is_some() {
+        return super::markdown_llm::to_llm_markdown(doc, opts);
+    }
     let mut out = String::new();
     let mut picture_counter: u32 = 0;
     for section in &doc.sections {
@@ -165,7 +188,7 @@ fn emit_picture_bullet(
 /// (and clashes with) our own `{{그림 N.}}` counter. Strip it so the
 /// emitted placeholder reads as `{{그림 N. <title>}}`. Unknown-language
 /// forms ("Figure", "Table", English "표" alias) covered symmetrically.
-fn strip_caption_label_prefix(s: &str) -> &str {
+pub(super) fn strip_caption_label_prefix(s: &str) -> &str {
     for prefix in ["그림 . ", "표 . ", "Figure . ", "Table . "] {
         if let Some(rest) = s.strip_prefix(prefix) {
             return rest;
@@ -656,7 +679,7 @@ fn heading_level(doc: &IrDocument, para: &Paragraph) -> Option<u8> {
     None
 }
 
-fn clean_text(s: &str) -> String {
+pub(super) fn clean_text(s: &str) -> String {
     let mut out = String::new();
     for c in s.chars() {
         match c {

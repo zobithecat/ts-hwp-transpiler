@@ -31,6 +31,9 @@ usage: hwp-to-md [OPTIONS] <input.hwp> [output.md | -]
 Options:
   --no-assets          Skip binary asset dump; no ![](…) links emitted.
   --assets-dir=<path>  Write assets to <path> (default: <out>.assets/).
+  --llm                Emit LLM-friendly structured Markdown with
+                       stable ids instead of the human-readable form.
+                       Targets LLM chunking/slot-rewrite/reinsertion.
   -h, --help           Print this help and exit.
 ";
 
@@ -68,6 +71,7 @@ fn main() -> ExitCode {
 
     let md_opts = markdown::MdOptions {
         assets_path: plan.assets_url_prefix.clone(),
+        llm: args.llm.then(markdown::LlmOptions::default),
     };
     let md = markdown::to_markdown_with(&doc, &md_opts);
 
@@ -127,6 +131,7 @@ struct CliArgs {
     input: PathBuf,
     output: OutputSpec,
     assets: AssetsMode,
+    llm: bool,
 }
 
 #[derive(Debug)]
@@ -157,12 +162,16 @@ struct OutputPlan {
 fn parse_args(raw: &[String]) -> Result<Option<CliArgs>, String> {
     let mut positionals: Vec<&str> = Vec::new();
     let mut assets = AssetsMode::Auto;
+    let mut llm = false;
 
     let mut i = 0;
     while i < raw.len() {
         let a = raw[i].as_str();
         match a {
             "-h" | "--help" => return Ok(None),
+            "--llm" => {
+                llm = true;
+            }
             "--no-assets" => {
                 if matches!(assets, AssetsMode::Explicit(_)) {
                     return Err(
@@ -226,6 +235,7 @@ fn parse_args(raw: &[String]) -> Result<Option<CliArgs>, String> {
         input,
         output,
         assets,
+        llm,
     }))
 }
 

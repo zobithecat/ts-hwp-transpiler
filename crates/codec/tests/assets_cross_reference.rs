@@ -48,6 +48,7 @@ fn trl_markdown_links_resolve_to_dumped_files() {
         &doc,
         &markdown::MdOptions {
             assets_path: Some("out.assets".into()),
+            ..markdown::MdOptions::default()
         },
     );
 

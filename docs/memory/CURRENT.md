@@ -1,41 +1,42 @@
 # 현재 위치
 
-**지금**: Phase 2b 완결 (caption IR + MD surface). 셀-임베드 picture
-emission 까지 붙어 TRL fixture 9/9 picture 가 MD 에서 번호·캡션과
-함께 표시됨. 다음은 L1 (LLM-friendly layer skeleton).
+**지금**: L1 (LLM-friendly layer skeleton) opt-in 가능. `MdOptions.llm =
+Some(LlmOptions)` 또는 CLI `--llm` 으로 structured markdown 출력.
+stable positional id 기반. role/editable 은 현재 placeholder (`unknown`).
 
 **최근 ship**:
-- **Cell-embedded picture MD emission**: `emit_table_as_list` →
-  `emit_cell_line` 이 `ControlKind::Picture` 도 iterate 하여
-  bullet sub-item (`- ![](…)` + `- {{그림 N. caption}}`) 으로 emit.
-  `picture_counter` 를 table pipeline 전체에 mut ref 로 threading.
-  `try_build_md_grid` 는 셀에 picture 가 있으면 reject → bullet
-  fallback 강제 (nested table 과 동일 정책).
-- **Phase 2b caption IR**: `PictureControl.caption_text` 를 gso
-  체인의 LIST_HEADER + 자식 PARA_TEXT 에서 추출. HWP 자동 번호
-  필드 `"그림 ￼. ..."` 의 FFFC 제거 후 `"그림 . "` prefix 를
-  strip_caption_label_prefix 로 제거.
-- **Phase 2a-ii**: CLI `--no-assets`, `--assets-dir=<path>`, `<stem>.assets/`
-  sidecar dump.
-- **Heading fix**: multi-paragraph 박스 제목도 `##` 승격 (TRL 7장).
+- `crates/codec/src/export/markdown_llm.rs` 신설. `to_llm_markdown(doc, opts)`
+  가 SECTION / PARAGRAPH / TABLE / CELL / TEXT / FIGURE / CAPTION /
+  END TABLE 마커로 구성된 record-style markdown 출력.
+- **ID scheme**: purely positional path, 주소 결정적 & globally unique.
+  - `sec-{si}`, `par-s{si}-p{pi}`
+  - `tbl-s{si}-p{pi}-c{ci}` (controls index within owning paragraph)
+  - `cell-<tbl_id>-r{r}c{c}`
+  - 중첩시 경로 누적: `tbl-s0-p5-c0-r2c3-p1-c0`
+  - `fig-{bin_id}`, `cap-fig-{bin_id}` (BinData 는 globally unique)
+- `instance_id` 는 사용하지 않음 — 한컴 문서에서 대부분 0x80000000
+  로 비유일하게 발견됨 (empirical on TRL). ID 안정성은 위치에서.
+- TRL fixture 실측: 12 paragraph id / 1062 cell id 100% unique.
+- CLI `--llm` 플래그 추가. Human / LLM 출력 상호배타.
 
 **알려진 갭**:
-- **Non-picture gso 의 caption**: line/rect/ole 같은 비-picture shape 은
-  pending_picture 가 clear 되면서 caption 도 같이 버려짐. 해당 도형
-  타입들에 독립적인 IR control 타입이 생기면 그때 연결.
-- **Caption 라벨 외국어 prefix**: `strip_caption_label_prefix` 는 현재
-  "그림/표/Figure/Table" 네 가지만 처리. 다른 언어 확장 시 여기서.
+- **role / editable 실제 분류기 미구현**. flag 을 켜도 전부 `unknown`
+  만 emit. 이후 작업: bg_fill / bold / 위치 / 텍스트 패턴 휴리스틱
+  기반 classifier. 보수적으로 unknown default.
+- **Non-picture gso 의 caption**: 여전히 버려짐 (Phase 2b 원래 갭).
+- **셀-임베드 picture MD**: human path 는 이번 세션에서 처리됨.
+  L1 path 는 셀 안의 FIGURE 도 계속 emit 한다.
 
 **다음 후보**:
-- **L1 (LLM-friendly layer skeleton)**: `MdOptions.llm: Option<LlmOptions>`
-  추가. section/table/cell/figure id 만 emit, role/editable 은 전부
-  `unknown` 으로 시작. 기존 human 출력 불변 (opt-in). stable id 설계는
-  HWP5 native 식별자 (`ParagraphHeader.instance_id`, `BinData.bin_data_id`,
-  TableCell.row/col) 에서 결정적 파생.
+- L2: cell role 휴리스틱 (bg_fill / alignment / 짧은 텍스트 / 첫 행
+  행 / bold). 보수적으로 시작.
+- L3: editable 추정 (role=value + 단일 paragraph + 수식/숫자 아님).
+- L4: figure/caption 전역 domain hint (performance_metrics, budget 등).
+- Preview layer (render crate) — IR → HTML with rowspan/colspan.
 
 **막힌 것**: 없음.
 
-**작업 트리**: 깨끗. 테스트: 189/189 green.
+**작업 트리**: 깨끗. 테스트: 199/199 green.
 
 **빠른 컨텍스트**:
 - 라운드트립이 1순위 목표; 마크다운 품질은 2순위. 명시적 결정은
