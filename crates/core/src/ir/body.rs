@@ -148,6 +148,13 @@ pub struct ValidZone {
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct TableCell {
+    /// Paragraph count for this cell's `ParagraphList`. Stored as `i32` in
+    /// HWP5 (sInt4); kept here so `paragraphs.len()` and the on-disk count
+    /// can be reconciled if/when the cell is mutated.
+    pub para_count: i32,
+    /// `ListHeaderProperty` bitfield (text direction, line break behaviour,
+    /// vertical alignment, ...). Held opaque until typed.
+    pub property: u32,
     pub col: u16,
     pub row: u16,
     pub col_span: u16,
@@ -157,6 +164,9 @@ pub struct TableCell {
     /// `[left, right, top, bottom]` inner padding (HWPUNIT).
     pub padding_hwpu: [u16; 4],
     pub border_fill_id: u16,
+    /// Text-region width (HWPUNIT) — `width - leftMargin - rightMargin`.
+    /// Stored explicitly because hwplib's writer always emits it.
+    pub text_width_hwpu: u32,
     pub paragraphs: Vec<Paragraph>,
 }
 
