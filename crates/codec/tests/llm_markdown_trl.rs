@@ -117,7 +117,14 @@ fn trl_llm_with_roles_produces_mixed_distribution() {
 
     assert!(headers > 0, "expected at least one header, got {headers}");
     assert!(values > headers, "values ({values}) should dominate headers ({headers})");
-    assert!(labels > 0, "expected at least one label; classifier wiring regressed?");
+    // Post-tuning guard: pale non-yellow accents (#DFE6F7 etc.) now
+    // classify as labels, which should yield a meaningful label count
+    // on a Korean gov-proposal form. A return to 0 or single digits
+    // means the Yellow-only tuning regressed.
+    assert!(
+        labels >= 100,
+        "post-tuning expected ≥100 labels on TRL; got {labels}"
+    );
     assert_eq!(
         unknowns, 0,
         "unknowns should not appear when classifier is wired: {unknowns}"
