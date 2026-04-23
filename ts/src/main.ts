@@ -14,10 +14,10 @@
 // has its own wasm; our wasm is co-located next to main.ts.
 
 import { createEditor } from "@rhwp/editor";
-import { marked } from "marked";
 
 import init, {
   loadHwp,
+  exportHtml,
   exportMarkdown,
   version,
 } from "./wasm/hwp_transpiler_wasm.js";
@@ -45,14 +45,10 @@ const emitStylesEl = $<HTMLInputElement>("emit-styles");
 // knobs against the cached IR.
 let ourIr: unknown = null;
 
-// Cached MD text so tab switches to "MD 미리보기" can re-render
-// through marked without touching the exporter.
-let lastMd = "";
-
-// Currently-visible left-pane tab. The editor iframe and the MD-
-// rendered-as-HTML pane coexist as sibling divs; switching toggles
-// `hidden` without tearing down either.
-type LeftTab = "editor" | "md-html";
+// Currently-visible left-pane tab. The editor iframe and our
+// structure-preserving HTML render coexist as sibling divs;
+// switching toggles `hidden` without tearing down either.
+type LeftTab = "editor" | "html";
 let activeTab: LeftTab = "editor";
 
 // rhwp-editor handle; populated by createEditor() at boot.
@@ -78,29 +74,33 @@ function renderMarkdown(ir: unknown): { bytes: number; ms: number } {
   );
   markdownEl.textContent = md;
   copyBtn.disabled = md.length === 0;
-  lastMd = md;
-  if (activeTab === "md-html") {
-    renderMdHtml();
+  if (activeTab === "html") {
+    renderStructuredHtml();
   }
   return { bytes: md.length, ms: Math.round(performance.now() - started) };
 }
 
-/// Push the current `lastMd` through marked and drop the HTML into
-/// the MD-preview pane. GFM is on (so pipe tables from the human
-/// exporter render as real `<table>`s). Falls back to plain text on
-/// any parse failure — marked throws string messages occasionally on
-/// malformed input.
-function renderMdHtml(): void {
-  if (!lastMd) {
+/// IR → structure-preserving HTML (real `<table rowspan colspan>`,
+/// `<figure>/<figcaption>`, heading decoding). The wasm exporter
+/// runs on the resident `ourIr` directly, so the render is
+/// independent of whatever shape the MD pane is currently showing —
+/// LLM-mode records render the same as human-mode bullets because
+/// both originate from the same parsed IR.
+function renderStructuredHtml(): void {
+  if (!ourIr) {
     mdPreviewEl.innerHTML =
-      '<p class="hint">파일을 선택하면 여기에 Markdown 렌더링이 나타납니다.</p>';
+      '<p class="hint">파일을 선택하면 여기에 HTML 미리보기가 나타납니다.</p>';
     return;
   }
   try {
-    const html = marked.parse(lastMd, { gfm: true, breaks: false }) as string;
+    // assets_path left undefined — we don't have image blob URLs in
+    // this pane (the editor iframe handles images). emit_styles on
+    // so bold/italic CharShape runs show up; emit_pages off because
+    // real mm dimensions overflow the side pane.
+    const html = exportHtml(ourIr, undefined, emitStylesEl.checked, false);
     mdPreviewEl.innerHTML = html;
   } catch (err) {
-    mdPreviewEl.textContent = `marked 실패: ${String(err)}`;
+    mdPreviewEl.textContent = `exportHtml 실패: ${String(err)}`;
   }
 }
 
@@ -110,9 +110,9 @@ function setTab(target: LeftTab): void {
     btn.classList.toggle("is-active", btn.dataset.target === target);
   });
   previewEl.hidden = target !== "editor";
-  mdPreviewEl.hidden = target !== "md-html";
-  if (target === "md-html") {
-    renderMdHtml();
+  mdPreviewEl.hidden = target !== "html";
+  if (target === "html") {
+    renderStructuredHtml();
   }
 }
 
