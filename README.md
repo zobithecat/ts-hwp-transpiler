@@ -109,6 +109,25 @@ cargo run -p hwp-transpiler-codec --bin hwp-to-md -- path/to/input.hwp
 fixture가 vendor 되어있음 (Apache 2.0). 라운드트립 스위트는 이 vendor된
 파일과 `/test/` 에 직접 둔 개인 HWP를 모두 사용.
 
+## 브라우저 데모
+
+`ts/` 디렉토리에 Vite 기반 데모 페이지가 있음. 미리보기 렌더는
+[`@rhwp/core`](https://www.npmjs.com/package/@rhwp/core) WASM 엔진에
+위임하고, Markdown 출력은 이 프로젝트의 `exportMarkdown`이 생성.
+에디터/뷰어 UI는 의도적으로 다시 만들지 않음.
+
+```sh
+cargo install wasm-pack           # 한 번만
+cd ts
+npm install
+npm run build:wasm                # crates/wasm → ts/src/wasm/
+npm run dev                       # http://localhost:5173
+```
+
+`.hwp` 파일을 드롭하면 왼쪽에 rhwp SVG 프리뷰, 오른쪽에 Markdown이
+나옴. 오른쪽 옵션 토글로 LLM 구조화 모드 / 도메인 힌트 /
+role·editable 태그 / 인라인 스타일을 즉석에서 전환.
+
 ## 현재 동작하는 것
 
 - **/FileHeader, /DocInfo, /BodyText/Section{N}** — 타입드 read +

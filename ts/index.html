@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ts-hwp-transpiler demo</title>
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;700&family=Noto+Serif+KR:wght@400;700&family=Nanum+Gothic&family=Nanum+Myeongjo&display=swap"
+    />
+    <link rel="stylesheet" href="/src/demo.css" />
+  </head>
+  <body>
+    <header>
+      <h1>ts-hwp-transpiler</h1>
+      <p>
+        HWP → Markdown 브라우저 변환 데모. 미리보기 렌더링은
+        <a href="https://www.npmjs.com/package/@rhwp/core" target="_blank"
+          >@rhwp/core</a
+        >,
+        Markdown 변환은 이 프로젝트의 <code>exportMarkdown</code>.
+      </p>
+    </header>
+
+    <main>
+      <section class="controls">
+        <label class="file-picker">
+          <input type="file" id="file" accept=".hwp,.hwpx" />
+          <span>📂 .hwp 파일 선택 / 드래그</span>
+        </label>
+
+        <fieldset class="options">
+          <legend>Markdown 옵션</legend>
+          <label
+            ><input type="checkbox" id="llm-mode" /> LLM 구조화 모드 (stable id ·
+            레코드 형식)</label
+          >
+          <label
+            ><input type="checkbox" id="emit-roles" /> role · editable 태그</label
+          >
+          <label
+            ><input type="checkbox" id="domain-hints" /> 도메인 힌트 (institution_info /
+            budget / …)</label
+          >
+          <label
+            ><input type="checkbox" id="emit-styles" checked /> 인라인 스타일
+            (<code>**bold**</code> · <code>*italic*</code> · <code>~~strike~~</code>) —
+            human 경로 전용</label
+          >
+        </fieldset>
+
+        <div id="status">wasm 로드 중…</div>
+      </section>
+
+      <section class="split">
+        <article class="pane">
+          <header class="pane-header">
+            <h2>미리보기 <span class="tag">@rhwp/core</span></h2>
+            <span id="preview-meta"></span>
+          </header>
+          <div id="preview" class="preview-host">
+            <p class="hint">왼쪽에서 파일을 선택하면 여기에 미리보기가 나타납니다.</p>
+          </div>
+        </article>
+
+        <article class="pane">
+          <header class="pane-header">
+            <h2>Markdown <span class="tag">ts-hwp-transpiler</span></h2>
+            <button id="copy-md" type="button" disabled>복사</button>
+          </header>
+          <pre id="markdown" class="md-host"></pre>
+        </article>
+      </section>
+    </main>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

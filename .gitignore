@@ -4,6 +4,9 @@
 /pkg
 /dist
 /ts/dist
+/ts/node_modules
+# wasm-pack output — regenerate with `npm run build:wasm` in `ts/`.
+/ts/src/wasm/
 .DS_Store
 .idea/
 .vscode/
@@ -11,7 +14,7 @@
 
 # Local AI agent session state.
 /.claude/
-/.omc/
+.omc/
 
 # Fixture corpus: keep .hwp out of git unless explicitly checked in.
 # Large real-world samples (e.g. TRL report ~5MB + 9 JPEG blobs) balloon
