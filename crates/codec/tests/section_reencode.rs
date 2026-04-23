@@ -160,6 +160,98 @@ fn paragraph_header_mutation_flows_through_writer() {
     );
 }
 
+/// `Paragraph::char_shape_runs` (PARA_CHAR_SHAPE typed view) must
+/// flow through the writer — parallel to the header sync path.
+#[test]
+fn char_shape_runs_mutation_flows_through_writer() {
+    use hwp_transpiler_core::ir::CharShapeRun;
+
+    let Some((_bytes, mut doc)) = load_doc(&fixture_path("blank.hwp")) else {
+        return;
+    };
+    if doc.sections.is_empty() || doc.sections[0].paragraphs.is_empty() {
+        return;
+    }
+
+    // Replace the paragraph's runs with a deliberately different
+    // sequence. Two runs (start=0, start=5) referencing shape ids we
+    // can uniquely identify when we re-read.
+    let mutated = vec![
+        CharShapeRun { start: 0, char_shape_id: 42 },
+        CharShapeRun { start: 5, char_shape_id: 99 },
+    ];
+    doc.sections[0].paragraphs_mut()[0].char_shape_runs = mutated.clone();
+
+    let out = HwpWriter.write(&doc).expect("write");
+    let after = HwpReader.read(&out).expect("re-read");
+
+    assert_eq!(
+        after.sections[0].paragraphs[0].char_shape_runs, mutated,
+        "char_shape_runs mutation did not flow through writer"
+    );
+}
+
+/// `Paragraph::line_segments` (PARA_LINE_SEG typed view) must flow
+/// through the writer too.
+#[test]
+fn line_segments_mutation_flows_through_writer() {
+    use hwp_transpiler_core::ir::LineSegment;
+
+    let Some((_bytes, mut doc)) = load_doc(&fixture_path("blank.hwp")) else {
+        return;
+    };
+    if doc.sections.is_empty() || doc.sections[0].paragraphs.is_empty() {
+        return;
+    }
+
+    let mutated = vec![LineSegment {
+        text_start: 0,
+        vertical_position_hwpu: 0,
+        line_height_hwpu: 1234,
+        text_height_hwpu: 1111,
+        baseline_distance_hwpu: 800,
+        line_spacing_hwpu: 600,
+        start_x_hwpu: 0,
+        width_hwpu: 30000,
+        tag: 0x07,
+    }];
+    doc.sections[0].paragraphs_mut()[0].line_segments = mutated.clone();
+
+    let out = HwpWriter.write(&doc).expect("write");
+    let after = HwpReader.read(&out).expect("re-read");
+
+    assert_eq!(
+        after.sections[0].paragraphs[0].line_segments, mutated,
+        "line_segments mutation did not flow through writer"
+    );
+}
+
+/// `Paragraph::text` edits are silently dropped: the typed view is
+/// lossy (extended-control U+FFFC collapse), so we don't try to round-
+/// trip it yet. Document this via a test so that when a typed
+/// PARA_TEXT encoder lands, this test flips and becomes a positive
+/// assertion.
+#[test]
+fn paragraph_text_edits_are_currently_ignored() {
+    let Some((_bytes, mut doc)) = load_doc(&fixture_path("blank.hwp")) else {
+        return;
+    };
+    if doc.sections.is_empty() || doc.sections[0].paragraphs.is_empty() {
+        return;
+    }
+
+    let original_text = doc.sections[0].paragraphs[0].text.clone();
+    doc.sections[0].paragraphs_mut()[0].text = "MUTATED TEXT".into();
+
+    let out = HwpWriter.write(&doc).expect("write");
+    let after = HwpReader.read(&out).expect("re-read");
+
+    assert_eq!(
+        after.sections[0].paragraphs[0].text, original_text,
+        "text edits should be a no-op until PARA_TEXT encoder lands"
+    );
+}
+
 /// Also exercise the TRL fixture (real-world complex document) to
 /// confirm the re-encode path handles nested tables, gso shapes, and
 /// multi-paragraph records without structural loss. Gitignored → skip

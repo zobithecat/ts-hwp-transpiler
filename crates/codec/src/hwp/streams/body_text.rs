@@ -323,18 +323,46 @@ fn collect_section_records(section: &Section) -> Vec<Record> {
     out
 }
 
-/// Return a paragraph's record list with the first record's payload
-/// rewritten from `para.header` — *only* when that first record is
-/// actually a PARA_HEADER (which parse_section always produces). If
-/// the caller hand-built a Paragraph without raw_records, we leave the
-/// list alone; the writer would then emit an empty record stream for
-/// that paragraph, which is invalid HWP but at least doesn't silently
-/// corrupt sibling paragraphs.
+/// Return a paragraph's record list with typed-field updates pulled
+/// back into the *first occurrence* of each projected tag. Covers:
+///
+///   * PARA_HEADER     ← `para.header`
+///   * PARA_CHAR_SHAPE ← `para.char_shape_runs`
+///   * PARA_LINE_SEG   ← `para.line_segments`
+///
+/// PARA_TEXT is intentionally NOT synced: `para.text` is a lossy view
+/// (extended control markers collapse to U+FFFC), so round-tripping
+/// through it would destroy the 16-byte control payloads that HWP5
+/// needs for inline pictures, hyperlinks, etc. Edits to `para.text`
+/// by callers are silently dropped today — a dedicated text-emission
+/// path will come when an inverse of `extract_text` that preserves
+/// extended controls lands.
+///
+/// Only the *first* occurrence of each tag is rewritten. Real HWP5
+/// files carry exactly one PARA_CHAR_SHAPE / PARA_LINE_SEG per
+/// paragraph, so the policy matches production authoring tools; the
+/// first-occurrence rule guards against silent corruption if an
+/// unusual fixture ever contains duplicates.
 fn sync_paragraph_records(para: &Paragraph) -> Vec<Record> {
     let mut records = para.raw_records.clone();
-    if let Some(first) = records.first_mut() {
-        if first.tag == tag::PARA_HEADER {
-            first.data = paragraph_header::emit(&para.header);
+    let mut header_synced = false;
+    let mut char_shape_synced = false;
+    let mut line_seg_synced = false;
+    for rec in &mut records {
+        match rec.tag {
+            tag::PARA_HEADER if !header_synced => {
+                rec.data = paragraph_header::emit(&para.header);
+                header_synced = true;
+            }
+            tag::PARA_CHAR_SHAPE if !char_shape_synced => {
+                rec.data = paragraph_char_shape::emit(&para.char_shape_runs);
+                char_shape_synced = true;
+            }
+            tag::PARA_LINE_SEG if !line_seg_synced => {
+                rec.data = paragraph_line_seg::emit(&para.line_segments);
+                line_seg_synced = true;
+            }
+            _ => {}
         }
     }
     records
