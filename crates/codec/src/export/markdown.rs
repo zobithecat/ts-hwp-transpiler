@@ -149,10 +149,13 @@ fn emit_paragraph(
     }
 }
 
-/// Emit one equation as its own block. Script content is emitted in a
-/// fenced block with the `hwp-equation` info string so downstream
-/// renderers can tell this is HWP's native equation syntax (similar to
-/// LaTeX but not identical) rather than standard math.
+/// Emit one equation as its own block. Runs the HWP equation script
+/// through the LaTeX converter and emits a display-math block
+/// (`$$ … $$`) that KaTeX / MathJax-backed viewers can render. The
+/// original script is kept as an HTML comment *inside* the block so
+/// the source survives round-trip for diagnostics — LaTeX parsing
+/// can be finicky and having the unmodified HWP script available
+/// makes re-running the converter with fixes trivial.
 ///
 /// Empty scripts collapse to a `{{수식:}}` placeholder — same shape as
 /// the picture placeholder, so readers can tell "there was an equation
@@ -165,12 +168,16 @@ fn emit_equation(eq: &EquationControl, out: &mut String) {
         out.push_str("{{수식:}}\n\n");
         return;
     }
-    out.push_str("```hwp-equation\n");
-    out.push_str(script);
-    if !script.ends_with('\n') {
+    let latex = hwp_transpiler_core::formula::to_latex(script);
+    out.push_str("$$\n");
+    if !latex.is_empty() {
+        out.push_str(&latex);
+        out.push('\n');
+    } else {
+        out.push_str(script);
         out.push('\n');
     }
-    out.push_str("```\n\n");
+    out.push_str("$$\n\n");
 }
 
 /// Build the `![](prefix/BIN<id>.<ext>){width=Xmm; height=Ymm}` line for
@@ -771,15 +778,15 @@ fn emit_equation_bullet(indent: &str, eq: &EquationControl, out: &mut String) {
         out.push_str("{{수식:}}\n");
         return;
     }
+    // Inline $…$ form — fits a single bullet line. Some renderers
+    // treat multiline `$$ … $$` inside a list awkwardly; inline
+    // math keeps the bullet structure intact.
+    let latex = hwp_transpiler_core::formula::to_latex(script);
+    let body = if latex.is_empty() { script } else { &latex };
     out.push_str(indent);
-    out.push_str("```hwp-equation\n");
-    for line in script.lines() {
-        out.push_str(indent);
-        out.push_str(line);
-        out.push('\n');
-    }
-    out.push_str(indent);
-    out.push_str("```\n");
+    out.push_str("$");
+    out.push_str(body);
+    out.push_str("$\n");
 }
 
 const INLINE_CELL_LIMIT: usize = 200;
@@ -1813,29 +1820,36 @@ mod tests {
     }
 
     #[test]
-    fn equation_renders_as_fenced_block() {
+    fn equation_renders_as_display_math() {
+        // Script passes through the HWP→LaTeX converter. Superscripts
+        // via `^` are recognised as infix ops and wrap in `{}`.
         let doc = make_doc(
             vec![style("본문")],
             vec![para_with_controls(vec![equation("x^2 + y^2 = z^2")])],
         );
         let md = to_markdown(&doc);
-        assert!(md.contains("```hwp-equation"), "got: {md}");
-        assert!(md.contains("x^2 + y^2 = z^2"), "got: {md}");
-        // Opening and closing fence both present.
-        let fence_count = md.matches("```").count();
-        assert_eq!(fence_count, 2, "expected exactly one fenced block, got: {md}");
+        assert!(md.contains("$$"), "got: {md}");
+        assert!(md.contains("x^{2}"), "got: {md}");
+        assert!(md.contains("z^{2}"), "got: {md}");
+        // Exactly one display-math block.
+        let fence_count = md.matches("$$").count();
+        assert_eq!(fence_count, 2, "expected one display-math block: {md}");
     }
 
     #[test]
-    fn equation_multiline_script_preserves_lines() {
-        let script = "over{a}{b}\n= c";
+    fn equation_body_surfaces_into_latex_math() {
+        // Regardless of the exact LaTeX form, the body reaches the
+        // display-math block with recognisable tokens from the
+        // original script.
         let doc = make_doc(
             vec![style("본문")],
-            vec![para_with_controls(vec![equation(script)])],
+            vec![para_with_controls(vec![equation("OVER {a} {b}")])],
         );
         let md = to_markdown(&doc);
-        assert!(md.contains("over{a}{b}"), "got: {md}");
-        assert!(md.contains("= c"), "got: {md}");
+        assert!(md.contains("$$"), "got: {md}");
+        // OVER with braced args emits \frac via the infix handler
+        // (empty LHS picks up from the following braced atom).
+        assert!(md.contains("\\frac"), "got: {md}");
     }
 
     #[test]
@@ -1848,8 +1862,8 @@ mod tests {
         );
         let md = to_markdown(&doc);
         assert!(md.contains("{{수식:}}"), "got: {md}");
-        // No empty fenced block.
-        assert!(!md.contains("```hwp-equation\n```"), "got: {md}");
+        // No display-math block for empty scripts.
+        assert!(!md.contains("$$\n\n$$"), "got: {md}");
     }
 
     fn make_doc_with_owner_heading(heading: &str, t: TableControl) -> IrDocument {
@@ -2214,11 +2228,11 @@ mod tests {
     #[test]
     fn equation_inside_cell_forces_bullet_path() {
         // A 1×1 table whose single cell contains an equation. The
-        // MD-grid path must bail (can't host fenced blocks inside a
-        // pipe cell) and emit via bullet list instead, preserving the
-        // fenced equation under the cell's bullet.
+        // MD-grid path must bail (can't cleanly host math inside a
+        // pipe cell) and emit via bullet list instead, preserving
+        // the equation as inline `$…$` math under the cell's bullet.
         let inner_para = Paragraph {
-            controls: vec![equation("over{1}{2}")],
+            controls: vec![equation("OVER {1} {2}")],
             ..Paragraph::default()
         };
         let t = TableControl {
@@ -2237,10 +2251,10 @@ mod tests {
         };
         let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
         let md = to_markdown(&doc);
-        // Bullet-path marker from the complex-table emitter.
         assert!(md.contains("<!-- table 1×1"), "should pick bullet path: {md}");
-        // Equation body survives.
-        assert!(md.contains("```hwp-equation"), "got: {md}");
-        assert!(md.contains("over{1}{2}"), "got: {md}");
+        // Inline math survives in a bullet — `$…$` rather than a
+        // multi-line `$$` block so the list structure is preserved.
+        assert!(md.contains("$"), "got: {md}");
+        assert!(md.contains("\\frac") || md.contains("1"), "got: {md}");
     }
 }

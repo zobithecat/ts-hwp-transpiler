@@ -369,6 +369,15 @@ fn emit_equation(eq: &EquationControl, out: &mut String, path: &str) {
         for s in script.lines() {
             line(out, &format!("SCRIPT: {s}"));
         }
+        // Emit a best-effort LaTeX rendering alongside the script so
+        // downstream consumers that want math display (KaTeX /
+        // MathJax) can use it directly, while the SCRIPT line still
+        // anchors the original HWP source for exact edits.
+        let latex =
+            hwp_transpiler_core::formula::to_latex(script);
+        if !latex.is_empty() {
+            line(out, &format!("LATEX: {latex}"));
+        }
     }
     out.push('\n');
 }
