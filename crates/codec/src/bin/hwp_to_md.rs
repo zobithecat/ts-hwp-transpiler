@@ -38,10 +38,13 @@ Options:
                        to each CELL from the visual classifier.
   --emit-editable      With --llm, add editable=true|false|unknown to
                        each CELL from the conservative slot classifier.
-  --emit-domain-hints  With --llm, add kind=<domain> to TABLE markers
-                       when the keyword-based domain inferrer classifies
+  --emit-domain-hints  Classify each table and surface the domain
                        (institution_info / budget / schedule /
-                       performance_metrics / personnel).
+                       performance_metrics / personnel). With --llm,
+                       emitted as kind=<domain> on TABLE markers; in
+                       the human path, as an HTML comment
+                       `<!-- kind: <domain> -->` above the table.
+                       Silent (no output) when Unknown.
   -h, --help           Print this help and exit.
 ";
 
@@ -84,6 +87,11 @@ fn main() -> ExitCode {
             emit_editable: args.emit_editable,
             domain_hints: args.emit_domain_hints,
         }),
+        // Human-path flag: same `--emit-domain-hints` switch now also
+        // enables HTML-comment hints on the non-LLM output. LLM path
+        // continues to use `LlmOptions.domain_hints` (above); on that
+        // branch this field is ignored.
+        domain_hints: args.emit_domain_hints && !args.llm,
     };
     let md = markdown::to_markdown_with(&doc, &md_opts);
 
@@ -258,10 +266,12 @@ fn parse_args(raw: &[String]) -> Result<Option<CliArgs>, String> {
         return Err(format!("unexpected extra argument: {}", positionals[2]));
     }
 
-    if (emit_roles || emit_editable || emit_domain_hints) && !llm {
-        return Err(
-            "--emit-roles / --emit-editable / --emit-domain-hints require --llm".into(),
-        );
+    // `--emit-roles` / `--emit-editable` require `--llm`; the human
+    // Markdown path doesn't have role/editable rendering. But
+    // `--emit-domain-hints` works in both modes now — human path
+    // renders it as an HTML comment above each classified table.
+    if (emit_roles || emit_editable) && !llm {
+        return Err("--emit-roles / --emit-editable require --llm".into());
     }
 
     Ok(Some(CliArgs {

@@ -15,6 +15,7 @@
 use hwp_transpiler_core::ir::{
     ControlKind, EquationControl, IrDocument, Paragraph, PictureControl, TableCell, TableControl,
 };
+use hwp_transpiler_core::semantics::{TableDomain, infer_table_domain};
 
 /// Knobs the caller passes to `to_markdown_with`. The bare `to_markdown`
 /// uses defaults (no asset link emitted; pictures collapse to bare
@@ -31,6 +32,13 @@ pub struct MdOptions {
     /// structured emitter (see `markdown_llm`) instead of the human
     /// Markdown path. Opt-in so existing callers keep the same output.
     pub llm: Option<LlmOptions>,
+    /// Human Markdown path only: when true, prepend an HTML comment
+    /// like `<!-- kind: budget -->` above each classified table so a
+    /// reader (or downstream tool that greps the output) can tell a
+    /// budget / schedule / personnel table apart from prose layout
+    /// tables. Off by default — existing snapshots stay stable.
+    /// Ignored on the LLM path (it has `LlmOptions::domain_hints`).
+    pub domain_hints: bool,
 }
 
 /// Capability flags for the LLM-friendly Markdown layer. Kept minimal on
@@ -101,7 +109,9 @@ fn emit_paragraph(
     }
     for c in &para.controls {
         match &c.kind {
-            ControlKind::Table(t) => emit_table(doc, t, out, depth, opts, picture_counter),
+            ControlKind::Table(t) => {
+                emit_table(doc, t, out, depth, opts, picture_counter, &para.text)
+            }
             ControlKind::Picture(p) => {
                 *picture_counter += 1;
                 emit_picture(doc, p, c.caption_text.as_deref(), out, opts, *picture_counter);
@@ -254,12 +264,14 @@ fn emit_table(
     depth: usize,
     opts: &MdOptions,
     picture_counter: &mut u32,
+    owner_para_text: &str,
 ) {
     if let Some(inner) = try_unwrap_wrapper_table(t) {
         // Pure decorative wrapper (1×1 with one nested table, no own
         // text). Skip the outer frame — emit the inner directly at the
-        // same depth so it doesn't gain a useless extra indent.
-        emit_table(doc, inner, out, depth, opts, picture_counter);
+        // same depth so it doesn't gain a useless extra indent. The
+        // owner text still belongs to the inner table conceptually.
+        emit_table(doc, inner, out, depth, opts, picture_counter, owner_para_text);
         return;
     }
     if let Some((level, text)) = try_table_as_heading(t) {
@@ -276,6 +288,20 @@ fn emit_table(
             return;
         }
     }
+
+    // Domain hint (opt-in): `<!-- kind: budget -->` above the actual
+    // grid / bullet emission. Only fires when the classifier returns
+    // something other than `Unknown`, so unclassified layout tables
+    // stay uncluttered. Nested emissions pass an empty owner text
+    // because the outer paragraph's heading belongs to the outermost
+    // table — nesting a second hint on an inner grid would be noise.
+    if opts.domain_hints {
+        let domain = infer_table_domain(t, owner_para_text);
+        if domain != TableDomain::Unknown {
+            out.push_str(&format!("<!-- kind: {} -->\n", domain.as_str()));
+        }
+    }
+
     if let Some(grid) = try_build_md_grid(t) {
         emit_md_grid(&grid, out);
     } else {
@@ -652,7 +678,10 @@ fn emit_cell_line(
         for c in &p.controls {
             match &c.kind {
                 ControlKind::Table(nested) => {
-                    emit_table(doc, nested, out, depth + 1, opts, picture_counter);
+                    // Nested tables don't inherit the outer owner text
+                    // — passing "" keeps domain classification focused
+                    // on the inner table's own cell corpus.
+                    emit_table(doc, nested, out, depth + 1, opts, picture_counter, "");
                 }
                 ControlKind::Picture(pic) => {
                     *picture_counter += 1;
@@ -1666,6 +1695,110 @@ mod tests {
         assert!(md.contains("{{수식:}}"), "got: {md}");
         // No empty fenced block.
         assert!(!md.contains("```hwp-equation\n```"), "got: {md}");
+    }
+
+    fn make_doc_with_owner_heading(heading: &str, t: TableControl) -> IrDocument {
+        // Heading text helps the domain classifier (owner_para_text
+        // param of infer_table_domain). The table itself is passed in.
+        make_doc(
+            vec![style("본문")],
+            vec![para(0, heading), para_with_table(t)],
+        )
+    }
+
+    #[test]
+    fn domain_hint_off_by_default() {
+        // Budget keywords in the cells → classifier sees Budget. With
+        // the flag off, the emitter should NOT add an HTML comment.
+        let t = TableControl {
+            rows: 1,
+            cols: 3,
+            row_cell_counts: vec![3],
+            cells: vec![
+                cell(0, 0, "구분"),
+                cell(1, 0, "정부지원"),
+                cell(2, 0, "기관 현금"),
+            ],
+            ..TableControl::default()
+        };
+        let doc = make_doc_with_owner_heading("", t);
+        let md = to_markdown(&doc);
+        assert!(!md.contains("<!-- kind"), "got: {md}");
+    }
+
+    #[test]
+    fn domain_hint_surfaces_classified_table_when_enabled() {
+        // Same table as above but run with `domain_hints = true`; the
+        // classifier puts it in Budget, so a comment should appear.
+        let t = TableControl {
+            rows: 1,
+            cols: 3,
+            row_cell_counts: vec![3],
+            cells: vec![
+                cell(0, 0, "구분"),
+                cell(1, 0, "정부지원"),
+                cell(2, 0, "기관 현금"),
+            ],
+            ..TableControl::default()
+        };
+        let doc = make_doc_with_owner_heading("", t);
+        let opts = MdOptions {
+            domain_hints: true,
+            ..MdOptions::default()
+        };
+        let md = to_markdown_with(&doc, &opts);
+        assert!(md.contains("<!-- kind: budget -->"), "got: {md}");
+    }
+
+    #[test]
+    fn domain_hint_silent_on_unknown() {
+        // Unclassified layout table — no keywords hit. Even with the
+        // flag on, the comment must stay suppressed so unrelated
+        // tables stay uncluttered.
+        let t = TableControl {
+            rows: 1,
+            cols: 2,
+            row_cell_counts: vec![2],
+            cells: vec![cell(0, 0, "항목"), cell(1, 0, "내용")],
+            ..TableControl::default()
+        };
+        let doc = make_doc_with_owner_heading("", t);
+        let opts = MdOptions {
+            domain_hints: true,
+            ..MdOptions::default()
+        };
+        let md = to_markdown_with(&doc, &opts);
+        assert!(!md.contains("<!-- kind"), "got: {md}");
+    }
+
+    #[test]
+    fn domain_hint_uses_owner_paragraph_text_for_classification() {
+        // Cells don't have enough budget vocabulary to trigger on
+        // their own, but the hosting paragraph's own text carries
+        // two budget keywords — classification fires once the
+        // emitter threads `para.text` through as the owner hint.
+        let t = TableControl {
+            rows: 1,
+            cols: 3,
+            row_cell_counts: vec![3],
+            cells: vec![cell(0, 0, "A"), cell(1, 0, "B"), cell(2, 0, "C")],
+            ..TableControl::default()
+        };
+        let para_hosting_table = Paragraph {
+            text: "6. 연구비 사용계획 (예산 집행)".into(),
+            controls: vec![Control {
+                kind: ControlKind::Table(t),
+                ..Default::default()
+            }],
+            ..Paragraph::default()
+        };
+        let doc = make_doc(vec![style("본문")], vec![para_hosting_table]);
+        let opts = MdOptions {
+            domain_hints: true,
+            ..MdOptions::default()
+        };
+        let md = to_markdown_with(&doc, &opts);
+        assert!(md.contains("<!-- kind: budget -->"), "got: {md}");
     }
 
     #[test]
