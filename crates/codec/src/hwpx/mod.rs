@@ -9,9 +9,11 @@
 
 pub mod header_xml;
 pub mod reader;
+pub mod section_writer;
 pub mod section_xml;
 pub mod writer;
 pub mod zip_reader;
+pub mod zip_writer;
 
 pub use reader::HwpxReader;
 pub use writer::HwpxWriter;

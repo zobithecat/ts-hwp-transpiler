@@ -2,8 +2,8 @@
 //! isn't on disk — the user-authored sample sits in `/test/` which
 //! is git-ignored, so CI won't see it.
 
-use hwp_transpiler_codec::hwpx::HwpxReader;
-use hwp_transpiler_core::ir::{ControlKind, Reader};
+use hwp_transpiler_codec::hwpx::{HwpxReader, HwpxWriter};
+use hwp_transpiler_core::ir::{ControlKind, Reader, Writer};
 use std::path::Path;
 
 fn repo_path(rel: &str) -> std::path::PathBuf {
@@ -76,5 +76,50 @@ fn real_hwpx_preserves_bindata_in_unknown_streams() {
     assert!(
         has_bin,
         "expected BinData/ entries to land in unknown_streams"
+    );
+}
+
+/// Read → write → read round-trip. Byte equality is out of scope
+/// (reader drops layout / styling detail the writer can't reproduce),
+/// but paragraph count and the first paragraph's text should survive
+/// the XML re-emit without data loss.
+#[test]
+fn real_hwpx_round_trips_through_writer() {
+    let Some(doc) = load_sample() else {
+        return;
+    };
+    let bytes = HwpxWriter::default().write(&doc).expect("write");
+    // Re-read the freshly emitted archive.
+    let reloaded = HwpxReader.read(&bytes).expect("reload");
+
+    assert_eq!(
+        reloaded.sections.len(),
+        doc.sections.len(),
+        "section count changed during round-trip"
+    );
+
+    let orig_para_total: usize =
+        doc.sections.iter().map(|s| s.paragraphs.len()).sum();
+    let rel_para_total: usize =
+        reloaded.sections.iter().map(|s| s.paragraphs.len()).sum();
+    assert_eq!(
+        orig_para_total, rel_para_total,
+        "paragraph count changed during round-trip"
+    );
+
+    // Spot-check: first non-empty paragraph text matches across the
+    // round-trip. Skips empty paragraphs since the writer may emit a
+    // slightly different empty-run shape than the reader consumed.
+    let first_text = |d: &hwp_transpiler_core::ir::IrDocument| -> Option<String> {
+        d.sections
+            .iter()
+            .flat_map(|s| &s.paragraphs)
+            .map(|p| p.text.clone())
+            .find(|t| !t.trim().is_empty())
+    };
+    assert_eq!(
+        first_text(&doc),
+        first_text(&reloaded),
+        "first non-empty paragraph text drifted"
     );
 }
