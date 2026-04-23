@@ -14,6 +14,7 @@
 // has its own wasm; our wasm is co-located next to main.ts.
 
 import { createEditor } from "@rhwp/editor";
+import { marked } from "marked";
 
 import init, {
   loadHwp,
@@ -27,9 +28,13 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string): T =>
 const fileInput = $<HTMLInputElement>("file");
 const statusEl = $("status");
 const previewEl = $("preview");
+const mdPreviewEl = $("md-preview");
 const previewMeta = $("preview-meta");
 const markdownEl = $<HTMLPreElement>("markdown");
 const copyBtn = $<HTMLButtonElement>("copy-md");
+const tabButtons = document.querySelectorAll<HTMLButtonElement>(
+  ".tabs .tab",
+);
 
 const llmModeEl = $<HTMLInputElement>("llm-mode");
 const emitRolesEl = $<HTMLInputElement>("emit-roles");
@@ -39,6 +44,16 @@ const emitStylesEl = $<HTMLInputElement>("emit-styles");
 // Resident IR. We don't re-parse on option changes — just flip the
 // knobs against the cached IR.
 let ourIr: unknown = null;
+
+// Cached MD text so tab switches to "MD 미리보기" can re-render
+// through marked without touching the exporter.
+let lastMd = "";
+
+// Currently-visible left-pane tab. The editor iframe and the MD-
+// rendered-as-HTML pane coexist as sibling divs; switching toggles
+// `hidden` without tearing down either.
+type LeftTab = "editor" | "md-html";
+let activeTab: LeftTab = "editor";
 
 // rhwp-editor handle; populated by createEditor() at boot.
 let editor: Awaited<ReturnType<typeof createEditor>> | null = null;
@@ -63,7 +78,42 @@ function renderMarkdown(ir: unknown): { bytes: number; ms: number } {
   );
   markdownEl.textContent = md;
   copyBtn.disabled = md.length === 0;
+  lastMd = md;
+  if (activeTab === "md-html") {
+    renderMdHtml();
+  }
   return { bytes: md.length, ms: Math.round(performance.now() - started) };
+}
+
+/// Push the current `lastMd` through marked and drop the HTML into
+/// the MD-preview pane. GFM is on (so pipe tables from the human
+/// exporter render as real `<table>`s). Falls back to plain text on
+/// any parse failure — marked throws string messages occasionally on
+/// malformed input.
+function renderMdHtml(): void {
+  if (!lastMd) {
+    mdPreviewEl.innerHTML =
+      '<p class="hint">파일을 선택하면 여기에 Markdown 렌더링이 나타납니다.</p>';
+    return;
+  }
+  try {
+    const html = marked.parse(lastMd, { gfm: true, breaks: false }) as string;
+    mdPreviewEl.innerHTML = html;
+  } catch (err) {
+    mdPreviewEl.textContent = `marked 실패: ${String(err)}`;
+  }
+}
+
+function setTab(target: LeftTab): void {
+  activeTab = target;
+  tabButtons.forEach((btn) => {
+    btn.classList.toggle("is-active", btn.dataset.target === target);
+  });
+  previewEl.hidden = target !== "editor";
+  mdPreviewEl.hidden = target !== "md-html";
+  if (target === "md-html") {
+    renderMdHtml();
+  }
 }
 
 async function loadIntoEditor(
@@ -126,6 +176,13 @@ for (const el of [llmModeEl, emitRolesEl, domainHintsEl, emitStylesEl]) {
     setStatus(`MD ${m.bytes.toLocaleString()} bytes / ${m.ms}ms`);
   });
 }
+
+tabButtons.forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const target = btn.dataset.target as LeftTab | undefined;
+    if (target) setTab(target);
+  });
+});
 
 copyBtn.addEventListener("click", async () => {
   const text = markdownEl.textContent ?? "";

@@ -49,13 +49,33 @@
       </section>
 
       <section class="split">
-        <article class="pane">
+        <article class="pane preview-pane" data-tab="editor">
           <header class="pane-header">
-            <h2>에디터 <span class="tag">@rhwp/editor</span></h2>
+            <nav class="tabs" role="tablist">
+              <button
+                type="button"
+                class="tab is-active"
+                role="tab"
+                data-target="editor"
+              >
+                에디터 <span class="tag">@rhwp/editor</span>
+              </button>
+              <button
+                type="button"
+                class="tab"
+                role="tab"
+                data-target="md-html"
+              >
+                MD 미리보기 <span class="tag">marked</span>
+              </button>
+            </nav>
             <span id="preview-meta"></span>
           </header>
           <div id="preview" class="preview-host editor-host">
             <p class="hint">iframe 로드 중…</p>
+          </div>
+          <div id="md-preview" class="preview-host md-preview-host" hidden>
+            <p class="hint">파일을 선택하면 여기에 Markdown 렌더링이 나타납니다.</p>
           </div>
         </article>
 

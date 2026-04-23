@@ -195,6 +195,104 @@ main {
   border: 0;
 }
 
+/* Two-tab switcher inside the left pane. The iframe pane and the
+   marked-rendered pane are both children of the same <article>; tab
+   clicks toggle `hidden` on the inactive one and the `is-active`
+   class on the clicked button. No framework — the DOM is small. */
+.tabs {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.tabs .tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.3rem 0.6rem;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.tabs .tab:hover {
+  background: #fafafa;
+  color: var(--fg);
+}
+
+.tabs .tab.is-active {
+  background: white;
+  color: var(--fg);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+/* Reset the 중첩 .tag styling so it sits cleanly inside a tab button
+   regardless of the button's active state. */
+.tabs .tab .tag {
+  margin-left: 0;
+}
+
+/* Marked renders our MD into standard HTML; style just enough to
+   make headings/tables/lists legible in preview. Intentionally
+   minimal — the goal is "does the MD look reasonable?", not "beat
+   a full-fat markdown stylesheet". */
+.md-preview-host {
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+
+.md-preview-host h1,
+.md-preview-host h2,
+.md-preview-host h3 {
+  margin-top: 1.2em;
+  margin-bottom: 0.4em;
+}
+
+.md-preview-host table {
+  border-collapse: collapse;
+  margin: 0.5rem 0;
+  font-size: 0.85rem;
+}
+
+.md-preview-host th,
+.md-preview-host td {
+  border: 1px solid #d0d0d4;
+  padding: 0.3rem 0.5rem;
+  vertical-align: top;
+}
+
+.md-preview-host ul,
+.md-preview-host ol {
+  padding-left: 1.2rem;
+}
+
+.md-preview-host code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  background: #f0f0f4;
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+.md-preview-host pre {
+  background: #fcfcfd;
+  border: 1px solid var(--border);
+  padding: 0.6rem 0.8rem;
+  overflow-x: auto;
+  font-size: 0.8rem;
+}
+
+.md-preview-host blockquote {
+  margin: 0.5rem 0;
+  padding-left: 0.8rem;
+  border-left: 3px solid var(--border);
+  color: var(--muted);
+}
+
 .pane-header .tag {
   display: inline-block;
   margin-left: 0.4rem;
