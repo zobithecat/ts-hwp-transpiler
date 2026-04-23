@@ -15,13 +15,13 @@
 //! and type-specific styling lands later.
 //!
 //! Not implemented yet:
-//!   - page / column boundaries
+//!   - column boundaries (page boundaries now covered by `emit_pages`)
 //!   - equation rendering (passed through as text)
-//!   - CharShape-level font / colour
 //!   - box-as-heading decoding (handled in Markdown path only)
 
 use hwp_transpiler_core::ir::{
-    BinData, ControlKind, IrDocument, Paragraph, PictureControl, TableCell, TableControl,
+    BinData, CharShape, CharShapeRun, ControlKind, FontFaces, IrDocument, Paragraph,
+    PictureControl, Section, SectionProperties, TableCell, TableControl,
 };
 
 /// Rendering knobs. Mirrors `codec::export::markdown::MdOptions`
@@ -32,6 +32,19 @@ pub struct HtmlOptions {
     /// asset directory. When `None`, `<img>` tags are omitted from
     /// figures (caption-only rendering).
     pub assets_path: Option<String>,
+    /// Wrap each `CharShapeRun` in inline HTML: `<strong>`, `<em>`, `<s>`
+    /// for bold/italic/strike, plus `<span style="color:…;font-size:…pt;
+    /// font-family:…">` when the referenced `CharShape` deviates from
+    /// HWP's defaults (black, 10pt, hangul slot 0). Runs on the document
+    /// default pass through as plain text so the output stays readable
+    /// when nothing is emphasised. Mirrors `MdOptions.emit_styles`.
+    pub emit_styles: bool,
+    /// Wrap each HWP section in `<section class="hwp-page" style="…">`
+    /// carrying the page width/height and margins (HWPUNIT → mm). The
+    /// caller styles the class with CSS to get a print-accurate preview
+    /// shell. When off, sections render as plain unstyled `<section>`
+    /// (the previous default behaviour).
+    pub emit_pages: bool,
 }
 
 pub fn to_html(doc: &IrDocument) -> String {
@@ -42,7 +55,7 @@ pub fn to_html_with(doc: &IrDocument, opts: &HtmlOptions) -> String {
     let mut out = String::new();
     out.push_str("<article class=\"hwp-preview\">\n");
     for section in &doc.sections {
-        out.push_str("<section>\n");
+        emit_section_open(section, &mut out, opts);
         for para in &section.paragraphs {
             emit_paragraph(doc, para, &mut out, opts);
         }
@@ -52,23 +65,32 @@ pub fn to_html_with(doc: &IrDocument, opts: &HtmlOptions) -> String {
     out
 }
 
+fn emit_section_open(section: &Section, out: &mut String, opts: &HtmlOptions) {
+    if opts.emit_pages {
+        out.push_str(&page_open_tag(&section.properties));
+    } else {
+        out.push_str("<section>\n");
+    }
+}
+
 fn emit_paragraph(doc: &IrDocument, para: &Paragraph, out: &mut String, opts: &HtmlOptions) {
-    let text = clean_text(&para.text);
-    if !text.is_empty() {
+    let body = render_para_text(doc, para, opts);
+    let has_text = body_has_visible(&body);
+    if has_text {
         match heading_level(doc, para) {
             Some(level) => {
                 let tag = format!("h{}", level.clamp(1, 6));
                 out.push('<');
                 out.push_str(&tag);
                 out.push('>');
-                out.push_str(&escape_html(&text));
+                out.push_str(&body);
                 out.push_str("</");
                 out.push_str(&tag);
                 out.push_str(">\n");
             }
             None => {
                 out.push_str("<p>");
-                out.push_str(&escape_html(&text));
+                out.push_str(&body);
                 out.push_str("</p>\n");
             }
         }
@@ -82,6 +104,41 @@ fn emit_paragraph(doc: &IrDocument, para: &Paragraph, out: &mut String, opts: &H
             _ => {}
         }
     }
+}
+
+/// Pick between styled and plain rendering. Styled goes through
+/// `styled_text_html` (character-level walk with inline tags),
+/// plain uses `clean_text` + `escape_html` — which is also the
+/// correct fallback when the paragraph has no CharShapeRuns.
+fn render_para_text(doc: &IrDocument, para: &Paragraph, opts: &HtmlOptions) -> String {
+    if opts.emit_styles && !para.char_shape_runs.is_empty() {
+        styled_text_html(
+            &para.text,
+            &para.char_shape_runs,
+            &doc.doc_info.char_shapes,
+            &doc.doc_info.font_faces,
+        )
+    } else {
+        escape_html(&clean_text(&para.text))
+    }
+}
+
+/// Whether a styled-or-plain HTML body contains any visible content
+/// beyond whitespace and tags. Prevents emitting an empty `<p></p>`
+/// when a paragraph's char-shape-driven span happens to collapse to
+/// nothing (e.g. the paragraph was just U+FFFC placeholders).
+fn body_has_visible(s: &str) -> bool {
+    let mut in_tag = false;
+    for c in s.chars() {
+        if c == '<' {
+            in_tag = true;
+        } else if c == '>' {
+            in_tag = false;
+        } else if !in_tag && !c.is_whitespace() {
+            return true;
+        }
+    }
+    false
 }
 
 fn emit_table(doc: &IrDocument, t: &TableControl, out: &mut String, opts: &HtmlOptions) {
@@ -112,13 +169,15 @@ fn emit_cell(doc: &IrDocument, cell: &TableCell, out: &mut String, opts: &HtmlOp
         out.push_str(&format!(" colspan=\"{}\"", cell.col_span));
     }
     out.push_str(">");
-    for (i, p) in cell.paragraphs.iter().enumerate() {
-        let text = clean_text(&p.text);
-        if !text.is_empty() {
-            if i > 0 {
+    let mut wrote_text = false;
+    for p in cell.paragraphs.iter() {
+        let body = render_para_text(doc, p, opts);
+        if body_has_visible(&body) {
+            if wrote_text {
                 out.push_str("<br>");
             }
-            out.push_str(&escape_html(&text));
+            out.push_str(&body);
+            wrote_text = true;
         }
         for ctrl in &p.controls {
             match &ctrl.kind {
@@ -279,6 +338,181 @@ fn escape_html(s: &str) -> String {
 /// Stricter escape for attribute values (double quote context).
 fn escape_attr(s: &str) -> String {
     escape_html(s)
+}
+
+/// Character-level walk that mirrors [`clean_text`] (same UTF-16 offset
+/// math, same NBSP/FFFC/PUA translations, same whitespace rules inside
+/// a run) but emits inline HTML tags for each `CharShapeRun`:
+///
+///   * `<span style="…">` — when the referenced shape's colour, font
+///     size, or Hangul-slot font family differs from HWP defaults.
+///   * `<s>` — strike
+///   * `<strong>` — bold
+///   * `<em>` — italic
+///
+/// Nesting order is strike > bold > italic (outer → inner), matching
+/// the Markdown exporter's wrapper order so semantics line up across
+/// the two outputs. The `<span>` (if any) wraps everything so CSS
+/// styles apply across the whole run including nested emphasis.
+fn styled_text_html(
+    text: &str,
+    runs: &[CharShapeRun],
+    shapes: &[CharShape],
+    fonts: &FontFaces,
+) -> String {
+    if runs.is_empty() {
+        return escape_html(&clean_text(text));
+    }
+    let mut out = String::new();
+    let mut u16_pos: u32 = 0;
+    let mut open_tags: Vec<&'static str> = Vec::new();
+    let mut span_open = false;
+    let mut active_shape_id: Option<u32> = None;
+
+    for c in text.chars() {
+        let c_len = c.len_utf16() as u32;
+        let new_shape_id = runs
+            .iter()
+            .rev()
+            .find(|r| r.start <= u16_pos)
+            .map(|r| r.char_shape_id);
+
+        if new_shape_id != active_shape_id {
+            while let Some(t) = open_tags.pop() {
+                out.push_str(t);
+            }
+            if span_open {
+                out.push_str("</span>");
+                span_open = false;
+            }
+            if let Some(sid) = new_shape_id {
+                if let Some(shape) = shapes.get(sid as usize) {
+                    let style = compute_span_style(shape, fonts);
+                    if !style.is_empty() {
+                        out.push_str("<span style=\"");
+                        out.push_str(&style);
+                        out.push_str("\">");
+                        span_open = true;
+                    }
+                    if shape.strike() {
+                        out.push_str("<s>");
+                        open_tags.push("</s>");
+                    }
+                    if shape.bold() {
+                        out.push_str("<strong>");
+                        open_tags.push("</strong>");
+                    }
+                    if shape.italic() {
+                        out.push_str("<em>");
+                        open_tags.push("</em>");
+                    }
+                }
+            }
+            active_shape_id = new_shape_id;
+        }
+
+        match c {
+            '\u{FFFC}' | '\u{00AD}' => {}
+            '\u{00A0}' | '\u{2003}' => out.push(' '),
+            _ => {
+                let t = translate_pua_bullet(c).unwrap_or(c);
+                match t {
+                    '&' => out.push_str("&amp;"),
+                    '<' => out.push_str("&lt;"),
+                    '>' => out.push_str("&gt;"),
+                    '"' => out.push_str("&quot;"),
+                    '\'' => out.push_str("&#39;"),
+                    _ => out.push(t),
+                }
+            }
+        }
+        u16_pos += c_len;
+    }
+    while let Some(t) = open_tags.pop() {
+        out.push_str(t);
+    }
+    if span_open {
+        out.push_str("</span>");
+    }
+    out
+}
+
+/// Build the CSS declarations inside a span's `style="…"` for a shape.
+/// Empty when the shape matches HWP defaults in all of colour (black),
+/// font size (10 pt), and resolvable Hangul-slot font family — so the
+/// caller can skip emitting an empty `<span>` entirely.
+fn compute_span_style(shape: &CharShape, fonts: &FontFaces) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    if shape.color != 0 {
+        let r = (shape.color & 0xFF) as u8;
+        let g = ((shape.color >> 8) & 0xFF) as u8;
+        let b = ((shape.color >> 16) & 0xFF) as u8;
+        parts.push(format!("color:#{:02x}{:02x}{:02x}", r, g, b));
+    }
+
+    // CharShape.base_size is in 1/100 pt. HWP's default body size is
+    // 10 pt (1000), so skip when it matches — avoids a span on every
+    // default-styled run.
+    if shape.base_size != 1000 {
+        let pt = (shape.base_size as f32) / 100.0;
+        if (pt.fract()).abs() < 0.05 {
+            parts.push(format!("font-size:{}pt", pt as i32));
+        } else {
+            parts.push(format!("font-size:{:.1}pt", pt));
+        }
+    }
+
+    if let Some(name) = resolve_font_name(shape, fonts) {
+        if !name.is_empty() {
+            parts.push(format!("font-family:'{}'", escape_css_font(name)));
+        }
+    }
+
+    parts.join(";")
+}
+
+/// Look up the shape's primary font name through the Hangul slot
+/// (`font_ids[0]`). Other slots (latin/hanja/...) are intentionally
+/// ignored: CSS `font-family` is a single fallback list and HWP's
+/// script-switching model doesn't map cleanly onto the web. Hangul is
+/// the dominant slot for Korean documents, so use it as the surface
+/// signal and let the browser fall back.
+fn resolve_font_name<'a>(shape: &CharShape, fonts: &'a FontFaces) -> Option<&'a str> {
+    let id = shape.font_ids[0] as usize;
+    fonts.hangul.get(id).map(|f| f.name.as_str())
+}
+
+/// Strip characters that would break a single-quoted `font-family`
+/// attribute value. Real CSS escaping is finicky (backslash sequences);
+/// for preview use the conservative approach of dropping the two
+/// problem characters — fonts legitimately containing `'` or `\` are
+/// vanishingly rare in HWP documents.
+fn escape_css_font(s: &str) -> String {
+    s.chars().filter(|c| *c != '\'' && *c != '\\').collect()
+}
+
+/// Emit `<section class="hwp-page" style="width:…mm;height:…mm;padding:
+/// Tmm Rmm Bmm Lmm">`. When the section's properties carry zero
+/// width/height (defaulted section with no PageDef decoded), fall back
+/// to a plain `hwp-page` class with no inline dimensions so downstream
+/// CSS can still target it.
+fn page_open_tag(props: &SectionProperties) -> String {
+    if props.page_width_hwpu == 0 || props.page_height_hwpu == 0 {
+        return "<section class=\"hwp-page\">\n".into();
+    }
+    let w = hwpunit_to_mm(props.page_width_hwpu);
+    let h = hwpunit_to_mm(props.page_height_hwpu);
+    let [t, r, b, l] = props.margins_hwpu;
+    format!(
+        "<section class=\"hwp-page\" style=\"width:{}mm;height:{}mm;padding:{}mm {}mm {}mm {}mm\">\n",
+        w,
+        h,
+        hwpunit_to_mm(t),
+        hwpunit_to_mm(r),
+        hwpunit_to_mm(b),
+        hwpunit_to_mm(l)
+    )
 }
 
 #[cfg(test)]
@@ -460,7 +694,7 @@ mod tests {
         });
         let html = to_html_with(
             &doc,
-            &HtmlOptions { assets_path: Some("x.assets".into()) },
+            &HtmlOptions { assets_path: Some("x.assets".into()), ..Default::default() },
         );
         assert!(html.contains("<figure>"));
         assert!(
@@ -502,5 +736,185 @@ mod tests {
         let html = to_html(&doc);
         assert!(html.contains("① 첫 째"), "got: {html}");
         assert!(!html.contains('\u{FFFC}'));
+    }
+
+    fn styled_doc(text: &str, runs: Vec<CharShapeRun>, shapes: Vec<CharShape>) -> IrDocument {
+        let mut doc = IrDocument::default();
+        doc.doc_info.styles = vec![style("본문")];
+        doc.doc_info.char_shapes = shapes;
+        doc.sections.push(Section {
+            paragraphs: vec![Paragraph {
+                header: ParagraphHeader { style_id: 0, ..ParagraphHeader::default() },
+                text: text.into(),
+                char_shape_runs: runs,
+                ..Paragraph::default()
+            }],
+            ..Section::default()
+        });
+        doc
+    }
+
+    fn bold_shape() -> CharShape {
+        let mut s = CharShape::default();
+        s.base_size = 1000;
+        s.attr = 0x0000_0002; // bold bit
+        s
+    }
+
+    fn italic_shape() -> CharShape {
+        let mut s = CharShape::default();
+        s.base_size = 1000;
+        s.attr = 0x0000_0001; // italic bit
+        s
+    }
+
+    fn strike_shape() -> CharShape {
+        let mut s = CharShape::default();
+        s.base_size = 1000;
+        s.attr = 1 << 21;
+        s
+    }
+
+    fn default_shape() -> CharShape {
+        let mut s = CharShape::default();
+        s.base_size = 1000;
+        s
+    }
+
+    #[test]
+    fn emit_styles_off_ignores_char_shape_runs() {
+        let doc = styled_doc(
+            "굵게 보통",
+            vec![
+                CharShapeRun { start: 0, char_shape_id: 0 },
+                CharShapeRun { start: 2, char_shape_id: 1 },
+            ],
+            vec![bold_shape(), default_shape()],
+        );
+        let html = to_html(&doc);
+        assert!(!html.contains("<strong>"), "emit_styles=false but got: {html}");
+        assert!(html.contains("굵게 보통"), "got: {html}");
+    }
+
+    #[test]
+    fn emit_styles_wraps_bold_italic_strike() {
+        let doc = styled_doc(
+            "ABCD",
+            vec![
+                CharShapeRun { start: 0, char_shape_id: 0 }, // bold
+                CharShapeRun { start: 1, char_shape_id: 1 }, // italic
+                CharShapeRun { start: 2, char_shape_id: 2 }, // strike
+                CharShapeRun { start: 3, char_shape_id: 3 }, // default
+            ],
+            vec![bold_shape(), italic_shape(), strike_shape(), default_shape()],
+        );
+        let html = to_html_with(&doc, &HtmlOptions { emit_styles: true, ..Default::default() });
+        assert!(html.contains("<strong>A</strong>"), "got: {html}");
+        assert!(html.contains("<em>B</em>"), "got: {html}");
+        assert!(html.contains("<s>C</s>"), "got: {html}");
+        // Default run after strike emits plain text.
+        assert!(html.contains("</s>D"), "default run should be unwrapped: {html}");
+    }
+
+    #[test]
+    fn emit_styles_colored_run_gets_span_with_hex_color() {
+        let mut colored = default_shape();
+        colored.color = 0x00_00_00_FF; // R = 0xFF, G = 0x00, B = 0x00 → red
+        let doc = styled_doc(
+            "X",
+            vec![CharShapeRun { start: 0, char_shape_id: 0 }],
+            vec![colored],
+        );
+        let html = to_html_with(&doc, &HtmlOptions { emit_styles: true, ..Default::default() });
+        assert!(
+            html.contains("<span style=\"color:#ff0000\">X</span>"),
+            "got: {html}"
+        );
+    }
+
+    #[test]
+    fn emit_styles_nondefault_font_size_emits_span() {
+        let mut big = default_shape();
+        big.base_size = 1500; // 15 pt
+        let doc = styled_doc(
+            "X",
+            vec![CharShapeRun { start: 0, char_shape_id: 0 }],
+            vec![big],
+        );
+        let html = to_html_with(&doc, &HtmlOptions { emit_styles: true, ..Default::default() });
+        assert!(html.contains("font-size:15pt"), "got: {html}");
+    }
+
+    #[test]
+    fn emit_styles_default_shape_emits_no_span() {
+        let doc = styled_doc(
+            "ABC",
+            vec![CharShapeRun { start: 0, char_shape_id: 0 }],
+            vec![default_shape()],
+        );
+        let html = to_html_with(&doc, &HtmlOptions { emit_styles: true, ..Default::default() });
+        // No colour, default size, no font-face data → no span, no tag noise.
+        assert!(!html.contains("<span"), "default shape shouldn't emit span: {html}");
+        assert!(html.contains("<p>ABC</p>"), "got: {html}");
+    }
+
+    #[test]
+    fn emit_styles_font_family_from_hangul_slot() {
+        use hwp_transpiler_core::ir::FontFace;
+        let mut doc = styled_doc(
+            "가",
+            vec![CharShapeRun { start: 0, char_shape_id: 0 }],
+            vec![default_shape()],
+        );
+        doc.doc_info.font_faces.hangul.push(FontFace {
+            properties: 0,
+            name: "함초롬바탕".into(),
+            substitute: None,
+            type_info: None,
+            default_name: None,
+        });
+        let html = to_html_with(&doc, &HtmlOptions { emit_styles: true, ..Default::default() });
+        assert!(
+            html.contains("font-family:'함초롬바탕'"),
+            "got: {html}"
+        );
+    }
+
+    #[test]
+    fn emit_pages_off_keeps_plain_section() {
+        let doc = make_doc(vec![style("본문")], vec![para(0, "hi")]);
+        let html = to_html(&doc);
+        assert!(html.contains("<section>\n"), "got: {html}");
+        assert!(!html.contains("hwp-page"), "got: {html}");
+    }
+
+    #[test]
+    fn emit_pages_on_with_dims_wraps_hwp_page_section() {
+        let mut doc = make_doc(vec![style("본문")], vec![para(0, "hi")]);
+        // A4 portrait ≈ 59528 × 84168 HWPUNIT, margins 20mm / 15mm / 20mm / 15mm.
+        doc.sections[0].properties = SectionProperties {
+            page_width_hwpu: 59528,
+            page_height_hwpu: 84168,
+            margins_hwpu: [5669, 4251, 5669, 4251],
+            columns: 1,
+        };
+        let html = to_html_with(&doc, &HtmlOptions { emit_pages: true, ..Default::default() });
+        assert!(
+            html.contains("<section class=\"hwp-page\""),
+            "got: {html}"
+        );
+        assert!(html.contains("width:210mm"), "got: {html}");
+        assert!(html.contains("height:297mm"), "got: {html}");
+        assert!(html.contains("padding:20mm 15mm 20mm 15mm"), "got: {html}");
+    }
+
+    #[test]
+    fn emit_pages_on_with_zero_dims_falls_back_to_plain_class() {
+        let doc = make_doc(vec![style("본문")], vec![para(0, "hi")]);
+        let html = to_html_with(&doc, &HtmlOptions { emit_pages: true, ..Default::default() });
+        // Class still present so CSS can target; no inline style when
+        // no real dimensions were decoded.
+        assert!(html.contains("<section class=\"hwp-page\">"), "got: {html}");
+        assert!(!html.contains("width:0mm"), "got: {html}");
     }
 }

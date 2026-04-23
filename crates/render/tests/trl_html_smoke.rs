@@ -37,6 +37,7 @@ fn trl_html_has_tables_and_figures() {
         &doc,
         &HtmlOptions {
             assets_path: Some("trl.assets".into()),
+            ..Default::default()
         },
     );
 
@@ -95,4 +96,69 @@ fn trl_html_is_deterministic() {
     let a = to_html_with(&doc, &HtmlOptions::default());
     let b = to_html_with(&doc, &HtmlOptions::default());
     assert_eq!(a, b);
+}
+
+#[test]
+fn trl_emit_pages_surfaces_page_dims_from_page_def() {
+    let Some(doc) = load_trl() else {
+        eprintln!("skipping: TRL fixture not present");
+        return;
+    };
+
+    // Sanity: PAGE_DEF decoded → SectionProperties no longer zero.
+    let props = &doc.sections[0].properties;
+    assert!(
+        props.page_width_hwpu > 0 && props.page_height_hwpu > 0,
+        "PAGE_DEF should populate page dims, got {props:?}"
+    );
+
+    let html = to_html_with(
+        &doc,
+        &HtmlOptions {
+            emit_pages: true,
+            ..Default::default()
+        },
+    );
+
+    // Inline style with real mm dimensions appears.
+    assert!(
+        html.contains("<section class=\"hwp-page\" style=\"width:"),
+        "expected emit_pages to produce inline dims; got prefix:\n{}",
+        &html[..html.len().min(400)]
+    );
+    assert!(html.contains("padding:"), "expected padding to appear");
+    // A4-ish page should yield height:297mm (portrait) or 210mm
+    // (landscape); either way, sane non-zero mm values.
+    let has_sane_height = html.contains("height:297mm")
+        || html.contains("height:210mm")
+        || html.contains("height:296mm"); // rounding tolerance
+    assert!(
+        has_sane_height,
+        "expected A4-ish height, got output without recognisable mm"
+    );
+}
+
+#[test]
+fn trl_emit_styles_wraps_formatted_runs() {
+    let Some(doc) = load_trl() else {
+        return;
+    };
+    let html = to_html_with(
+        &doc,
+        &HtmlOptions {
+            emit_styles: true,
+            ..Default::default()
+        },
+    );
+    // TRL fixture contains at least some bold headings/emphasis.
+    // Either <strong> (bold) or <em> (italic) or a <span style="…">
+    // must appear; otherwise emit_styles is a no-op.
+    let has_any_style = html.contains("<strong>")
+        || html.contains("<em>")
+        || html.contains("<s>")
+        || html.contains("<span style=\"");
+    assert!(
+        has_any_style,
+        "emit_styles should wrap at least one run in TRL fixture"
+    );
 }
