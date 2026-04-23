@@ -13,7 +13,7 @@
 //! 표준 MD 표 대신 Nested Bullet List로 변환".
 
 use hwp_transpiler_core::ir::{
-    ControlKind, IrDocument, Paragraph, PictureControl, TableCell, TableControl,
+    ControlKind, EquationControl, IrDocument, Paragraph, PictureControl, TableCell, TableControl,
 };
 
 /// Knobs the caller passes to `to_markdown_with`. The bare `to_markdown`
@@ -106,9 +106,34 @@ fn emit_paragraph(
                 *picture_counter += 1;
                 emit_picture(doc, p, c.caption_text.as_deref(), out, opts, *picture_counter);
             }
+            ControlKind::Equation(eq) => emit_equation(eq, out),
             _ => {}
         }
     }
+}
+
+/// Emit one equation as its own block. Script content is emitted in a
+/// fenced block with the `hwp-equation` info string so downstream
+/// renderers can tell this is HWP's native equation syntax (similar to
+/// LaTeX but not identical) rather than standard math.
+///
+/// Empty scripts collapse to a `{{수식:}}` placeholder — same shape as
+/// the picture placeholder, so readers can tell "there was an equation
+/// here whose body we couldn't extract" at a glance. Font and size
+/// metadata are intentionally dropped in the human path; rendering
+/// faithfully requires a real equation renderer, not Markdown.
+fn emit_equation(eq: &EquationControl, out: &mut String) {
+    let script = eq.script.trim();
+    if script.is_empty() {
+        out.push_str("{{수식:}}\n\n");
+        return;
+    }
+    out.push_str("```hwp-equation\n");
+    out.push_str(script);
+    if !script.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str("```\n\n");
 }
 
 /// Build the `![](prefix/BIN<id>.<ext>){width=Xmm; height=Ymm}` line for
@@ -441,13 +466,14 @@ fn try_build_md_grid(t: &TableControl) -> Option<Vec<Vec<String>>> {
         if r >= rows || c + cs > cols {
             return None;
         }
-        // GFM grid can't host nested blocks; pictures and nested tables
-        // both force the bullet path so their structure survives.
+        // GFM grid can't host nested blocks; pictures, nested tables,
+        // and equations all force the bullet path so their structure
+        // (fenced blocks, figures, child tables) survives.
         for p in &cell.paragraphs {
             for ctrl in &p.controls {
                 if matches!(
                     &ctrl.kind,
-                    ControlKind::Table(_) | ControlKind::Picture(_)
+                    ControlKind::Table(_) | ControlKind::Picture(_) | ControlKind::Equation(_)
                 ) {
                     return None;
                 }
@@ -640,10 +666,37 @@ fn emit_cell_line(
                         *picture_counter,
                     );
                 }
+                ControlKind::Equation(eq) => {
+                    emit_equation_bullet(&child_indent, eq, out);
+                }
                 _ => {}
             }
         }
     }
+}
+
+/// Equation inside a table cell that's been demoted to the bullet
+/// path. Emitted as a fenced block indented under the parent list
+/// item — two spaces deeper than the bullet marker so Markdown
+/// associates it with the enclosing cell line. Empty script collapses
+/// to an indented `{{수식:}}` one-liner, matching the top-level
+/// equation fallback shape.
+fn emit_equation_bullet(indent: &str, eq: &EquationControl, out: &mut String) {
+    let script = eq.script.trim();
+    if script.is_empty() {
+        out.push_str(indent);
+        out.push_str("{{수식:}}\n");
+        return;
+    }
+    out.push_str(indent);
+    out.push_str("```hwp-equation\n");
+    for line in script.lines() {
+        out.push_str(indent);
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str(indent);
+    out.push_str("```\n");
 }
 
 const INLINE_CELL_LIMIT: usize = 200;
@@ -1555,5 +1608,96 @@ mod tests {
         let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
         let md = to_markdown(&doc);
         assert!(md.contains("| a\\|b |"), "got: {md}");
+    }
+
+    fn equation(script: &str) -> Control {
+        Control {
+            kind: ControlKind::Equation(EquationControl {
+                script: script.into(),
+                font: None,
+                size_hwpu: 0,
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn para_with_controls(controls: Vec<Control>) -> Paragraph {
+        Paragraph {
+            controls,
+            ..Paragraph::default()
+        }
+    }
+
+    #[test]
+    fn equation_renders_as_fenced_block() {
+        let doc = make_doc(
+            vec![style("본문")],
+            vec![para_with_controls(vec![equation("x^2 + y^2 = z^2")])],
+        );
+        let md = to_markdown(&doc);
+        assert!(md.contains("```hwp-equation"), "got: {md}");
+        assert!(md.contains("x^2 + y^2 = z^2"), "got: {md}");
+        // Opening and closing fence both present.
+        let fence_count = md.matches("```").count();
+        assert_eq!(fence_count, 2, "expected exactly one fenced block, got: {md}");
+    }
+
+    #[test]
+    fn equation_multiline_script_preserves_lines() {
+        let script = "over{a}{b}\n= c";
+        let doc = make_doc(
+            vec![style("본문")],
+            vec![para_with_controls(vec![equation(script)])],
+        );
+        let md = to_markdown(&doc);
+        assert!(md.contains("over{a}{b}"), "got: {md}");
+        assert!(md.contains("= c"), "got: {md}");
+    }
+
+    #[test]
+    fn empty_equation_collapses_to_placeholder() {
+        // No silent drop: even without script content, the reader sees
+        // a `{{수식:}}` placeholder so they know an equation was there.
+        let doc = make_doc(
+            vec![style("본문")],
+            vec![para_with_controls(vec![equation("")])],
+        );
+        let md = to_markdown(&doc);
+        assert!(md.contains("{{수식:}}"), "got: {md}");
+        // No empty fenced block.
+        assert!(!md.contains("```hwp-equation\n```"), "got: {md}");
+    }
+
+    #[test]
+    fn equation_inside_cell_forces_bullet_path() {
+        // A 1×1 table whose single cell contains an equation. The
+        // MD-grid path must bail (can't host fenced blocks inside a
+        // pipe cell) and emit via bullet list instead, preserving the
+        // fenced equation under the cell's bullet.
+        let inner_para = Paragraph {
+            controls: vec![equation("over{1}{2}")],
+            ..Paragraph::default()
+        };
+        let t = TableControl {
+            rows: 1,
+            cols: 1,
+            row_cell_counts: vec![1],
+            cells: vec![TableCell {
+                col: 0,
+                row: 0,
+                col_span: 1,
+                row_span: 1,
+                paragraphs: vec![inner_para],
+                ..TableCell::default()
+            }],
+            ..TableControl::default()
+        };
+        let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
+        let md = to_markdown(&doc);
+        // Bullet-path marker from the complex-table emitter.
+        assert!(md.contains("<!-- table 1×1"), "should pick bullet path: {md}");
+        // Equation body survives.
+        assert!(md.contains("```hwp-equation"), "got: {md}");
+        assert!(md.contains("over{1}{2}"), "got: {md}");
     }
 }

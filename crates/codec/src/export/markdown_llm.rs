@@ -50,7 +50,7 @@
 //!   globally unique.
 
 use hwp_transpiler_core::ir::{
-    ControlKind, IrDocument, Paragraph, PictureControl, TableCell, TableControl,
+    ControlKind, EquationControl, IrDocument, Paragraph, PictureControl, TableCell, TableControl,
 };
 use hwp_transpiler_core::semantics::{
     CellRole, DocInfoResolver, TableDomain, VisualExtract, classify_roles,
@@ -103,7 +103,7 @@ fn emit_paragraph(
     let has_structural = para.controls.iter().any(|c| {
         matches!(
             &c.kind,
-            ControlKind::Table(_) | ControlKind::Picture(_)
+            ControlKind::Table(_) | ControlKind::Picture(_) | ControlKind::Equation(_)
         )
     });
     if has_text {
@@ -124,6 +124,9 @@ fn emit_paragraph(
             }
             ControlKind::Picture(p) => {
                 emit_figure(p, c.caption_text.as_deref(), out);
+            }
+            ControlKind::Equation(eq) => {
+                emit_equation(eq, out, &ctrl_path);
             }
             _ => {}
         }
@@ -326,10 +329,48 @@ fn emit_cell(
                 ControlKind::Picture(pic) => {
                     emit_figure(pic, ctrl.caption_text.as_deref(), out);
                 }
+                ControlKind::Equation(eq) => {
+                    emit_equation(eq, out, &inner_ctrl_path);
+                }
                 _ => {}
             }
         }
     }
+}
+
+/// Structured EQUATION record: header line with metadata + a SCRIPT
+/// line carrying the raw equation source. Follows the same shape as
+/// FIGURE / TABLE / CELL so an LLM parser can ingest the three with
+/// one grammar. Multi-line scripts emit multiple SCRIPT lines — one
+/// per source line — so the reader can reconstruct layout without an
+/// escaping convention.
+///
+/// Font and size_hwpu are surfaced as attributes when set; HWP
+/// equations often carry a font for Korean glyphs inside the math
+/// expression, which an LLM rewriting a related cell should be aware
+/// of. `size_hwpu` is in HWP units (1 pt = 100 HWPUNIT).
+fn emit_equation(eq: &EquationControl, out: &mut String, path: &str) {
+    let eqn_id = format!("eqn-{path}");
+    let mut header = format!("EQUATION[id={eqn_id}");
+    if let Some(font) = &eq.font {
+        if !font.is_empty() {
+            header.push_str(&format!(",font={font}"));
+        }
+    }
+    if eq.size_hwpu > 0 {
+        header.push_str(&format!(",size_hwpu={}", eq.size_hwpu));
+    }
+    header.push(']');
+    line(out, &header);
+    let script = eq.script.trim_end();
+    if script.is_empty() {
+        line(out, "SCRIPT:");
+    } else {
+        for s in script.lines() {
+            line(out, &format!("SCRIPT: {s}"));
+        }
+    }
+    out.push('\n');
 }
 
 fn emit_figure(pic: &PictureControl, caption_text: Option<&str>, out: &mut String) {
@@ -1001,5 +1042,110 @@ mod tests {
         assert!(md.contains("PARAGRAPH[id=par-s0-p0]"));
         assert!(md.contains("PARAGRAPH[id=par-s0-p1]"));
         assert!(md.contains("PARAGRAPH[id=par-s0-p2]"));
+    }
+
+    fn equation_para(script: &str, font: Option<&str>, size_hwpu: i32) -> Paragraph {
+        use hwp_transpiler_core::ir::EquationControl;
+        Paragraph {
+            controls: vec![Control {
+                kind: ControlKind::Equation(EquationControl {
+                    script: script.into(),
+                    font: font.map(|f| f.into()),
+                    size_hwpu,
+                }),
+                ..Default::default()
+            }],
+            ..Paragraph::default()
+        }
+    }
+
+    #[test]
+    fn equation_emits_structured_record() {
+        let mut doc = IrDocument::default();
+        doc.sections.push(Section {
+            paragraphs: vec![equation_para("x^2 + y^2", Some("명조"), 1200)],
+            ..Section::default()
+        });
+        let md = to_llm_markdown(&doc, &opts_llm());
+        assert!(
+            md.contains("EQUATION[id=eqn-s0-p0-c0,font=명조,size_hwpu=1200]"),
+            "got: {md}"
+        );
+        assert!(md.contains("SCRIPT: x^2 + y^2"), "got: {md}");
+    }
+
+    #[test]
+    fn equation_without_font_or_size_omits_attrs() {
+        let mut doc = IrDocument::default();
+        doc.sections.push(Section {
+            paragraphs: vec![equation_para("a = b", None, 0)],
+            ..Section::default()
+        });
+        let md = to_llm_markdown(&doc, &opts_llm());
+        assert!(md.contains("EQUATION[id=eqn-s0-p0-c0]"), "got: {md}");
+        assert!(!md.contains("font="), "got: {md}");
+        assert!(!md.contains("size_hwpu="), "got: {md}");
+    }
+
+    #[test]
+    fn equation_multiline_script_emits_one_line_per_source_line() {
+        let mut doc = IrDocument::default();
+        doc.sections.push(Section {
+            paragraphs: vec![equation_para("over{a}{b}\n= c", None, 0)],
+            ..Section::default()
+        });
+        let md = to_llm_markdown(&doc, &opts_llm());
+        assert!(md.contains("SCRIPT: over{a}{b}"), "got: {md}");
+        assert!(md.contains("SCRIPT: = c"), "got: {md}");
+    }
+
+    #[test]
+    fn equation_inside_table_cell_uses_nested_path() {
+        // Equation inside a 1×1 cell should get the nested id
+        // `eqn-s0-p0-c0-r0c0-p0-c0` so an LLM can locate it
+        // unambiguously.
+        use hwp_transpiler_core::ir::EquationControl;
+        let cell_para = Paragraph {
+            controls: vec![Control {
+                kind: ControlKind::Equation(EquationControl {
+                    script: "over{1}{2}".into(),
+                    font: None,
+                    size_hwpu: 0,
+                }),
+                ..Default::default()
+            }],
+            ..Paragraph::default()
+        };
+        let t = TableControl {
+            rows: 1,
+            cols: 1,
+            row_cell_counts: vec![1],
+            cells: vec![TableCell {
+                col: 0,
+                row: 0,
+                col_span: 1,
+                row_span: 1,
+                paragraphs: vec![cell_para],
+                ..TableCell::default()
+            }],
+            ..TableControl::default()
+        };
+        let mut doc = IrDocument::default();
+        doc.sections.push(Section {
+            paragraphs: vec![Paragraph {
+                controls: vec![Control {
+                    kind: ControlKind::Table(t),
+                    ..Default::default()
+                }],
+                ..Paragraph::default()
+            }],
+            ..Section::default()
+        });
+        let md = to_llm_markdown(&doc, &opts_llm());
+        assert!(
+            md.contains("EQUATION[id=eqn-s0-p0-c0-r0c0-p0-c0]"),
+            "got: {md}"
+        );
+        assert!(md.contains("SCRIPT: over{1}{2}"), "got: {md}");
     }
 }
