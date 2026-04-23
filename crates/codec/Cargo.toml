@@ -8,6 +8,8 @@ license.workspace = true
 hwp-transpiler-core = { path = "../core" }
 cfb = { workspace = true }
 flate2 = { workspace = true }
+zip = { workspace = true }
+quick-xml = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 
