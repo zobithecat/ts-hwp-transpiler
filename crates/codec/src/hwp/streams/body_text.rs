@@ -324,8 +324,11 @@ fn collect_section_records(section: &Section) -> Vec<Record> {
 }
 
 /// Return a paragraph's record list with typed-field updates pulled
-/// back into the *first occurrence* of each projected tag. Covers:
+/// back into the *first occurrence* of each projected tag, plus the
+/// records belonging to every table control interleaved after their
+/// TABLE record.
 ///
+/// Typed syncs (first occurrence):
 ///   * PARA_HEADER     ← `para.header`
 ///   * PARA_TEXT       ← `para.text` (only when the original raw
 ///                       record decoded without U+FFFC — see below)
@@ -339,6 +342,14 @@ fn collect_section_records(section: &Section) -> Vec<Record> {
 /// `para.text` would silently destroy them, so the raw PARA_TEXT
 /// stays verbatim and edits to `para.text` are dropped. For pure-text
 /// paragraphs, edits flow normally via [`paragraph_text::emit`].
+///
+/// Table cell interleave: `parse_paragraph` pulls each table's
+/// LIST_HEADER + cell paragraph records *out* of the outer paragraph's
+/// record stream and stashes them on `ControlKind::Table::cells`.
+/// Without the re-injection pass below, the writer's re-encode path
+/// would silently drop every cell in every table — a subtle dataloss
+/// bug that the prior paragraph-count-only structural test did not
+/// catch.
 ///
 /// Only the *first* occurrence of each tag is rewritten. Real HWP5
 /// files carry exactly one PARA_* per paragraph, so the policy matches
@@ -388,5 +399,47 @@ fn sync_paragraph_records(para: &Paragraph) -> Vec<Record> {
             _ => {}
         }
     }
-    records
+
+    // Interleave each table control's LIST_HEADER + cell paragraph
+    // records right after its TABLE record. The nth TABLE record in
+    // para.raw_records pairs positionally with the nth Table control
+    // in para.controls (parse_paragraph built them in lockstep).
+    let mut tables = para.controls.iter().filter_map(|c| match &c.kind {
+        ControlKind::Table(t) => Some(t),
+        _ => None,
+    });
+    let mut out: Vec<Record> = Vec::with_capacity(records.len());
+    for rec in records {
+        let is_table = rec.tag == tag::TABLE;
+        let cell_level = rec.level;
+        out.push(rec);
+        if is_table {
+            if let Some(tc) = tables.next() {
+                emit_table_cell_records(tc, cell_level, &mut out);
+            }
+        }
+    }
+    out
+}
+
+/// Walk a table's cells and append `LIST_HEADER(cell) + cell paragraph
+/// records` in the order `parse_table_cells` originally read them.
+/// Cell paragraphs are themselves run through [`sync_paragraph_records`]
+/// so typed mutations inside cells (text / header / char_shape / line
+/// seg, and any nested tables) also flow through.
+///
+/// `cell_level` equals the level of the TABLE record; both the cell's
+/// LIST_HEADER and its paragraphs' PARA_HEADER sit at that same level
+/// per HWP5's record-tree convention.
+fn emit_table_cell_records(tc: &TableControl, cell_level: u16, out: &mut Vec<Record>) {
+    for cell in &tc.cells {
+        out.push(Record {
+            tag: tag::LIST_HEADER,
+            level: cell_level,
+            data: list_header::emit_cell(cell),
+        });
+        for para in &cell.paragraphs {
+            out.extend(sync_paragraph_records(para));
+        }
+    }
 }

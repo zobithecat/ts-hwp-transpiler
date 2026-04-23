@@ -61,6 +61,37 @@ pub fn parse_cell(rec: &Record) -> Result<TableCell, IrError> {
     })
 }
 
+/// Inverse of `parse_cell`. Emits the 47-byte form hwplib's writer
+/// always produces: 38-byte fixed block + trailing `uInt1 flag + 8-byte
+/// zero pad`. `parse_cell` accepts both the 38- and 47-byte forms, so
+/// round-tripping through emit → parse is lossless. `cell.para_count`
+/// is auto-synced from `cell.paragraphs.len()` so callers that insert
+/// or remove paragraphs don't have to remember to bump the stored
+/// counter.
+pub fn emit_cell(cell: &TableCell) -> Vec<u8> {
+    const FULL: usize = 47;
+    let mut out = Vec::with_capacity(FULL);
+    let para_count = cell.paragraphs.len() as i32;
+    out.extend_from_slice(&para_count.to_le_bytes());
+    out.extend_from_slice(&cell.property.to_le_bytes());
+    out.extend_from_slice(&cell.col.to_le_bytes());
+    out.extend_from_slice(&cell.row.to_le_bytes());
+    out.extend_from_slice(&cell.col_span.to_le_bytes());
+    out.extend_from_slice(&cell.row_span.to_le_bytes());
+    out.extend_from_slice(&cell.width_hwpu.to_le_bytes());
+    out.extend_from_slice(&cell.height_hwpu.to_le_bytes());
+    for p in cell.padding_hwpu {
+        out.extend_from_slice(&p.to_le_bytes());
+    }
+    out.extend_from_slice(&cell.border_fill_id.to_le_bytes());
+    out.extend_from_slice(&cell.text_width_hwpu.to_le_bytes());
+    // Trailer: fieldName flag = 0 (no ParameterSet), then 8-byte pad.
+    out.push(0x00);
+    out.extend_from_slice(&[0u8; 8]);
+    debug_assert_eq!(out.len(), FULL);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,5 +174,59 @@ mod tests {
     fn too_short_errors() {
         let r = rec(vec![0; CELL_FIXED - 1]);
         assert!(parse_cell(&r).is_err());
+    }
+
+    fn sample_cell() -> TableCell {
+        use hwp_transpiler_core::ir::{Paragraph, TableCell};
+        TableCell {
+            para_count: 1,
+            property: 0x12345678,
+            col: 3,
+            row: 2,
+            col_span: 2,
+            row_span: 4,
+            width_hwpu: 5000,
+            height_hwpu: 2500,
+            padding_hwpu: [11, 22, 33, 44],
+            border_fill_id: 9,
+            text_width_hwpu: 4900,
+            paragraphs: vec![Paragraph::default()],
+        }
+    }
+
+    #[test]
+    fn emit_cell_produces_47_byte_form() {
+        let bytes = emit_cell(&sample_cell());
+        assert_eq!(bytes.len(), 47);
+    }
+
+    #[test]
+    fn emit_parse_cell_roundtrips() {
+        let c = sample_cell();
+        let bytes = emit_cell(&c);
+        let parsed = parse_cell(&rec(bytes)).unwrap();
+        assert_eq!(parsed.property, c.property);
+        assert_eq!(parsed.col, c.col);
+        assert_eq!(parsed.row, c.row);
+        assert_eq!(parsed.col_span, c.col_span);
+        assert_eq!(parsed.row_span, c.row_span);
+        assert_eq!(parsed.width_hwpu, c.width_hwpu);
+        assert_eq!(parsed.height_hwpu, c.height_hwpu);
+        assert_eq!(parsed.padding_hwpu, c.padding_hwpu);
+        assert_eq!(parsed.border_fill_id, c.border_fill_id);
+        assert_eq!(parsed.text_width_hwpu, c.text_width_hwpu);
+        // para_count comes from paragraphs.len() on emit — parsed
+        // value mirrors that, not the stored `c.para_count`.
+        assert_eq!(parsed.para_count, c.paragraphs.len() as i32);
+    }
+
+    #[test]
+    fn emit_cell_para_count_tracks_paragraphs_len() {
+        use hwp_transpiler_core::ir::Paragraph;
+        let mut c = sample_cell();
+        c.para_count = 99; // stale value — emit should ignore it.
+        c.paragraphs = vec![Paragraph::default(), Paragraph::default(), Paragraph::default()];
+        let parsed = parse_cell(&rec(emit_cell(&c))).unwrap();
+        assert_eq!(parsed.para_count, 3, "emit must re-derive para_count");
     }
 }

@@ -353,6 +353,34 @@ fn paragraph_text_edits_flow_when_pure_text() {
     );
 }
 
+/// Total cell count across every table in a document (recursing into
+/// cell paragraphs for nested tables). Phase 2's regression guard —
+/// pre-fix, the writer's re-encode path silently dropped all table
+/// cells, so this count collapsed to zero on any section whose
+/// stream_bytes had been cleared.
+fn total_cells(doc: &IrDocument) -> usize {
+    use hwp_transpiler_core::ir::{Control, ControlKind};
+    fn visit(controls: &[Control], acc: &mut usize) {
+        for c in controls {
+            if let ControlKind::Table(t) = &c.kind {
+                *acc += t.cells.len();
+                for cell in &t.cells {
+                    for p in &cell.paragraphs {
+                        visit(&p.controls, acc);
+                    }
+                }
+            }
+        }
+    }
+    let mut total = 0;
+    for sec in &doc.sections {
+        for p in &sec.paragraphs {
+            visit(&p.controls, &mut total);
+        }
+    }
+    total
+}
+
 /// Also exercise the TRL fixture (real-world complex document) to
 /// confirm the re-encode path handles nested tables, gso shapes, and
 /// multi-paragraph records without structural loss. Gitignored → skip
@@ -365,6 +393,13 @@ fn trl_fixture_reencodes_structurally() {
         eprintln!("skipping: TRL fixture not present");
         return;
     };
+
+    let cells_before = total_cells(&doc);
+    assert!(
+        cells_before > 0,
+        "TRL fixture should contain at least one table cell to make \
+         this regression test meaningful"
+    );
 
     for section in &mut doc.sections {
         section.invalidate_verbatim();
@@ -381,4 +416,88 @@ fn trl_fixture_reencodes_structurally() {
             "section {i}: paragraph count diverged"
         );
     }
+
+    let cells_after = total_cells(&after);
+    assert_eq!(
+        cells_after, cells_before,
+        "table cells dropped during re-encode: {cells_before} → {cells_after}. \
+         Pre-Phase-2, the writer's re-encode path skipped LIST_HEADER + \
+         cell paragraph records entirely; this assertion guards against \
+         that class of regression."
+    );
+}
+
+/// Typed mutation inside a table cell: mutate a cell paragraph's
+/// typed ParagraphHeader `style_id` and verify it survives a write /
+/// read cycle. Uses the TRL fixture so we skip the complexity of
+/// hand-assembling a table from scratch — that's deferred to a
+/// follow-up commit that adds a clean table-builder API.
+///
+/// Skipped silently when the TRL fixture isn't on disk (gitignored).
+#[test]
+fn cell_paragraph_header_mutation_flows_through_writer() {
+    use hwp_transpiler_core::ir::{Control, ControlKind};
+
+    let Some((_bytes, mut doc)) = load_doc(&repo_path(
+        "test/260420-1. 연구개발계획서(서식)[TRL점프업 1단계]_대진대_수정_1430_fin.hwp",
+    )) else {
+        eprintln!("skipping: TRL fixture not present");
+        return;
+    };
+
+    // Find the first (section, outer-para, table control, cell, cell-
+    // paragraph) coordinates. We only need one.
+    let mut coord: Option<(usize, usize, usize, usize, usize)> = None;
+    'outer: for (si, sec) in doc.sections.iter().enumerate() {
+        for (pi, p) in sec.paragraphs.iter().enumerate() {
+            for (ci, c) in p.controls.iter().enumerate() {
+                if let ControlKind::Table(t) = &c.kind {
+                    for (celli, cell) in t.cells.iter().enumerate() {
+                        if !cell.paragraphs.is_empty() {
+                            coord = Some((si, pi, ci, celli, 0));
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let Some((si, pi, ci, celli, cpi)) = coord else {
+        eprintln!("skipping: no populated table cell found in TRL fixture");
+        return;
+    };
+
+    let original_style = {
+        let ControlKind::Table(t) =
+            &doc.sections[si].paragraphs[pi].controls[ci].kind
+        else {
+            unreachable!("coord guaranteed a Table control");
+        };
+        t.cells[celli].paragraphs[cpi].header.style_id
+    };
+    let mutated_style = original_style.wrapping_add(1);
+
+    // Mutate via paragraphs_mut to clear stream_bytes. Reach into
+    // the cell paragraph's header.
+    {
+        let paragraphs = doc.sections[si].paragraphs_mut();
+        let controls: &mut Vec<Control> = &mut paragraphs[pi].controls;
+        let ControlKind::Table(t) = &mut controls[ci].kind else {
+            unreachable!("coord guaranteed a Table control");
+        };
+        t.cells[celli].paragraphs[cpi].header.style_id = mutated_style;
+    }
+
+    let out = HwpWriter.write(&doc).expect("write after cell edit");
+    let after = HwpReader.read(&out).expect("re-read after cell edit");
+
+    let ControlKind::Table(t_after) = &after.sections[si].paragraphs[pi].controls[ci].kind
+    else {
+        panic!("cell's Table control vanished on re-read");
+    };
+    assert_eq!(
+        t_after.cells[celli].paragraphs[cpi].header.style_id,
+        mutated_style,
+        "cell paragraph header mutation did not flow through the writer"
+    );
 }
