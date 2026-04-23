@@ -29,8 +29,8 @@
 use std::io::BufRead;
 
 use hwp_transpiler_core::ir::{
-    Control, ControlKind, IrError, Paragraph, Section, SectionProperties, TableCell,
-    TableControl,
+    CharShapeRun, Control, ControlKind, IrError, Paragraph, Section, SectionProperties,
+    TableCell, TableControl,
 };
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
@@ -89,7 +89,10 @@ fn parse_paragraph<R: BufRead>(
         {
             Event::End(e) if local_name_bytes(e.name().as_ref()) == "p" => break,
             Event::Start(e) => match local_name(&e) {
-                "run" => parse_run(reader, &mut para, section_props)?,
+                "run" => {
+                    let char_pr_id = u32_attr(&e, "charPrIDRef");
+                    parse_run(reader, &mut para, section_props, char_pr_id)?;
+                }
                 "secPr" => {
                     let props = parse_sec_pr(reader)?;
                     if section_props.page_width_hwpu == 0 {
@@ -120,7 +123,30 @@ fn parse_run<R: BufRead>(
     reader: &mut Reader<R>,
     para: &mut Paragraph,
     section_props: &mut SectionProperties,
+    char_pr_id: Option<u32>,
 ) -> Result<(), IrError> {
+    // Every HWPX run declares a `charPrIDRef` pointing into
+    // `doc_info.char_shapes`. Open a shape run at the current UTF-16
+    // offset so downstream exporters (MD bold/italic/strike + role
+    // classifier's first-shape fingerprint) can resolve it. Runs with
+    // no attribute default to id 0 so the exporter still sees
+    // *something* rather than an empty `char_shape_runs`.
+    let start_u16 = utf16_len(&para.text);
+    let shape_id = char_pr_id.unwrap_or(0);
+    // Collapse adjacent runs sharing the same shape to avoid boundary
+    // noise in paragraphs with many runs of identical styling.
+    let last_same = para
+        .char_shape_runs
+        .last()
+        .map(|r| r.char_shape_id == shape_id)
+        .unwrap_or(false);
+    if !last_same {
+        para.char_shape_runs.push(CharShapeRun {
+            start: start_u16,
+            char_shape_id: shape_id,
+        });
+    }
+
     let mut buf = Vec::new();
     loop {
         match reader
@@ -249,11 +275,17 @@ fn parse_row<R: BufRead>(
 
 fn parse_cell<R: BufRead>(
     reader: &mut Reader<R>,
-    _start: &BytesStart,
+    start: &BytesStart,
 ) -> Result<TableCell, IrError> {
+    // `borderFillIDRef` on `<hp:tc>` drives the role classifier's bg-
+    // tone fingerprint. Without it every HWPX cell would fingerprint
+    // as `BgTone::None` and the classifier would fall through to its
+    // position-only heuristic, labelling everything `value`.
+    let border_fill_id = u32_attr(start, "borderFillIDRef").unwrap_or(0) as u16;
     let mut cell = TableCell {
         col_span: 1,
         row_span: 1,
+        border_fill_id,
         ..TableCell::default()
     };
     let mut buf = Vec::new();
@@ -488,6 +520,13 @@ fn u32_attr(e: &BytesStart<'_>, name: &str) -> Option<u32> {
 
 fn xml_err(context: &str, e: quick_xml::Error) -> IrError {
     IrError::Invalid(format!("hwpx xml ({context}): {e}"))
+}
+
+/// UTF-16 code-unit length of a string — matches the coordinate
+/// system HWP uses for `CharShapeRun::start` offsets. Sum is cheap:
+/// each char contributes 1 or 2 code units.
+fn utf16_len(s: &str) -> u32 {
+    s.chars().map(|c| c.len_utf16() as u32).sum()
 }
 
 #[cfg(test)]

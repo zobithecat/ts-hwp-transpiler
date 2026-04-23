@@ -9,6 +9,7 @@
 
 use hwp_transpiler_core::ir::{IrDocument, IrError, Reader};
 
+use super::header_xml::parse_header_xml;
 use super::section_xml::parse_section_xml;
 use super::zip_reader::HwpxArchive;
 
@@ -20,6 +21,19 @@ impl Reader for HwpxReader {
         let mut archive = HwpxArchive::new(input.to_vec())?;
 
         let mut doc = IrDocument::default();
+
+        // header.xml → DocInfo-ish records (font faces, border fills,
+        // char shapes). Missing or malformed is non-fatal — the
+        // section parse below still produces a usable document, it
+        // just lacks styling context for the role classifier / inline
+        // formatting path.
+        if let Some(header_bytes) = archive.try_read_part("Contents/header.xml")? {
+            if let Ok(hdr) = parse_header_xml(&header_bytes) {
+                doc.doc_info.font_faces = hdr.font_faces;
+                doc.doc_info.border_fills = hdr.border_fills;
+                doc.doc_info.char_shapes = hdr.char_shapes;
+            }
+        }
 
         // Collect `Contents/section*.xml` names up front, then sort so
         // section0 / section1 / ... are read in index order regardless
