@@ -13,7 +13,8 @@
 //! 표준 MD 표 대신 Nested Bullet List로 변환".
 
 use hwp_transpiler_core::ir::{
-    ControlKind, EquationControl, IrDocument, Paragraph, PictureControl, TableCell, TableControl,
+    CharShape, CharShapeRun, ControlKind, EquationControl, IrDocument, Paragraph, PictureControl,
+    TableCell, TableControl,
 };
 use hwp_transpiler_core::semantics::{CellRole, TableDomain, infer_table_domain};
 
@@ -50,6 +51,17 @@ pub struct MdOptions {
     /// enables role computation even if `emit_roles` is off —
     /// editable inference is role-dependent. Off by default.
     pub emit_editable: bool,
+    /// Human Markdown path only: when true, paragraph text is
+    /// emitted with inline Markdown formatting derived from each
+    /// `CharShapeRun`'s referenced `CharShape`. Bold / italic /
+    /// strikethrough get wrapped (`**...**` / `*...*` / `~~...~~`);
+    /// runs whose shape has no formatting emit as plain text.
+    /// Paragraphs with an empty `char_shape_runs` list fall back to
+    /// `clean_text`, so existing callers see no change unless they
+    /// opt in. Applies to top-level paragraph text only — table
+    /// cell text still uses the plain path (nested formatting inside
+    /// pipe cells is fragile in most Markdown renderers).
+    pub emit_styles: bool,
 }
 
 /// Capability flags for the LLM-friendly Markdown layer. Kept minimal on
@@ -106,7 +118,11 @@ fn emit_paragraph(
     opts: &MdOptions,
     picture_counter: &mut u32,
 ) {
-    let text = clean_text(&para.text);
+    let text = if opts.emit_styles && !para.char_shape_runs.is_empty() {
+        styled_paragraph_text(&para.text, &para.char_shape_runs, &doc.doc_info.char_shapes)
+    } else {
+        clean_text(&para.text)
+    };
     if !text.is_empty() {
         match heading_level(doc, para) {
             Some(level) => {
@@ -649,6 +665,7 @@ fn emit_table_as_list(
     out.push('\n');
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_cell_line(
     doc: &IrDocument,
     cell: &TableCell,
@@ -814,6 +831,107 @@ pub(super) fn clean_text(s: &str) -> String {
             _ => out.push(translate_pua_bullet(c).unwrap_or(c)),
         }
     }
+    let mut squeezed = String::with_capacity(out.len());
+    let mut last_space = false;
+    for c in out.chars() {
+        if c == ' ' {
+            if !last_space {
+                squeezed.push(' ');
+            }
+            last_space = true;
+        } else {
+            squeezed.push(c);
+            last_space = false;
+        }
+    }
+    squeezed.trim().to_string()
+}
+
+/// Style-aware cousin of [`clean_text`]: walks `text` char-by-char,
+/// tracking UTF-16 code-unit offsets (the coordinate system that
+/// `CharShapeRun::start` uses), and wraps each run's segment in
+/// Markdown inline formatting based on its referenced `CharShape`:
+///
+///   * bold      → `**…**`
+///   * italic    → `*…*`
+///   * strike    → `~~…~~`
+///
+/// Other CharShape attributes (underline, color, font) have no
+/// portable Markdown representation; they're silently dropped. Runs
+/// whose referenced shape has none of the three handled flags emit as
+/// plain text — so paragraphs authored with the document's default
+/// char shape look identical to `clean_text` output.
+///
+/// Unreferenced runs (shape id out of bounds) are treated as plain.
+///
+/// When the text contains U+FFFC placeholders (extended-control
+/// markers), those are dropped the same way `clean_text` drops them;
+/// `char_shape_runs` offsets remain valid because U+FFFC is a single
+/// UTF-16 unit and our UTF-16 step counting accounts for it.
+fn styled_paragraph_text(
+    text: &str,
+    runs: &[CharShapeRun],
+    shapes: &[CharShape],
+) -> String {
+    if runs.is_empty() {
+        return clean_text(text);
+    }
+    let mut out = String::new();
+    let mut u16_pos: u32 = 0;
+    let mut open_wrappers: Vec<&'static str> = Vec::new();
+    let mut active_shape_id: Option<u32> = None;
+
+    for c in text.chars() {
+        let c_len = c.len_utf16() as u32;
+        let new_shape_id = runs
+            .iter()
+            .rev()
+            .find(|r| r.start <= u16_pos)
+            .map(|r| r.char_shape_id);
+
+        if new_shape_id != active_shape_id {
+            // Close currently-open wrappers in reverse order.
+            while let Some(w) = open_wrappers.pop() {
+                out.push_str(w);
+            }
+            // Open new wrappers — strike on the outside so bold
+            // italic still render inside a strikethrough range;
+            // italic innermost so single `*` doesn't collide with
+            // the double `**` of bold.
+            if let Some(sid) = new_shape_id {
+                if let Some(shape) = shapes.get(sid as usize) {
+                    if shape.strike() {
+                        out.push_str("~~");
+                        open_wrappers.push("~~");
+                    }
+                    if shape.bold() {
+                        out.push_str("**");
+                        open_wrappers.push("**");
+                    }
+                    if shape.italic() {
+                        out.push('*');
+                        open_wrappers.push("*");
+                    }
+                }
+            }
+            active_shape_id = new_shape_id;
+        }
+
+        // Apply the same character translations as `clean_text`.
+        match c {
+            '\u{FFFC}' | '\u{00AD}' => {}
+            '\u{00A0}' | '\u{2003}' => out.push(' '),
+            _ => out.push(translate_pua_bullet(c).unwrap_or(c)),
+        }
+
+        u16_pos += c_len;
+    }
+
+    while let Some(w) = open_wrappers.pop() {
+        out.push_str(w);
+    }
+
+    // Squeeze consecutive spaces + trim, matching `clean_text`.
     let mut squeezed = String::with_capacity(out.len());
     let mut last_space = false;
     for c in out.chars() {
@@ -1941,6 +2059,156 @@ mod tests {
         };
         let md = to_markdown_with(&doc, &opts);
         assert!(md.contains("<!-- kind: budget -->"), "got: {md}");
+    }
+
+    fn char_shape_with_attr(attr: u32) -> hwp_transpiler_core::ir::CharShape {
+        hwp_transpiler_core::ir::CharShape {
+            attr,
+            ..Default::default()
+        }
+    }
+
+    fn styled_doc(text: &str, runs: Vec<CharShapeRun>, shapes: Vec<CharShape>) -> IrDocument {
+        let mut doc = make_doc(vec![style("본문")], vec![]);
+        doc.doc_info.char_shapes = shapes;
+        doc.sections[0].paragraphs.push(Paragraph {
+            header: ParagraphHeader::default(),
+            text: text.into(),
+            char_shape_runs: runs,
+            ..Paragraph::default()
+        });
+        doc
+    }
+
+    #[test]
+    fn styles_flag_off_by_default_emits_plain_text() {
+        let runs = vec![
+            CharShapeRun { start: 0, char_shape_id: 0 },
+            CharShapeRun { start: 5, char_shape_id: 1 },
+        ];
+        let shapes = vec![char_shape_with_attr(0), char_shape_with_attr(0x02)]; // bold
+        let doc = styled_doc("plainBOLD!", runs, shapes);
+        let md = to_markdown(&doc);
+        assert!(!md.contains("**"), "default output must not wrap: {md}");
+    }
+
+    #[test]
+    fn bold_run_wraps_in_double_asterisks() {
+        // Runs: [0..5] default, [5..9] bold. "plainBOLD" → "plain**BOLD**"
+        let runs = vec![
+            CharShapeRun { start: 0, char_shape_id: 0 },
+            CharShapeRun { start: 5, char_shape_id: 1 },
+        ];
+        let shapes = vec![char_shape_with_attr(0), char_shape_with_attr(0x02)];
+        let doc = styled_doc("plainBOLD", runs, shapes);
+        let opts = MdOptions {
+            emit_styles: true,
+            ..MdOptions::default()
+        };
+        let md = to_markdown_with(&doc, &opts);
+        assert!(md.contains("plain**BOLD**"), "got: {md}");
+    }
+
+    #[test]
+    fn italic_run_wraps_in_single_asterisk() {
+        // Bit 0 = italic.
+        let runs = vec![
+            CharShapeRun { start: 0, char_shape_id: 0 },
+            CharShapeRun { start: 2, char_shape_id: 1 },
+        ];
+        let shapes = vec![char_shape_with_attr(0), char_shape_with_attr(0x01)];
+        let doc = styled_doc("ab ITALIC", runs, shapes);
+        let opts = MdOptions {
+            emit_styles: true,
+            ..MdOptions::default()
+        };
+        let md = to_markdown_with(&doc, &opts);
+        // italic wrapper is `*…*`. The paragraph should have exactly
+        // two `*` from wrappers (one opening, one closing).
+        assert_eq!(md.matches('*').count(), 2, "got: {md}");
+        assert!(md.contains("* ITALIC*"), "got: {md}");
+    }
+
+    #[test]
+    fn strike_run_uses_gfm_tilde() {
+        // Bit 21 = strike.
+        let runs = vec![CharShapeRun { start: 0, char_shape_id: 0 }];
+        let shapes = vec![char_shape_with_attr(1u32 << 21)];
+        let doc = styled_doc("struck", runs, shapes);
+        let opts = MdOptions {
+            emit_styles: true,
+            ..MdOptions::default()
+        };
+        let md = to_markdown_with(&doc, &opts);
+        assert!(md.contains("~~struck~~"), "got: {md}");
+    }
+
+    #[test]
+    fn bold_plus_italic_combines_wrappers() {
+        // Bits 0 (italic) + 1 (bold) together.
+        let runs = vec![CharShapeRun { start: 0, char_shape_id: 0 }];
+        let shapes = vec![char_shape_with_attr(0x01 | 0x02)];
+        let doc = styled_doc("both", runs, shapes);
+        let opts = MdOptions {
+            emit_styles: true,
+            ..MdOptions::default()
+        };
+        let md = to_markdown_with(&doc, &opts);
+        // Nesting order: bold outside italic → `***both***`.
+        assert!(md.contains("***both***"), "got: {md}");
+    }
+
+    #[test]
+    fn default_char_shape_emits_as_plain() {
+        // Single run with attr=0 (no formatting). Styled emission
+        // should produce the same as clean_text — no wrapping at all.
+        let runs = vec![CharShapeRun { start: 0, char_shape_id: 0 }];
+        let shapes = vec![char_shape_with_attr(0)];
+        let doc = styled_doc("just plain", runs, shapes);
+        let opts = MdOptions {
+            emit_styles: true,
+            ..MdOptions::default()
+        };
+        let md = to_markdown_with(&doc, &opts);
+        assert!(!md.contains('*'), "got: {md}");
+        assert!(!md.contains('~'), "got: {md}");
+        assert!(md.contains("just plain"), "got: {md}");
+    }
+
+    #[test]
+    fn missing_shape_id_falls_through_to_plain() {
+        // Run references shape id 99 that doesn't exist; emitter must
+        // not panic and must emit the text as plain.
+        let runs = vec![CharShapeRun { start: 0, char_shape_id: 99 }];
+        let shapes = vec![char_shape_with_attr(0)];
+        let doc = styled_doc("safe", runs, shapes);
+        let opts = MdOptions {
+            emit_styles: true,
+            ..MdOptions::default()
+        };
+        let md = to_markdown_with(&doc, &opts);
+        assert!(md.contains("safe"), "got: {md}");
+        assert!(!md.contains('*'), "got: {md}");
+    }
+
+    #[test]
+    fn hangul_utf16_offsets_align_correctly() {
+        // Each Korean character is a single UTF-16 unit. "가나다" (3
+        // chars = 3 u16s). Bold the middle char only: run 1 covers
+        // offsets [1..2].
+        let runs = vec![
+            CharShapeRun { start: 0, char_shape_id: 0 },
+            CharShapeRun { start: 1, char_shape_id: 1 },
+            CharShapeRun { start: 2, char_shape_id: 0 },
+        ];
+        let shapes = vec![char_shape_with_attr(0), char_shape_with_attr(0x02)];
+        let doc = styled_doc("가나다", runs, shapes);
+        let opts = MdOptions {
+            emit_styles: true,
+            ..MdOptions::default()
+        };
+        let md = to_markdown_with(&doc, &opts);
+        assert!(md.contains("가**나**다"), "got: {md}");
     }
 
     #[test]

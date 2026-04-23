@@ -53,6 +53,12 @@ Options:
                        the human path, as an HTML comment
                        `<!-- kind: <domain> -->` above the table.
                        Silent (no output) when Unknown.
+  --emit-styles        Human path only: wrap bold / italic / strike
+                       runs with Markdown inline formatting
+                       (**bold**, *italic*, ~~strike~~) based on
+                       each CharShapeRun's referenced CharShape.
+                       Runs whose shape has no formatting emit as
+                       plain text. Ignored with --llm.
   -h, --help           Print this help and exit.
 ";
 
@@ -103,6 +109,11 @@ fn main() -> ExitCode {
         domain_hints: args.emit_domain_hints && !args.llm,
         emit_roles: args.emit_roles && !args.llm,
         emit_editable: args.emit_editable && !args.llm,
+        // Inline styles (bold/italic/strike) only make sense on the
+        // human path — LLM output uses a structured record format
+        // where embedding Markdown formatting would confuse the
+        // grammar. Flag silently drops on the LLM branch.
+        emit_styles: args.emit_styles && !args.llm,
     };
     let md = markdown::to_markdown_with(&doc, &md_opts);
 
@@ -166,6 +177,7 @@ struct CliArgs {
     emit_roles: bool,
     emit_editable: bool,
     emit_domain_hints: bool,
+    emit_styles: bool,
 }
 
 #[derive(Debug)]
@@ -200,6 +212,7 @@ fn parse_args(raw: &[String]) -> Result<Option<CliArgs>, String> {
     let mut emit_roles = false;
     let mut emit_editable = false;
     let mut emit_domain_hints = false;
+    let mut emit_styles = false;
 
     let mut i = 0;
     while i < raw.len() {
@@ -217,6 +230,9 @@ fn parse_args(raw: &[String]) -> Result<Option<CliArgs>, String> {
             }
             "--emit-domain-hints" => {
                 emit_domain_hints = true;
+            }
+            "--emit-styles" => {
+                emit_styles = true;
             }
             "--no-assets" => {
                 if matches!(assets, AssetsMode::Explicit(_)) {
@@ -291,6 +307,7 @@ fn parse_args(raw: &[String]) -> Result<Option<CliArgs>, String> {
         emit_roles,
         emit_editable,
         emit_domain_hints,
+        emit_styles,
     }))
 }
 
