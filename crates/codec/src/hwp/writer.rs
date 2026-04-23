@@ -81,17 +81,15 @@ fn encode_doc_info(info: &DocInfo, compressed: bool) -> Result<Vec<u8>, IrError>
     }
 }
 
-fn encode_section(section: &Section, _compressed: bool) -> Result<Vec<u8>, IrError> {
+fn encode_section(section: &Section, compressed: bool) -> Result<Vec<u8>, IrError> {
     if let Some(bytes) = &section.stream_bytes {
         return Ok(bytes.clone());
     }
-    // Typed re-encode path lands in a later round (5d). Until then we
-    // insist on verbatim — a freshly-constructed section without
-    // `stream_bytes` is an error until the writer side learns to rebuild
-    // the record stream from paragraphs + raw_records.
-    Err(IrError::Unsupported(
-        "section re-encode (without stream_bytes) not implemented yet".into(),
-    ))
+    // Verbatim cache cleared — caller mutated the section. Re-encode
+    // from paragraphs + section.raw_records, syncing each paragraph's
+    // typed `header` back into its first PARA_HEADER record along the
+    // way (see `streams::body_text::emit_section`).
+    streams::body_text::emit_section(section, compressed)
 }
 
 fn write_stream(

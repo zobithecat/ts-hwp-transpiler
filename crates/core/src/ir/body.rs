@@ -19,6 +19,25 @@ pub struct Section {
     pub stream_bytes: Option<Vec<u8>>,
 }
 
+impl Section {
+    /// Mutable access to paragraphs. Clears `stream_bytes` so the writer
+    /// re-encodes from the current paragraph list (applying typed-field
+    /// edits) instead of emitting the cached verbatim bytes. Mirrors
+    /// [`DocInfo::records_mut`](super::doc_info::DocInfo::records_mut).
+    pub fn paragraphs_mut(&mut self) -> &mut Vec<Paragraph> {
+        self.stream_bytes = None;
+        &mut self.paragraphs
+    }
+
+    /// Explicit invalidation of the verbatim cache. Use when you mutate
+    /// typed paragraph / control fields directly (e.g.
+    /// `section.paragraphs[0].header.char_count = 5`) without going
+    /// through `paragraphs_mut`.
+    pub fn invalidate_verbatim(&mut self) {
+        self.stream_bytes = None;
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SectionProperties {
     pub page_width_hwpu: u32,

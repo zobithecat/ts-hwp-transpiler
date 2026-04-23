@@ -285,3 +285,57 @@ fn parse_table_cells(
 pub fn section_index_of(path: &str) -> Option<u32> {
     path.strip_prefix(STREAM_PREFIX).and_then(|s| s.parse().ok())
 }
+
+/// Inverse of `parse_section`: flatten a section's record tree into the
+/// raw `/BodyText/Section{N}` byte stream, then DEFLATE-compress if the
+/// FileHeader's `compressed` bit is set.
+///
+/// Each paragraph's first record (the PARA_HEADER) is re-emitted from
+/// the typed `Paragraph::header` view, so typed mutations of header
+/// fields flow into the output automatically. All other records are
+/// emitted verbatim from `Paragraph::raw_records` / `Section::raw_records`,
+/// which preserves bit-exact fidelity for any record type that doesn't
+/// yet have a typed encoder.
+///
+/// Byte-equality with the original stream on an unmutated section is
+/// NOT guaranteed here — that's what `Section::stream_bytes` verbatim
+/// pass-through is for. This emitter guarantees *structural* equality:
+/// the re-parsed records match the input record sequence 1:1.
+pub fn emit_section(section: &Section, compressed: bool) -> Result<Vec<u8>, IrError> {
+    let records = collect_section_records(section);
+    let raw = record::emit_all(&records);
+    if compressed {
+        doc_info::compress(&raw)
+    } else {
+        Ok(raw)
+    }
+}
+
+/// Flatten section-prelude records + each paragraph's records, with the
+/// typed ParagraphHeader pulled back into the first record of each
+/// paragraph. Kept separate from `emit_section` so unit tests can
+/// inspect the record stream without worrying about DEFLATE.
+fn collect_section_records(section: &Section) -> Vec<Record> {
+    let mut out: Vec<Record> = section.raw_records.clone();
+    for para in &section.paragraphs {
+        out.extend(sync_paragraph_records(para));
+    }
+    out
+}
+
+/// Return a paragraph's record list with the first record's payload
+/// rewritten from `para.header` — *only* when that first record is
+/// actually a PARA_HEADER (which parse_section always produces). If
+/// the caller hand-built a Paragraph without raw_records, we leave the
+/// list alone; the writer would then emit an empty record stream for
+/// that paragraph, which is invalid HWP but at least doesn't silently
+/// corrupt sibling paragraphs.
+fn sync_paragraph_records(para: &Paragraph) -> Vec<Record> {
+    let mut records = para.raw_records.clone();
+    if let Some(first) = records.first_mut() {
+        if first.tag == tag::PARA_HEADER {
+            first.data = paragraph_header::emit(&para.header);
+        }
+    }
+    records
+}
