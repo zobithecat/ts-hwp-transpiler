@@ -20,8 +20,8 @@ use hwp_transpiler_core::ir::{
 };
 
 use super::{
-    ctrl_header, doc_info, gso_picture, list_header, paragraph_char_shape, paragraph_header,
-    paragraph_line_seg, paragraph_text, record, table,
+    ctrl_header, doc_info, gso_picture, list_header, page_def, paragraph_char_shape,
+    paragraph_header, paragraph_line_seg, paragraph_text, record, table,
 };
 
 pub const STREAM_PREFIX: &str = "/BodyText/Section";
@@ -51,14 +51,32 @@ pub fn parse_section(stream_bytes: &[u8], compressed: bool) -> Result<Section, I
         stream_bytes.to_vec()
     };
     let records = record::parse_all(&decompressed)?;
+
+    // Opportunistic PAGE_DEF scan: HWP5 wires the section definition as
+    // a `secd` CTRL_HEADER on the first paragraph, with PAGE_DEF living
+    // one level deeper in the flat record stream. The tree parser
+    // keeps that record verbatim inside the paragraph; for rendering
+    // we just need the first PAGE_DEF we can find. Scanning the flat
+    // list once here is simpler (and safer) than plumbing the decoded
+    // properties back up through the tree parse.
+    let page_def_props = records
+        .iter()
+        .find(|r| r.tag == tag::PAGE_DEF)
+        .and_then(|r| page_def::parse(r).ok());
+
     let mut iter = records.into_iter().peekable();
 
     let mut section = Section {
         stream_bytes: Some(stream_bytes.to_vec()),
         ..Section::default()
     };
+    if let Some(props) = page_def_props {
+        section.properties = props;
+    }
 
-    // Records before the first top-level PARA_HEADER are section-scoped.
+    // Records before the first top-level PARA_HEADER are section-scoped
+    // (FOOTNOTE_SHAPE / PAGE_BORDER_FILL / legacy PAGE_DEF). Kept
+    // verbatim so the writer's round-trip is untouched.
     while let Some(r) = iter.peek() {
         if r.tag == tag::PARA_HEADER && r.level == 0 {
             break;

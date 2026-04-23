@@ -14,6 +14,7 @@ pub mod file_header;
 pub mod gso_picture;
 pub mod id_mappings;
 pub mod list_header;
+pub mod page_def;
 pub mod para_shape;
 pub mod paragraph_char_shape;
 pub mod paragraph_header;
