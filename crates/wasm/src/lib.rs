@@ -18,6 +18,7 @@
 
 use hwp_transpiler_codec::export::markdown::{self, LlmOptions, MdOptions};
 use hwp_transpiler_codec::hwp::HwpReader;
+use hwp_transpiler_codec::hwpx::HwpxReader;
 use hwp_transpiler_core::formula::Lexer;
 use hwp_transpiler_core::ir::{IrDocument, Reader, Writer};
 use hwp_transpiler_render::html::{self, HtmlOptions};
@@ -41,15 +42,30 @@ pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// Dispatches by the bytes' container magic so callers can feed
+/// either `.hwp` (OLE compound file) or `.hwpx` (ZIP) without
+/// picking the right entrypoint themselves. Same sniff as the
+/// `hwp-to-md` CLI.
 #[wasm_bindgen(js_name = loadHwp)]
 pub fn load_hwp(bytes: &[u8]) -> Result<JsValue, JsValue> {
-    let doc = HwpReader.read(bytes).map_err(js_err)?;
+    let doc = if bytes.starts_with(b"PK\x03\x04") {
+        HwpxReader.read(bytes).map_err(js_err)?
+    } else {
+        HwpReader.read(bytes).map_err(js_err)?
+    };
     to_jsvalue(&doc)
 }
 
+/// Explicit HWPX-only entrypoint for callers that want to refuse
+/// anything that isn't OCF. Rejects HWP5 magic up front rather than
+/// falling through.
 #[wasm_bindgen(js_name = loadHwpx)]
-pub fn load_hwpx(_bytes: &[u8]) -> Result<JsValue, JsValue> {
-    Err(JsValue::from_str("loadHwpx: not yet implemented"))
+pub fn load_hwpx(bytes: &[u8]) -> Result<JsValue, JsValue> {
+    if !bytes.starts_with(b"PK\x03\x04") {
+        return Err(JsValue::from_str("loadHwpx: input is not a ZIP container"));
+    }
+    let doc = HwpxReader.read(bytes).map_err(js_err)?;
+    to_jsvalue(&doc)
 }
 
 #[wasm_bindgen(js_name = saveHwp)]
