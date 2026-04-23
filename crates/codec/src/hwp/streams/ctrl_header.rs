@@ -48,6 +48,7 @@ pub fn parse(rec: &Record) -> Result<Control, IrError> {
     let data = rec.data[4..].to_vec();
     Ok(Control {
         kind: ControlKind::Unknown { code, data },
+        ..Default::default()
     })
 }
 

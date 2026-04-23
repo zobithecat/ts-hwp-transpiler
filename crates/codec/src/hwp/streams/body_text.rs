@@ -178,8 +178,15 @@ fn parse_paragraph(iter: &mut RecIter, level: u16) -> Result<Paragraph, IrError>
                         p.is_pic_confirmed = true;
                     }
                     _ => {
-                        // Some other shape (line / rect / OLE / …); leave
-                        // the control as Unknown and stop tracking.
+                        // Non-picture shape (line / rect / OLE / …).
+                        // The control stays `Unknown` (we don't type
+                        // these yet), but if the gso carried a caption
+                        // we preserve it on the wrapper so callers can
+                        // still locate and edit that text.
+                        if !p.caption_parts.is_empty() {
+                            para.controls[p.ctrl_idx].caption_text =
+                                Some(p.caption_parts.join(" "));
+                        }
                         pending_picture = None;
                     }
                 }
@@ -207,17 +214,15 @@ fn parse_paragraph(iter: &mut RecIter, level: u16) -> Result<Paragraph, IrError>
             if let Some(p) = pending_picture.take() {
                 if p.is_pic_confirmed {
                     if let Some(bin_id) = gso_picture::parse_picture_bin_id(&rec.data) {
-                        let caption_text = if p.caption_parts.is_empty() {
-                            None
-                        } else {
-                            Some(p.caption_parts.join(" "))
-                        };
+                        if !p.caption_parts.is_empty() {
+                            para.controls[p.ctrl_idx].caption_text =
+                                Some(p.caption_parts.join(" "));
+                        }
                         para.controls[p.ctrl_idx].kind =
                             ControlKind::Picture(PictureControl {
                                 bin_id,
                                 width_hwpu: p.width_hwpu,
                                 height_hwpu: p.height_hwpu,
-                                caption_text,
                             });
                     }
                 }

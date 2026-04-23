@@ -123,7 +123,7 @@ fn emit_paragraph(
                 emit_table(doc, t, out, llm, &ctrl_path, &para.text);
             }
             ControlKind::Picture(p) => {
-                emit_figure(p, out);
+                emit_figure(p, c.caption_text.as_deref(), out);
             }
             _ => {}
         }
@@ -324,7 +324,7 @@ fn emit_cell(
                     emit_table(doc, nested, out, llm, &inner_ctrl_path, &p.text);
                 }
                 ControlKind::Picture(pic) => {
-                    emit_figure(pic, out);
+                    emit_figure(pic, ctrl.caption_text.as_deref(), out);
                 }
                 _ => {}
             }
@@ -332,7 +332,7 @@ fn emit_cell(
     }
 }
 
-fn emit_figure(pic: &PictureControl, out: &mut String) {
+fn emit_figure(pic: &PictureControl, caption_text: Option<&str>, out: &mut String) {
     let fig_id = format!("fig-{}", pic.bin_id);
     let w_mm = hwpunit_to_mm(pic.width_hwpu);
     let h_mm = hwpunit_to_mm(pic.height_hwpu);
@@ -340,12 +340,12 @@ fn emit_figure(pic: &PictureControl, out: &mut String) {
         "FIGURE[id={fig_id},bin_id={},width_mm={w_mm},height_mm={h_mm}",
         pic.bin_id
     );
-    if pic.caption_text.is_some() {
+    if caption_text.is_some() {
         header.push_str(&format!(",caption_ref=cap-{fig_id}"));
     }
     header.push(']');
     line(out, &header);
-    if let Some(cap) = pic.caption_text.as_deref() {
+    if let Some(cap) = caption_text {
         let cleaned = super::markdown::clean_text(cap);
         let stripped =
             super::markdown::strip_caption_label_prefix(&cleaned).trim();
@@ -417,7 +417,7 @@ mod tests {
         // Top-level paragraph at section 0, index 3, hosting one table control.
         let mut paras: Vec<Paragraph> = (0..3).map(|_| Paragraph::default()).collect();
         paras.push(Paragraph {
-            controls: vec![Control { kind: ControlKind::Table(t) }],
+            controls: vec![Control { kind: ControlKind::Table(t), ..Default::default() }],
             ..Paragraph::default()
         });
         doc.sections.push(Section { paragraphs: paras, ..Section::default() });
@@ -453,7 +453,7 @@ mod tests {
                 col: 0, row: 0, col_span: 1, row_span: 1,
                 paragraphs: vec![Paragraph {
                     text: "wrapper text".into(),
-                    controls: vec![Control { kind: ControlKind::Table(inner) }],
+                    controls: vec![Control { kind: ControlKind::Table(inner), ..Default::default() }],
                     ..Paragraph::default()
                 }],
                 ..TableCell::default()
@@ -463,7 +463,7 @@ mod tests {
         let mut doc = IrDocument::default();
         doc.sections.push(Section {
             paragraphs: vec![Paragraph {
-                controls: vec![Control { kind: ControlKind::Table(outer) }],
+                controls: vec![Control { kind: ControlKind::Table(outer), ..Default::default() }],
                 ..Paragraph::default()
             }],
             ..Section::default()
@@ -487,8 +487,8 @@ mod tests {
                         bin_id: 3,
                         width_hwpu: 7200,
                         height_hwpu: 3600,
-                        caption_text: Some("그림 \u{FFFC}. 시스템 도식".into()),
                     }),
+                    caption_text: Some("그림 \u{FFFC}. 시스템 도식".into()),
                 }],
                 ..Paragraph::default()
             }],
@@ -512,8 +512,9 @@ mod tests {
             paragraphs: vec![Paragraph {
                 controls: vec![Control {
                     kind: ControlKind::Picture(PictureControl {
-                        bin_id: 1, width_hwpu: 0, height_hwpu: 0, caption_text: None,
+                        bin_id: 1, width_hwpu: 0, height_hwpu: 0,
                     }),
+                    caption_text: None,
                 }],
                 ..Paragraph::default()
             }],
@@ -543,7 +544,7 @@ mod tests {
         let mut doc = IrDocument::default();
         doc.sections.push(Section {
             paragraphs: vec![Paragraph {
-                controls: vec![Control { kind: ControlKind::Table(t) }],
+                controls: vec![Control { kind: ControlKind::Table(t), ..Default::default() }],
                 ..Paragraph::default()
             }],
             ..Section::default()
@@ -571,7 +572,7 @@ mod tests {
         let mut doc = IrDocument::default();
         doc.sections.push(Section {
             paragraphs: vec![Paragraph {
-                controls: vec![Control { kind: ControlKind::Table(t) }],
+                controls: vec![Control { kind: ControlKind::Table(t), ..Default::default() }],
                 ..Paragraph::default()
             }],
             ..Section::default()
@@ -598,7 +599,7 @@ mod tests {
         let mut doc = IrDocument::default();
         doc.sections.push(Section {
             paragraphs: vec![Paragraph {
-                controls: vec![Control { kind: ControlKind::Table(t) }],
+                controls: vec![Control { kind: ControlKind::Table(t), ..Default::default() }],
                 ..Paragraph::default()
             }],
             ..Section::default()
@@ -634,7 +635,7 @@ mod tests {
         };
         doc.sections.push(Section {
             paragraphs: vec![Paragraph {
-                controls: vec![Control { kind: ControlKind::Table(t) }],
+                controls: vec![Control { kind: ControlKind::Table(t), ..Default::default() }],
                 ..Paragraph::default()
             }],
             ..Section::default()
@@ -665,8 +666,8 @@ mod tests {
                             bin_id: 1,
                             width_hwpu: 0,
                             height_hwpu: 0,
-                            caption_text: None,
                         }),
+                        caption_text: None,
                     }],
                     ..Paragraph::default()
                 }],
@@ -677,7 +678,7 @@ mod tests {
         let mut doc = IrDocument::default();
         doc.sections.push(Section {
             paragraphs: vec![Paragraph {
-                controls: vec![Control { kind: ControlKind::Table(t) }],
+                controls: vec![Control { kind: ControlKind::Table(t), ..Default::default() }],
                 ..Paragraph::default()
             }],
             ..Section::default()
@@ -707,7 +708,7 @@ mod tests {
         let mut doc = IrDocument::default();
         doc.sections.push(Section {
             paragraphs: vec![Paragraph {
-                controls: vec![Control { kind: ControlKind::Table(t) }],
+                controls: vec![Control { kind: ControlKind::Table(t), ..Default::default() }],
                 ..Paragraph::default()
             }],
             ..Section::default()
@@ -737,7 +738,7 @@ mod tests {
         let mut doc = IrDocument::default();
         doc.sections.push(Section {
             paragraphs: vec![Paragraph {
-                controls: vec![Control { kind: ControlKind::Table(t) }],
+                controls: vec![Control { kind: ControlKind::Table(t), ..Default::default() }],
                 ..Paragraph::default()
             }],
             ..Section::default()
@@ -787,7 +788,7 @@ mod tests {
         let mut doc = IrDocument::default();
         doc.sections.push(Section {
             paragraphs: vec![Paragraph {
-                controls: vec![Control { kind: ControlKind::Table(t) }],
+                controls: vec![Control { kind: ControlKind::Table(t), ..Default::default() }],
                 ..Paragraph::default()
             }],
             ..Section::default()
@@ -836,7 +837,7 @@ mod tests {
         let mut doc = IrDocument::default();
         doc.sections.push(Section {
             paragraphs: vec![Paragraph {
-                controls: vec![Control { kind: ControlKind::Table(t) }],
+                controls: vec![Control { kind: ControlKind::Table(t), ..Default::default() }],
                 ..Paragraph::default()
             }],
             ..Section::default()
@@ -905,7 +906,7 @@ mod tests {
         };
         doc.sections.push(Section {
             paragraphs: vec![Paragraph {
-                controls: vec![Control { kind: ControlKind::Table(t) }],
+                controls: vec![Control { kind: ControlKind::Table(t), ..Default::default() }],
                 ..Paragraph::default()
             }],
             ..Section::default()
@@ -947,7 +948,7 @@ mod tests {
         };
         doc.sections.push(Section {
             paragraphs: vec![Paragraph {
-                controls: vec![Control { kind: ControlKind::Table(t) }],
+                controls: vec![Control { kind: ControlKind::Table(t), ..Default::default() }],
                 ..Paragraph::default()
             }],
             ..Section::default()

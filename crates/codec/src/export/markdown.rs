@@ -104,7 +104,7 @@ fn emit_paragraph(
             ControlKind::Table(t) => emit_table(doc, t, out, depth, opts, picture_counter),
             ControlKind::Picture(p) => {
                 *picture_counter += 1;
-                emit_picture(doc, p, out, opts, *picture_counter);
+                emit_picture(doc, p, c.caption_text.as_deref(), out, opts, *picture_counter);
             }
             _ => {}
         }
@@ -133,10 +133,8 @@ fn picture_image_line(
 /// newline). Caption text is cleaned and the HWP auto-numbering
 /// `"그림 . "` prefix — left stranded after `clean_text` drops U+FFFC —
 /// is removed.
-fn picture_caption_line(pic: &PictureControl, n: u32) -> String {
-    let caption_suffix = pic
-        .caption_text
-        .as_deref()
+fn picture_caption_line(caption_text: Option<&str>, n: u32) -> String {
+    let caption_suffix = caption_text
         .map(clean_text)
         .map(|s| strip_caption_label_prefix(&s).trim().to_string())
         .filter(|s| !s.is_empty())
@@ -151,6 +149,7 @@ fn picture_caption_line(pic: &PictureControl, n: u32) -> String {
 fn emit_picture(
     doc: &IrDocument,
     pic: &PictureControl,
+    caption_text: Option<&str>,
     out: &mut String,
     opts: &MdOptions,
     n: u32,
@@ -159,7 +158,7 @@ fn emit_picture(
         out.push_str(&img);
         out.push_str("\n\n");
     }
-    out.push_str(&picture_caption_line(pic, n));
+    out.push_str(&picture_caption_line(caption_text, n));
     out.push_str("\n\n");
 }
 
@@ -171,6 +170,7 @@ fn emit_picture_bullet(
     indent: &str,
     doc: &IrDocument,
     pic: &PictureControl,
+    caption_text: Option<&str>,
     out: &mut String,
     opts: &MdOptions,
     n: u32,
@@ -183,7 +183,7 @@ fn emit_picture_bullet(
     }
     out.push_str(indent);
     out.push_str("- ");
-    out.push_str(&picture_caption_line(pic, n));
+    out.push_str(&picture_caption_line(caption_text, n));
     out.push('\n');
 }
 
@@ -634,6 +634,7 @@ fn emit_cell_line(
                         &child_indent,
                         doc,
                         pic,
+                        c.caption_text.as_deref(),
                         out,
                         opts,
                         *picture_counter,
@@ -779,7 +780,7 @@ mod tests {
 
     fn para_with_table(t: TableControl) -> Paragraph {
         Paragraph {
-            controls: vec![Control { kind: ControlKind::Table(t) }],
+            controls: vec![Control { kind: ControlKind::Table(t), ..Default::default() }],
             ..Paragraph::default()
         }
     }
@@ -896,10 +897,10 @@ mod tests {
                         bin_id: 1,
                         width_hwpu: 7200,
                         height_hwpu: 3600,
-                        caption_text: Some(
-                            "그림 \u{FFFC}. 시스템 전체 아키텍처".into(),
-                        ),
                     }),
+                    caption_text: Some(
+                        "그림 \u{FFFC}. 시스템 전체 아키텍처".into(),
+                    ),
                 }],
                 ..Paragraph::default()
             }],
@@ -939,8 +940,8 @@ mod tests {
                         bin_id: 7,
                         width_hwpu: 7200,
                         height_hwpu: 3600,
-                        caption_text: Some("그림 \u{FFFC}. 연구팀 구성 도식".into()),
                     }),
+                    caption_text: Some("그림 \u{FFFC}. 연구팀 구성 도식".into()),
                 }],
                 ..Paragraph::default()
             }],
@@ -987,8 +988,8 @@ mod tests {
                 controls: vec![Control {
                     kind: ControlKind::Picture(PictureControl {
                         bin_id: 1, width_hwpu: 0, height_hwpu: 0,
-                        caption_text: None,
                     }),
+                    caption_text: None,
                 }],
                 ..Paragraph::default()
             }],
@@ -1017,8 +1018,9 @@ mod tests {
         let top_pic = Paragraph {
             controls: vec![Control {
                 kind: ControlKind::Picture(PictureControl {
-                    bin_id: 1, width_hwpu: 0, height_hwpu: 0, caption_text: None,
+                    bin_id: 1, width_hwpu: 0, height_hwpu: 0,
                 }),
+                caption_text: None,
             }],
             ..Paragraph::default()
         };
@@ -1027,8 +1029,9 @@ mod tests {
             paragraphs: vec![Paragraph {
                 controls: vec![Control {
                     kind: ControlKind::Picture(PictureControl {
-                        bin_id: 2, width_hwpu: 0, height_hwpu: 0, caption_text: None,
+                        bin_id: 2, width_hwpu: 0, height_hwpu: 0,
                     }),
+                    caption_text: None,
                 }],
                 ..Paragraph::default()
             }],
@@ -1069,8 +1072,8 @@ mod tests {
                         bin_id: 1,
                         width_hwpu: 0,
                         height_hwpu: 0,
-                        caption_text: None,
                     }),
+                    caption_text: None,
                 }],
                 ..Paragraph::default()
             }],
@@ -1399,6 +1402,7 @@ mod tests {
                 paragraphs: vec![Paragraph {
                     controls: vec![Control {
                         kind: ControlKind::Table(inner),
+                        ..Default::default()
                     }],
                     ..Paragraph::default()
                 }],
@@ -1433,6 +1437,7 @@ mod tests {
                     Paragraph {
                         controls: vec![Control {
                             kind: ControlKind::Table(inner),
+                            ..Default::default()
                         }],
                         ..Paragraph::default()
                     },

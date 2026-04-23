@@ -76,7 +76,9 @@ fn emit_paragraph(doc: &IrDocument, para: &Paragraph, out: &mut String, opts: &H
     for c in &para.controls {
         match &c.kind {
             ControlKind::Table(t) => emit_table(doc, t, out, opts),
-            ControlKind::Picture(p) => emit_figure(doc, p, out, opts),
+            ControlKind::Picture(p) => {
+                emit_figure(doc, p, c.caption_text.as_deref(), out, opts)
+            }
             _ => {}
         }
     }
@@ -121,7 +123,9 @@ fn emit_cell(doc: &IrDocument, cell: &TableCell, out: &mut String, opts: &HtmlOp
         for ctrl in &p.controls {
             match &ctrl.kind {
                 ControlKind::Table(nested) => emit_table(doc, nested, out, opts),
-                ControlKind::Picture(pic) => emit_figure(doc, pic, out, opts),
+                ControlKind::Picture(pic) => {
+                    emit_figure(doc, pic, ctrl.caption_text.as_deref(), out, opts)
+                }
                 _ => {}
             }
         }
@@ -129,7 +133,13 @@ fn emit_cell(doc: &IrDocument, cell: &TableCell, out: &mut String, opts: &HtmlOp
     out.push_str("</td>\n");
 }
 
-fn emit_figure(doc: &IrDocument, pic: &PictureControl, out: &mut String, opts: &HtmlOptions) {
+fn emit_figure(
+    doc: &IrDocument,
+    pic: &PictureControl,
+    caption_text: Option<&str>,
+    out: &mut String,
+    opts: &HtmlOptions,
+) {
     out.push_str("<figure>\n");
     if let Some(prefix) = &opts.assets_path {
         let filename = format!(
@@ -147,7 +157,7 @@ fn emit_figure(doc: &IrDocument, pic: &PictureControl, out: &mut String, opts: &
             h_mm
         ));
     }
-    if let Some(cap) = pic.caption_text.as_deref() {
+    if let Some(cap) = caption_text {
         let cleaned = clean_text(cap);
         let stripped = strip_caption_label_prefix(&cleaned).trim();
         if !stripped.is_empty() {
@@ -362,7 +372,7 @@ mod tests {
             ..TableControl::default()
         };
         let doc = make_doc(vec![style("본문")], vec![Paragraph {
-            controls: vec![Control { kind: ControlKind::Table(t) }],
+            controls: vec![Control { kind: ControlKind::Table(t), ..Default::default() }],
             ..Paragraph::default()
         }]);
         let html = to_html(&doc);
@@ -391,7 +401,7 @@ mod tests {
             ..TableControl::default()
         };
         let doc = make_doc(vec![style("본문")], vec![Paragraph {
-            controls: vec![Control { kind: ControlKind::Table(t) }],
+            controls: vec![Control { kind: ControlKind::Table(t), ..Default::default() }],
             ..Paragraph::default()
         }]);
         let html = to_html(&doc);
@@ -418,7 +428,7 @@ mod tests {
             ..TableControl::default()
         };
         let doc = make_doc(vec![style("본문")], vec![Paragraph {
-            controls: vec![Control { kind: ControlKind::Table(t) }],
+            controls: vec![Control { kind: ControlKind::Table(t), ..Default::default() }],
             ..Paragraph::default()
         }]);
         let html = to_html(&doc);
@@ -441,8 +451,8 @@ mod tests {
                         bin_id: 1,
                         width_hwpu: 7200,
                         height_hwpu: 3600,
-                        caption_text: Some("그림 \u{FFFC}. 시스템 도식".into()),
                     }),
+                    caption_text: Some("그림 \u{FFFC}. 시스템 도식".into()),
                 }],
                 ..Paragraph::default()
             }],
@@ -471,8 +481,8 @@ mod tests {
                         bin_id: 1,
                         width_hwpu: 0,
                         height_hwpu: 0,
-                        caption_text: Some("그림 \u{FFFC}. 설명".into()),
                     }),
+                    caption_text: Some("그림 \u{FFFC}. 설명".into()),
                 }],
                 ..Paragraph::default()
             }],

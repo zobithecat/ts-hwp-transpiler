@@ -106,9 +106,24 @@ pub struct LineSegment {
     pub tag: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Control {
     pub kind: ControlKind,
+    /// Caption text authored for this control. Populated for any
+    /// graphic-shape-object (`gso `) — not just pictures — from the
+    /// gso container's optional LIST_HEADER sub-paragraph. `None` when
+    /// the control has no caption or isn't a gso. Lives on the
+    /// wrapper (not on the `Picture`/`Equation` variant) so non-
+    /// picture shapes (line / rectangle / OLE) can surface their
+    /// captions too without introducing a dedicated variant per
+    /// shape type.
+    pub caption_text: Option<String>,
+}
+
+impl Default for ControlKind {
+    fn default() -> Self {
+        ControlKind::Unknown { code: [0; 4], data: Vec::new() }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -186,10 +201,7 @@ pub struct PictureControl {
     pub bin_id: u16,
     pub width_hwpu: u32,
     pub height_hwpu: u32,
-    /// Caption text harvested from the gso container's child LIST_HEADER
-    /// + its sub-paragraph's PARA_TEXT records. `None` when the picture
-    /// has no caption authored; `Some` holds the concatenated text
-    /// (multi-paragraph captions joined by newline, unfiltered — the
-    /// Markdown exporter runs `clean_text` before emitting).
-    pub caption_text: Option<String>,
+    // Caption text formerly lived here; moved up to `Control.caption_text`
+    // so non-picture gsos (line / rectangle / OLE / …) can surface theirs
+    // too, with a single IR field rather than one per shape variant.
 }

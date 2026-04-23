@@ -21,7 +21,7 @@ fn walk_pictures(paras: &[Paragraph], out: &mut Vec<(u16, Option<String>)>) {
         for c in &p.controls {
             match &c.kind {
                 ControlKind::Picture(pc) => {
-                    out.push((pc.bin_id, pc.caption_text.clone()));
+                    out.push((pc.bin_id, c.caption_text.clone()));
                 }
                 ControlKind::Table(t) => {
                     for cell in &t.cells {

@@ -1,43 +1,45 @@
 # 현재 위치
 
-**지금**: Preview (render crate HTML) 1차 구현. `hwp_transpiler_render::
-to_html(doc)` 가 `<article class="hwp-preview">` fragment 를 반환.
-표는 `<table>` + `rowspan`/`colspan` 속성으로 복원, 그림은 `<figure>
-<img><figcaption>`, heading 은 outline style 기반.
+**지금**: `caption_text` 필드가 `PictureControl` → `Control` 으로 승격.
+이제 picture 뿐 아니라 line / rectangle / OLE / 기타 non-picture gso
+도 caption 을 IR 에 surface 할 수 있음. 기존 picture caption 경로는
+그대로 유지.
 
 **최근 ship**:
-- `crates/render/src/html.rs` 신설. `to_html / to_html_with +
-  HtmlOptions { assets_path }`. render crate 의 기존 RenderCommand
-  기반 pixel pipeline 과 독립된 경로 (page layout 은 아직 scaffold
-  그대로).
-- Markdown 과 HTML 책임 분리 원칙 준수:
-  - Markdown: lossy-safe, 구조 보존, LLM 친화
-  - HTML preview: 시각적 복원 (rowspan/colspan), 사람 친화
-- 텍스트 cleanup (FFFC/NBSP/em-space/PUA circled digits),
-  HTML 엔티티 이스케이프 (`& < > " '`), `strip_caption_label_prefix`
-  모두 render 쪽에 재구현 (codec 역방향 의존 방지).
-- TRL fixture smoke test: 53 tables / 9 figures 모두 HTML 구조로
-  surface, rowspan/colspan 포함, FFFC leak 없음, `&` 엔티티
-  이스케이프 검증.
+- IR 변경:
+  - `Control { kind, caption_text: Option<String> }` (신규 필드)
+  - `PictureControl.caption_text` 제거
+  - `ControlKind::Default = Unknown { ... }` (Control::Default 지원)
+- Parser (`body_text::parse_paragraph`): gso 종료 시
+  - `$pic` 으로 판명되면 picture + Control.caption_text
+  - 다른 shape 이면 Unknown 유지 + Control.caption_text 세트 (이전엔
+    drop 되었음)
+- Exporter 마이그레이션:
+  - `markdown::emit_picture / emit_picture_bullet` 가 caption_text
+    를 별도 인자로 받도록 변경
+  - `markdown_llm::emit_figure` 동일
+  - `render::html::emit_figure` 동일
+- 모든 테스트 construct 사이트 마이그레이션 (Control 리터럴 ~20곳).
+
+**검증**:
+- TRL fixture: 9 picture → 6 caption surface (이전과 동일)
+- TRL fixture: 0 non-picture gso caption (이 fixture 에 해당 조합
+  없음 — 인프라는 완성)
+- 243 tests green, 라운드트립 byte-equal 유지.
 
 **알려진 갭**:
-- **CharShape 기반 폰트/색상 렌더링 미구현**. 텍스트는 plain.
-- **Page / column 경계 미구현**. 전체 document 가 하나의 fragment.
-- **Equation 렌더링 미구현** — controls 는 emit 단계에서 drop.
-- **CSS 포함 안 됨** — 호출자가 자기 스타일 적용 필요.
-- **Box-as-heading 는 preview 에서 decode 안 함** — Markdown path
-  만 처리. 호환성 위해 둘을 나중에 통합할지 결정 필요.
+- Non-picture gso caption 동작은 synthetic test 또는 다른 fixture
+  확보 필요.
+- 수식/OLE 등 non-picture gso 자체의 typed IR 는 아직 Unknown.
 
-**다음 후보** (리스트 순서대로):
-1. ~~Preview~~ ✅
-2. **Non-picture gso caption** — line/rect/ole shape 의 caption 살리기
+**다음 후보** (리스트 남은 것):
 3. **Fixture 확대** — TRL 외 heading-heavy / 수식-heavy / tracked-change
 4. **Schedule heuristic** — gantt-style 표 구조 감지
 5. **Figure domain hint**
 
 **막힌 것**: 없음.
 
-**작업 트리**: 깨끗. 테스트: 242/242 green.
+**작업 트리**: 깨끗. 테스트: 243/243 green.
 
 **빠른 컨텍스트**:
 - 라운드트립이 1순위 목표; 마크다운 품질은 2순위. 명시적 결정은
