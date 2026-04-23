@@ -181,7 +181,7 @@ fn emit_table(
 /// fill), the fingerprint's `bg` falls to `BgTone::None` and the
 /// classifier collapses to its position-only fallback — which is
 /// correct for tables without colour-coded labels.
-fn compute_roles(doc: &IrDocument, t: &TableControl) -> Vec<CellRole> {
+pub(super) fn compute_roles(doc: &IrDocument, t: &TableControl) -> Vec<CellRole> {
     let resolver = DocInfoResolver::new(&doc.doc_info);
     let fingerprints: Vec<_> = t
         .cells
@@ -191,7 +191,7 @@ fn compute_roles(doc: &IrDocument, t: &TableControl) -> Vec<CellRole> {
     classify_roles(&fingerprints)
 }
 
-fn role_name(role: Option<CellRole>) -> &'static str {
+pub(super) fn role_name(role: Option<CellRole>) -> &'static str {
     match role {
         Some(CellRole::Header) => "header",
         Some(CellRole::Label) => "label",
@@ -202,13 +202,13 @@ fn role_name(role: Option<CellRole>) -> &'static str {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Editable {
+pub(super) enum Editable {
     Yes,
     No,
     Unknown,
 }
 
-fn editable_name(e: Editable) -> &'static str {
+pub(super) fn editable_name(e: Editable) -> &'static str {
     match e {
         Editable::Yes => "true",
         Editable::No => "false",
@@ -233,7 +233,7 @@ fn editable_name(e: Editable) -> &'static str {
 ///
 /// Empty value cells *are* editable (fill-in slots). `None` role (when
 /// classifier didn't run) yields `Unknown`.
-fn infer_editable(cell: &TableCell, role: Option<CellRole>) -> Editable {
+pub(super) fn infer_editable(cell: &TableCell, role: Option<CellRole>) -> Editable {
     match role {
         None => return Editable::Unknown,
         Some(CellRole::Header) | Some(CellRole::Label) | Some(CellRole::Spacer) => {

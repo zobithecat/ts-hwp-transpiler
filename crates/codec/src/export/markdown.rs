@@ -15,7 +15,7 @@
 use hwp_transpiler_core::ir::{
     ControlKind, EquationControl, IrDocument, Paragraph, PictureControl, TableCell, TableControl,
 };
-use hwp_transpiler_core::semantics::{TableDomain, infer_table_domain};
+use hwp_transpiler_core::semantics::{CellRole, TableDomain, infer_table_domain};
 
 /// Knobs the caller passes to `to_markdown_with`. The bare `to_markdown`
 /// uses defaults (no asset link emitted; pictures collapse to bare
@@ -39,6 +39,17 @@ pub struct MdOptions {
     /// tables. Off by default — existing snapshots stay stable.
     /// Ignored on the LLM path (it has `LlmOptions::domain_hints`).
     pub domain_hints: bool,
+    /// Human Markdown path only: when true, each cell in a complex
+    /// table's bullet list gains a `role=header|label|value|spacer`
+    /// tag inside the `[r,c]` marker, taken from the same visual
+    /// classifier the LLM path uses. Simple-grid tables ignore this
+    /// flag (pipe cells can't host the attribute). Off by default.
+    pub emit_roles: bool,
+    /// Human Markdown path only: like `emit_roles` but for
+    /// `editable=true|false|unknown`. Enabling this implicitly
+    /// enables role computation even if `emit_roles` is off —
+    /// editable inference is role-dependent. Off by default.
+    pub emit_editable: bool,
 }
 
 /// Capability flags for the LLM-friendly Markdown layer. Kept minimal on
@@ -303,9 +314,17 @@ fn emit_table(
     }
 
     if let Some(grid) = try_build_md_grid(t) {
+        // Simple grid path: per-cell role/editable tags don't fit
+        // GFM pipe cells, so these flags are silently ignored here.
+        // Complex bullet path below honours them.
         emit_md_grid(&grid, out);
     } else {
-        emit_table_as_list(doc, t, out, depth, opts, picture_counter);
+        let roles: Vec<CellRole> = if opts.emit_roles || opts.emit_editable {
+            super::markdown_llm::compute_roles(doc, t)
+        } else {
+            Vec::new()
+        };
+        emit_table_as_list(doc, t, out, depth, opts, picture_counter, &roles);
     }
 }
 
@@ -573,6 +592,7 @@ fn emit_table_as_list(
     depth: usize,
     opts: &MdOptions,
     picture_counter: &mut u32,
+    roles: &[CellRole],
 ) {
     let indent = "  ".repeat(depth);
     out.push_str(&indent);
@@ -621,7 +641,8 @@ fn emit_table_as_list(
                 continue;
             }
         }
-        emit_cell_line(doc, cell, out, &indent, depth, opts, picture_counter);
+        let role = roles.get(i).copied();
+        emit_cell_line(doc, cell, out, &indent, depth, opts, picture_counter, role);
         i += 1;
     }
 
@@ -636,10 +657,26 @@ fn emit_cell_line(
     depth: usize,
     opts: &MdOptions,
     picture_counter: &mut u32,
+    role: Option<CellRole>,
 ) {
     out.push_str(indent);
     out.push_str("- ");
-    out.push_str(&format!("[{},{}]", cell.row, cell.col));
+    let mut marker = format!("[{},{}", cell.row, cell.col);
+    if opts.emit_roles {
+        marker.push_str(&format!(
+            ", role={}",
+            super::markdown_llm::role_name(role)
+        ));
+    }
+    if opts.emit_editable {
+        let ed = super::markdown_llm::infer_editable(cell, role);
+        marker.push_str(&format!(
+            ", editable={}",
+            super::markdown_llm::editable_name(ed)
+        ));
+    }
+    marker.push(']');
+    out.push_str(&marker);
     if cell.col_span != 1 || cell.row_span != 1 {
         out.push_str(&format!(" span {}×{}", cell.row_span, cell.col_span));
     }
@@ -1748,6 +1785,111 @@ mod tests {
         };
         let md = to_markdown_with(&doc, &opts);
         assert!(md.contains("<!-- kind: budget -->"), "got: {md}");
+    }
+
+    fn three_by_two_complex() -> TableControl {
+        // 3 rows × 2 cols, each cell has text so the bullet path
+        // engages (try_build_md_grid would succeed too, but we avoid
+        // that path by adding multiple paragraphs per cell below).
+        TableControl {
+            rows: 3,
+            cols: 2,
+            row_cell_counts: vec![2, 2, 2],
+            cells: vec![
+                cell(0, 0, "header A"),
+                cell(1, 0, "header B"),
+                cell(0, 1, "row1-a"),
+                cell(1, 1, "row1-b"),
+                cell(0, 2, "row2-a"),
+                cell(1, 2, "row2-b"),
+            ],
+            ..TableControl::default()
+        }
+    }
+
+    /// Force the bullet path by giving one cell `row_span = 2`
+    /// (`try_build_md_grid` bails on any row_span != 1).
+    fn three_by_two_complex_bullet() -> TableControl {
+        let mut t = three_by_two_complex();
+        t.cells[0].row_span = 2;
+        t
+    }
+
+    #[test]
+    fn role_attribute_absent_by_default() {
+        let doc = make_doc(vec![style("본문")], vec![para_with_table(three_by_two_complex_bullet())]);
+        let md = to_markdown(&doc);
+        // Default options: no role=, no editable= anywhere.
+        assert!(!md.contains("role="), "got: {md}");
+        assert!(!md.contains("editable="), "got: {md}");
+    }
+
+    #[test]
+    fn role_attribute_emitted_when_flag_on() {
+        let doc = make_doc(vec![style("본문")], vec![para_with_table(three_by_two_complex_bullet())]);
+        let opts = MdOptions {
+            emit_roles: true,
+            ..MdOptions::default()
+        };
+        let md = to_markdown_with(&doc, &opts);
+        // At least one bullet marker should carry role=<something>.
+        // Exact role value depends on the classifier — without a
+        // DocInfo color resolver the fallback may well return
+        // `unknown`, which is still a valid test of plumbing.
+        assert!(
+            md.contains(", role=header")
+                || md.contains(", role=label")
+                || md.contains(", role=value")
+                || md.contains(", role=spacer")
+                || md.contains(", role=unknown"),
+            "got: {md}"
+        );
+        // `editable=` should be absent because we only asked for roles.
+        assert!(!md.contains("editable="), "got: {md}");
+    }
+
+    #[test]
+    fn editable_attribute_emitted_when_flag_on() {
+        let doc = make_doc(vec![style("본문")], vec![para_with_table(three_by_two_complex_bullet())]);
+        let opts = MdOptions {
+            emit_editable: true,
+            ..MdOptions::default()
+        };
+        let md = to_markdown_with(&doc, &opts);
+        // `editable=` must appear; the exact value (true/false/unknown)
+        // depends on the role+content inference.
+        assert!(
+            md.contains("editable=true")
+                || md.contains("editable=false")
+                || md.contains("editable=unknown"),
+            "got: {md}"
+        );
+    }
+
+    #[test]
+    fn role_attributes_stay_in_bullet_marker_brackets() {
+        // Sanity: the new attributes sit *inside* `[r,c]` so grep-ing
+        // for `[0,0,` still matches the first cell. Stays compatible
+        // with any downstream tooling that parses the marker. The
+        // first cell here has row_span=2, so its marker closes with
+        // `] span 2×1:` rather than `]:` — both-tags-same-bullet is
+        // what we assert, not the exact trailing punctuation.
+        let doc = make_doc(vec![style("본문")], vec![para_with_table(three_by_two_complex_bullet())]);
+        let opts = MdOptions {
+            emit_roles: true,
+            emit_editable: true,
+            ..MdOptions::default()
+        };
+        let md = to_markdown_with(&doc, &opts);
+        assert!(md.contains("[0,0, role="), "got: {md}");
+        assert!(
+            md.lines().any(|l| {
+                l.contains("[0,0, role=")
+                    && l.contains(", editable=")
+                    && l.contains(']')
+            }),
+            "got: {md}"
+        );
     }
 
     #[test]

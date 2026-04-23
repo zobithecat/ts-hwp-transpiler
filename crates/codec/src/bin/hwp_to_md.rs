@@ -34,10 +34,18 @@ Options:
   --llm                Emit LLM-friendly structured Markdown with
                        stable ids instead of the human-readable form.
                        Targets LLM chunking/slot-rewrite/reinsertion.
-  --emit-roles         With --llm, add role=header|label|value|spacer
-                       to each CELL from the visual classifier.
-  --emit-editable      With --llm, add editable=true|false|unknown to
-                       each CELL from the conservative slot classifier.
+  --emit-roles         Tag cells with role=header|label|value|spacer
+                       from the visual classifier. With --llm, emitted
+                       on CELL markers; in the human path, added to
+                       each bullet line as `[r,c, role=<name>]` in
+                       complex-table bullet lists. Simple GFM-grid
+                       tables ignore the flag (pipe cells can't host
+                       attributes).
+  --emit-editable      Tag cells with editable=true|false|unknown from
+                       the conservative slot classifier. Same dual
+                       routing as --emit-roles; implicitly enables
+                       role computation because editable inference
+                       depends on role.
   --emit-domain-hints  Classify each table and surface the domain
                        (institution_info / budget / schedule /
                        performance_metrics / personnel). With --llm,
@@ -87,11 +95,14 @@ fn main() -> ExitCode {
             emit_editable: args.emit_editable,
             domain_hints: args.emit_domain_hints,
         }),
-        // Human-path flag: same `--emit-domain-hints` switch now also
-        // enables HTML-comment hints on the non-LLM output. LLM path
-        // continues to use `LlmOptions.domain_hints` (above); on that
-        // branch this field is ignored.
+        // Human-path mirrors: the `--emit-*` switches now also work
+        // without `--llm`. Each flag gets routed to the appropriate
+        // field only for the active path — human when llm is off,
+        // LLM (above) when llm is on — so a single set of CLI flags
+        // behaves consistently regardless of output mode.
         domain_hints: args.emit_domain_hints && !args.llm,
+        emit_roles: args.emit_roles && !args.llm,
+        emit_editable: args.emit_editable && !args.llm,
     };
     let md = markdown::to_markdown_with(&doc, &md_opts);
 
@@ -266,13 +277,11 @@ fn parse_args(raw: &[String]) -> Result<Option<CliArgs>, String> {
         return Err(format!("unexpected extra argument: {}", positionals[2]));
     }
 
-    // `--emit-roles` / `--emit-editable` require `--llm`; the human
-    // Markdown path doesn't have role/editable rendering. But
-    // `--emit-domain-hints` works in both modes now — human path
-    // renders it as an HTML comment above each classified table.
-    if (emit_roles || emit_editable) && !llm {
-        return Err("--emit-roles / --emit-editable require --llm".into());
-    }
+    // All three `--emit-*` flags now work in both modes. The LLM path
+    // routes them through `LlmOptions`; the human path (below) routes
+    // them through the mirror fields on `MdOptions`, which attach
+    // role= / editable= / domain hints onto its complex-table bullet
+    // list and an HTML comment above each table respectively.
 
     Ok(Some(CliArgs {
         input,
