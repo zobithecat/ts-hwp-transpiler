@@ -160,6 +160,18 @@ main {
   cursor: not-allowed;
 }
 
+.header-actions {
+  display: flex;
+  gap: 0.3rem;
+  align-items: center;
+}
+
+#pdf-download,
+#md-download {
+  font-size: 0.75rem;
+  font-family: var(--font-mono);
+}
+
 .preview-host,
 .md-host {
   flex: 1;

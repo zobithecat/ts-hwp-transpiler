@@ -70,6 +70,9 @@
               </button>
             </nav>
             <span id="preview-meta"></span>
+            <button id="pdf-download" type="button" disabled>
+              PDF 다운로드
+            </button>
           </header>
           <div id="preview" class="preview-host editor-host">
             <p class="hint">iframe 로드 중…</p>
@@ -82,7 +85,12 @@
         <article class="pane">
           <header class="pane-header">
             <h2>Markdown <span class="tag">ts-hwp-transpiler</span></h2>
-            <button id="copy-md" type="button" disabled>복사</button>
+            <div class="header-actions">
+              <button id="md-download" type="button" disabled>
+                .md 다운로드
+              </button>
+              <button id="copy-md" type="button" disabled>복사</button>
+            </div>
           </header>
           <pre id="markdown" class="md-host"></pre>
         </article>

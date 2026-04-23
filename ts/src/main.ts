@@ -32,6 +32,8 @@ const mdPreviewEl = $("md-preview");
 const previewMeta = $("preview-meta");
 const markdownEl = $<HTMLPreElement>("markdown");
 const copyBtn = $<HTMLButtonElement>("copy-md");
+const pdfBtn = $<HTMLButtonElement>("pdf-download");
+const mdDlBtn = $<HTMLButtonElement>("md-download");
 const tabButtons = document.querySelectorAll<HTMLButtonElement>(
   ".tabs .tab",
 );
@@ -44,6 +46,10 @@ const emitStylesEl = $<HTMLInputElement>("emit-styles");
 // Resident IR. We don't re-parse on option changes — just flip the
 // knobs against the cached IR.
 let ourIr: unknown = null;
+
+// Filename stem of the most recently loaded file; used to name the
+// download outputs (`.md`, `.pdf`) after their source document.
+let currentStem = "document";
 
 // Currently-visible left-pane tab. The editor iframe and our
 // structure-preserving HTML render coexist as sibling divs;
@@ -74,6 +80,7 @@ function renderMarkdown(ir: unknown): { bytes: number; ms: number } {
   );
   markdownEl.textContent = md;
   copyBtn.disabled = md.length === 0;
+  mdDlBtn.disabled = md.length === 0;
   if (activeTab === "html") {
     renderStructuredHtml();
   }
@@ -111,6 +118,10 @@ function setTab(target: LeftTab): void {
   });
   previewEl.hidden = target !== "editor";
   mdPreviewEl.hidden = target !== "html";
+  // PDF download only makes sense off the structured HTML render —
+  // the rhwp iframe is cross-origin and can't be snapshotted from
+  // the parent frame.
+  pdfBtn.disabled = target !== "html" || ourIr === null;
   if (target === "html") {
     renderStructuredHtml();
   }
@@ -127,6 +138,7 @@ async function loadIntoEditor(
 
 async function handleFile(file: File): Promise<void> {
   setStatus(`읽는 중… ${file.name}`);
+  currentStem = stemOf(file.name);
   const buffer = await file.arrayBuffer();
   const bytes = new Uint8Array(buffer);
 
@@ -153,8 +165,19 @@ async function handleFile(file: File): Promise<void> {
     ourIr = null;
     markdownEl.textContent = "";
     copyBtn.disabled = true;
+    mdDlBtn.disabled = true;
     setStatus(`loadHwp 실패: ${String(irResult.reason)}`, true);
   }
+  pdfBtn.disabled = activeTab !== "html" || ourIr === null;
+}
+
+/// Strip the directory path and trailing extension from a filename —
+/// `"folder/plan.hwpx"` → `"plan"`. Used as the stem for download
+/// filenames (`plan.md`, `plan.pdf`).
+function stemOf(name: string): string {
+  const base = name.split(/[\\/]/).pop() ?? name;
+  const dot = base.lastIndexOf(".");
+  return dot > 0 ? base.slice(0, dot) : base;
 }
 
 fileInput.addEventListener("change", () => {
@@ -195,6 +218,86 @@ copyBtn.addEventListener("click", async () => {
     setStatus(`복사 실패: ${String(err)}`, true);
   }
 });
+
+mdDlBtn.addEventListener("click", () => {
+  const text = markdownEl.textContent ?? "";
+  if (!text) return;
+  downloadBlob(
+    new Blob([text], { type: "text/markdown;charset=utf-8" }),
+    `${currentStem}.md`,
+  );
+});
+
+/// Open a print-ready popup with our structured HTML render and
+/// trigger the browser's print dialog. The user chooses "Save as PDF"
+/// from there — no client-side PDF library needed, no server-side
+/// rendering. Popup-blocker gotcha: the window.open() has to run
+/// synchronously inside the click handler or the browser treats it
+/// as non-user-initiated and blocks it.
+pdfBtn.addEventListener("click", () => {
+  if (!ourIr || activeTab !== "html") return;
+  const popup = window.open("", "_blank", "width=900,height=1100");
+  if (!popup) {
+    setStatus("팝업이 차단되어 PDF 프린트를 열 수 없습니다.", true);
+    return;
+  }
+  // emit_pages on → real A4 widths so the print dialog's page
+  // boundaries line up with the document's declared page size.
+  const body = exportHtml(ourIr, undefined, emitStylesEl.checked, true);
+  popup.document.write(printableHtmlShell(currentStem, body));
+  popup.document.close();
+  // Wait for layout before asking for print — Safari otherwise
+  // shows an empty preview.
+  popup.addEventListener("load", () => popup.print());
+});
+
+/// Wrap the exportHtml body in a minimal shell with print-oriented
+/// CSS so A4 page breaks align with our `.hwp-page` sections.
+function printableHtmlShell(title: string, body: string): string {
+  return `<!DOCTYPE html>
+<html lang="ko"><head>
+<meta charset="UTF-8">
+<title>${escapeHtml(title)}</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;700&family=Noto+Serif+KR:wght@400;700&display=swap">
+<style>
+  body { margin: 0; font-family: "Noto Sans KR", sans-serif; color: #111; font-size: 11pt; line-height: 1.5; }
+  .hwp-preview { max-width: none; }
+  .hwp-page { margin: 0 auto 6mm; background: white; box-shadow: 0 1px 4px rgba(0,0,0,.08); box-sizing: border-box; }
+  @media print {
+    .hwp-page { margin: 0; box-shadow: none; page-break-after: always; }
+  }
+  table { border-collapse: collapse; margin: 4pt 0; }
+  th, td { border: 0.3pt solid #999; padding: 3pt 5pt; vertical-align: top; }
+  figure { margin: 6pt 0; text-align: center; }
+  figure img { max-width: 100%; height: auto; }
+  figcaption { font-size: 9pt; color: #555; margin-top: 2pt; }
+  h1, h2, h3, h4 { margin: 10pt 0 4pt; }
+</style>
+</head><body>${body}</body></html>`;
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/// Generic "download a Blob as a file" shim. Uses a temporary <a>
+/// and an object URL; revokes the URL after click fires so long-
+/// running sessions don't leak blob references.
+function downloadBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
 
 // Boot in parallel: our wasm self-initialises from its sidecar file;
 // the editor mounts into the preview pane and spins up its own iframe
