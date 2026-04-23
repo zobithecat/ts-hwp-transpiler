@@ -20,6 +20,7 @@
 
 use hwp_transpiler_codec::export::{assets, markdown};
 use hwp_transpiler_codec::hwp::HwpReader;
+use hwp_transpiler_codec::hwpx::HwpxReader;
 use hwp_transpiler_core::ir::{IrDocument, Reader};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -84,7 +85,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let doc = match HwpReader.read(&bytes) {
+    let doc = match parse_bytes(&bytes) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("parse {}: {e}", args.input.display());
@@ -397,6 +398,19 @@ fn assets_prefix_for(assets_dir: &Path, md_path: &Path) -> String {
 
 #[allow(dead_code)]
 fn _silence_unused(_doc: &IrDocument) {}
+
+/// Route to `HwpReader` (OLE compound file, starts with `D0 CF 11 E0`)
+/// or `HwpxReader` (ZIP, starts with `PK\x03\x04`). Falls back to the
+/// legacy HWP reader when the magic is unrecognisable — lets malformed
+/// or truncated docs surface an HWP-style error rather than a
+/// confusing "unknown magic" message.
+fn parse_bytes(bytes: &[u8]) -> Result<IrDocument, hwp_transpiler_core::ir::IrError> {
+    if bytes.starts_with(b"PK\x03\x04") {
+        HwpxReader.read(bytes)
+    } else {
+        HwpReader.read(bytes)
+    }
+}
 
 #[cfg(test)]
 mod tests {
