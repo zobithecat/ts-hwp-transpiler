@@ -10,7 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@rhwp/core": "^0.7.3"
+    "@rhwp/editor": "^0.7.3"
   },
   "devDependencies": {
     "typescript": "^5.4.0",

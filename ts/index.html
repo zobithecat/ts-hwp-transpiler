@@ -4,21 +4,17 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ts-hwp-transpiler demo</title>
-    <link
-      rel="stylesheet"
-      href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;700&family=Noto+Serif+KR:wght@400;700&family=Nanum+Gothic&family=Nanum+Myeongjo&display=swap"
-    />
     <link rel="stylesheet" href="/src/demo.css" />
   </head>
   <body>
     <header>
       <h1>ts-hwp-transpiler</h1>
       <p>
-        HWP → Markdown 브라우저 변환 데모. 미리보기 렌더링은
-        <a href="https://www.npmjs.com/package/@rhwp/core" target="_blank"
-          >@rhwp/core</a
-        >,
-        Markdown 변환은 이 프로젝트의 <code>exportMarkdown</code>.
+        HWP/HWPX → Markdown 브라우저 변환 데모. 에디터/미리보기는
+        <a href="https://www.npmjs.com/package/@rhwp/editor" target="_blank"
+          >@rhwp/editor</a
+        >
+        iframe 임베드, Markdown 변환은 이 프로젝트의 <code>exportMarkdown</code>.
       </p>
     </header>
 
@@ -55,11 +51,11 @@
       <section class="split">
         <article class="pane">
           <header class="pane-header">
-            <h2>미리보기 <span class="tag">@rhwp/core</span></h2>
+            <h2>에디터 <span class="tag">@rhwp/editor</span></h2>
             <span id="preview-meta"></span>
           </header>
-          <div id="preview" class="preview-host">
-            <p class="hint">왼쪽에서 파일을 선택하면 여기에 미리보기가 나타납니다.</p>
+          <div id="preview" class="preview-host editor-host">
+            <p class="hint">iframe 로드 중…</p>
           </div>
         </article>
 

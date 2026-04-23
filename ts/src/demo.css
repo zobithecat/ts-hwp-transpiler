@@ -181,17 +181,18 @@ main {
   background: #fcfcfd;
 }
 
-/* @rhwp/core emits one standalone SVG per page. Give each a white
-   card background so the stacked pages don't blur together, and cap
-   width so the preview scrolls vertically instead of forcing the
-   whole pane to the paper width. */
-.preview-host svg {
+/* Editor pane hosts a full iframe from @rhwp/editor. Zero padding,
+   zero margin, iframe fills the pane. Static placeholder (`.hint`)
+   still shows during boot before createEditor() runs. */
+.editor-host {
+  padding: 0;
+}
+
+.editor-host iframe {
   display: block;
-  max-width: 100%;
-  height: auto;
-  margin: 0 auto 1rem;
-  background: white;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+  width: 100%;
+  height: 100%;
+  border: 0;
 }
 
 .pane-header .tag {
