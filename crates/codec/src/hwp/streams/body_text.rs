@@ -327,25 +327,27 @@ fn collect_section_records(section: &Section) -> Vec<Record> {
 /// back into the *first occurrence* of each projected tag. Covers:
 ///
 ///   * PARA_HEADER     ← `para.header`
+///   * PARA_TEXT       ← `para.text` (only when the original raw
+///                       record decoded without U+FFFC — see below)
 ///   * PARA_CHAR_SHAPE ← `para.char_shape_runs`
 ///   * PARA_LINE_SEG   ← `para.line_segments`
 ///
-/// PARA_TEXT is intentionally NOT synced: `para.text` is a lossy view
-/// (extended control markers collapse to U+FFFC), so round-tripping
-/// through it would destroy the 16-byte control payloads that HWP5
-/// needs for inline pictures, hyperlinks, etc. Edits to `para.text`
-/// by callers are silently dropped today — a dedicated text-emission
-/// path will come when an inverse of `extract_text` that preserves
-/// extended controls lands.
+/// PARA_TEXT is gated on the *original* raw record: if the raw bytes
+/// decode to a text that contains U+FFFC, the paragraph has extended-
+/// control payloads (inline pictures / hyperlinks / field markers)
+/// that the typed `text` view can't represent. Re-emitting from
+/// `para.text` would silently destroy them, so the raw PARA_TEXT
+/// stays verbatim and edits to `para.text` are dropped. For pure-text
+/// paragraphs, edits flow normally via [`paragraph_text::emit`].
 ///
 /// Only the *first* occurrence of each tag is rewritten. Real HWP5
-/// files carry exactly one PARA_CHAR_SHAPE / PARA_LINE_SEG per
-/// paragraph, so the policy matches production authoring tools; the
-/// first-occurrence rule guards against silent corruption if an
-/// unusual fixture ever contains duplicates.
+/// files carry exactly one PARA_* per paragraph, so the policy matches
+/// production authoring tools; the first-occurrence rule guards against
+/// silent corruption if an unusual fixture ever contains duplicates.
 fn sync_paragraph_records(para: &Paragraph) -> Vec<Record> {
     let mut records = para.raw_records.clone();
     let mut header_synced = false;
+    let mut text_synced = false;
     let mut char_shape_synced = false;
     let mut line_seg_synced = false;
     for rec in &mut records {
@@ -353,6 +355,27 @@ fn sync_paragraph_records(para: &Paragraph) -> Vec<Record> {
             tag::PARA_HEADER if !header_synced => {
                 rec.data = paragraph_header::emit(&para.header);
                 header_synced = true;
+            }
+            tag::PARA_TEXT if !text_synced => {
+                // Gate on the *original* record: if the raw PARA_TEXT
+                // decodes to a text that already contained U+FFFC, the
+                // paragraph has extended-control payloads that the
+                // typed view can't represent. Honoring a text edit
+                // here would silently destroy those payloads (inline
+                // picture markers, hyperlinks, …), so we keep the raw
+                // bytes verbatim. Only when the original was pure
+                // text do we re-emit from `para.text`.
+                let original_lossy = paragraph_text::extract_text(rec)
+                    .map(|s| s.contains('\u{FFFC}'))
+                    .unwrap_or(true);
+                if !original_lossy {
+                    if let Ok(bytes) = paragraph_text::emit(&para.text) {
+                        rec.data = bytes;
+                    }
+                    // Emit-side refusal (user inserted U+FFFC or a bare
+                    // low-value control): also fall through to verbatim.
+                }
+                text_synced = true;
             }
             tag::PARA_CHAR_SHAPE if !char_shape_synced => {
                 rec.data = paragraph_char_shape::emit(&para.char_shape_runs);

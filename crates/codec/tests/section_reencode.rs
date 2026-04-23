@@ -226,13 +226,14 @@ fn line_segments_mutation_flows_through_writer() {
     );
 }
 
-/// `Paragraph::text` edits are silently dropped: the typed view is
-/// lossy (extended-control U+FFFC collapse), so we don't try to round-
-/// trip it yet. Document this via a test so that when a typed
-/// PARA_TEXT encoder lands, this test flips and becomes a positive
-/// assertion.
+/// `Paragraph::text` edits are dropped when the paragraph contains
+/// extended controls (U+FFFC placeholders in the typed view) — the
+/// typed view can't round-trip those 16-byte control payloads, so the
+/// writer keeps the verbatim PARA_TEXT record. `blank.hwp`'s first
+/// paragraph carries section-def + column-def controls, so it's the
+/// perfect case for this contract.
 #[test]
-fn paragraph_text_edits_are_currently_ignored() {
+fn paragraph_text_edits_dropped_when_extended_controls_present() {
     let Some((_bytes, mut doc)) = load_doc(&fixture_path("blank.hwp")) else {
         return;
     };
@@ -241,6 +242,12 @@ fn paragraph_text_edits_are_currently_ignored() {
     }
 
     let original_text = doc.sections[0].paragraphs[0].text.clone();
+    // Sanity: pre-condition of this test — paragraph must have U+FFFC.
+    assert!(
+        original_text.contains('\u{FFFC}'),
+        "blank.hwp para[0] expected to carry extended controls (U+FFFC)"
+    );
+
     doc.sections[0].paragraphs_mut()[0].text = "MUTATED TEXT".into();
 
     let out = HwpWriter.write(&doc).expect("write");
@@ -248,7 +255,101 @@ fn paragraph_text_edits_are_currently_ignored() {
 
     assert_eq!(
         after.sections[0].paragraphs[0].text, original_text,
-        "text edits should be a no-op until PARA_TEXT encoder lands"
+        "text edits MUST be dropped when the paragraph has extended \
+         controls — typed view can't round-trip those payloads"
+    );
+}
+
+/// Positive case: when a paragraph has no extended controls, user
+/// edits to `para.text` DO flow through the writer. Constructed
+/// synthetically rather than from a fixture — the TRL/blank fixtures
+/// we have on hand all contain some kind of control record on every
+/// paragraph, so we build a pure-text paragraph ourselves using the
+/// typed emitters each record has.
+#[test]
+fn paragraph_text_edits_flow_when_pure_text() {
+    use hwp_transpiler_codec::hwp::blank_document;
+    use hwp_transpiler_codec::hwp::streams::{
+        body_text, paragraph_char_shape, paragraph_header, paragraph_line_seg, paragraph_text,
+    };
+    use hwp_transpiler_core::ir::{
+        CharShapeRun, LineSegment, Paragraph, ParagraphHeader, Record,
+    };
+
+    // Start from the blank seed so the DocInfo (styles, shapes, fonts)
+    // is already valid — we only need to bolt a pure-text paragraph
+    // onto section 0.
+    let mut doc = blank_document().expect("blank_document");
+
+    let starting_text = "안녕하세요";
+    let header = ParagraphHeader {
+        char_count: starting_text.encode_utf16().count() as u32,
+        char_shape_count: 1,
+        line_align_count: 1,
+        ..ParagraphHeader::default()
+    };
+    let char_shape_runs = vec![CharShapeRun { start: 0, char_shape_id: 0 }];
+    let line_segments = vec![LineSegment::default()];
+    let raw_records = vec![
+        Record {
+            tag: body_text::tag::PARA_HEADER,
+            level: 0,
+            data: paragraph_header::emit(&header),
+        },
+        Record {
+            tag: body_text::tag::PARA_TEXT,
+            level: 1,
+            data: paragraph_text::emit(starting_text).expect("pure text emits"),
+        },
+        Record {
+            tag: body_text::tag::PARA_CHAR_SHAPE,
+            level: 1,
+            data: paragraph_char_shape::emit(&char_shape_runs),
+        },
+        Record {
+            tag: body_text::tag::PARA_LINE_SEG,
+            level: 1,
+            data: paragraph_line_seg::emit(&line_segments),
+        },
+    ];
+
+    let synthetic = Paragraph {
+        header,
+        text: starting_text.into(),
+        char_shape_runs,
+        line_segments,
+        raw_records,
+        ..Paragraph::default()
+    };
+
+    // Append. `paragraphs_mut` clears stream_bytes so the writer
+    // re-encodes.
+    doc.sections[0].paragraphs_mut().push(synthetic);
+    let new_idx = doc.sections[0].paragraphs.len() - 1;
+
+    // Round-trip sanity: the paragraph we just attached should survive
+    // a write → read cycle unchanged.
+    let out = HwpWriter.write(&doc).expect("write after append");
+    let after = HwpReader.read(&out).expect("re-read after append");
+    assert_eq!(
+        after.sections[0].paragraphs[new_idx].text,
+        starting_text,
+        "synthetic pure-text paragraph did not round-trip through write+read"
+    );
+
+    // Now mutate the synthetic paragraph's text and expect the edit
+    // to flow through the writer.
+    let mutated = "반갑습니다";
+    doc.sections[0].paragraphs_mut()[new_idx].text = mutated.into();
+    doc.sections[0].paragraphs_mut()[new_idx].header.char_count =
+        mutated.encode_utf16().count() as u32;
+
+    let out = HwpWriter.write(&doc).expect("write after text edit");
+    let after = HwpReader.read(&out).expect("re-read after text edit");
+    assert_eq!(
+        after.sections[0].paragraphs[new_idx].text,
+        mutated,
+        "pure-text paragraph edit did not flow through the writer"
     );
 }
 

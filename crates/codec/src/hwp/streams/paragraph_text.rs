@@ -81,6 +81,59 @@ pub fn extract_text(rec: &Record) -> Result<String, IrError> {
         .map_err(|e| IrError::Invalid(format!("PARA_TEXT UTF-16: {e}")))
 }
 
+/// Inverse of [`extract_text`]: serialize `text` back into a raw
+/// PARA_TEXT payload (UTF-16LE with the HWP5 inline-control reverse
+/// mapping applied).
+///
+/// Refuses to emit when the input contains [`OBJECT_REPLACEMENT`]
+/// (U+FFFC) — that placeholder means the typed `text` view is incomplete
+/// because the original record had extended (16-byte) controls like
+/// inline pictures or field markers. Re-emitting from `text` alone
+/// would destroy those control payloads; callers that hit this error
+/// should keep the paragraph's verbatim PARA_TEXT record instead.
+///
+/// Also refuses to emit when `text` contains bare U+0000..=U+001F code
+/// points outside the inline-control whitelist (TAB / LF / NBSP /
+/// SOFT HYPHEN / EM SPACE). Such code points would be decoded as HWP5
+/// extended control markers and corrupt the record on parse.
+pub fn emit(text: &str) -> Result<Vec<u8>, IrError> {
+    if text.contains('\u{FFFC}') {
+        return Err(IrError::Unsupported(
+            "PARA_TEXT: cannot re-encode text containing U+FFFC \
+             (extended-control placeholder); keep verbatim raw_record"
+                .into(),
+        ));
+    }
+    let mut out = Vec::with_capacity(text.len() * 2);
+    for c in text.chars() {
+        let mut buf = [0u16; 2];
+        let units = c.encode_utf16(&mut buf);
+        for u in units.iter().copied() {
+            let emitted: u16 = match u {
+                // Inline controls that pass through (stay as HWP5 codes).
+                0x0009 | 0x000A => u,
+                // Unicode → HWP5 inline reverse map.
+                0x00A0 => 0x001E, // NBSP
+                0x00AD => 0x0018, // SOFT HYPHEN
+                0x2003 => 0x001F, // EM SPACE
+                // Any other low-value code point would be read as an
+                // extended-control marker. Refuse rather than silently
+                // corrupting the stream.
+                0x0000..=0x001F => {
+                    return Err(IrError::Unsupported(format!(
+                        "PARA_TEXT: cannot emit bare low-value char \
+                         U+{u:04X} — would decode as an HWP5 extended \
+                         control on read"
+                    )));
+                }
+                _ => u,
+            };
+            out.extend_from_slice(&emitted.to_le_bytes());
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,5 +200,90 @@ mod tests {
     fn wrong_tag_errors() {
         let r = Record { tag: tag::PARA_HEADER, level: 0, data: vec![] };
         assert!(extract_text(&r).is_err());
+    }
+
+    #[test]
+    fn emit_plain_ascii_roundtrips() {
+        let bytes = emit("hello").unwrap();
+        assert_eq!(bytes, utf16le("hello"));
+        assert_eq!(extract_text(&rec(bytes)).unwrap(), "hello");
+    }
+
+    #[test]
+    fn emit_hangul_roundtrips() {
+        let bytes = emit("안녕하세요").unwrap();
+        assert_eq!(bytes, utf16le("안녕하세요"));
+        assert_eq!(extract_text(&rec(bytes)).unwrap(), "안녕하세요");
+    }
+
+    #[test]
+    fn emit_tab_preserved_inline() {
+        let bytes = emit("a\tb").unwrap();
+        assert_eq!(bytes, vec![b'a', 0, 0x09, 0, b'b', 0]);
+    }
+
+    #[test]
+    fn emit_nbsp_reverses_to_hwp5_control() {
+        let bytes = emit("a\u{00A0}b").unwrap();
+        assert_eq!(bytes, vec![b'a', 0, 0x1E, 0, b'b', 0]);
+        // Round-trip through extract_text must land back at U+00A0.
+        assert_eq!(extract_text(&rec(bytes)).unwrap(), "a\u{00A0}b");
+    }
+
+    #[test]
+    fn emit_em_space_reverses() {
+        let bytes = emit("\u{2003}").unwrap();
+        assert_eq!(bytes, vec![0x1F, 0]);
+    }
+
+    #[test]
+    fn emit_soft_hyphen_reverses() {
+        let bytes = emit("\u{00AD}").unwrap();
+        assert_eq!(bytes, vec![0x18, 0]);
+    }
+
+    #[test]
+    fn emit_rejects_object_replacement() {
+        // U+FFFC means "extended control elsewhere in the raw record";
+        // cannot round-trip through the typed view alone.
+        assert!(emit("a\u{FFFC}b").is_err());
+    }
+
+    #[test]
+    fn emit_rejects_bare_control_char() {
+        // U+0005 has no inline mapping and would be misread as an
+        // extended control marker.
+        assert!(emit("a\u{0005}b").is_err());
+    }
+
+    #[test]
+    fn emit_handles_surrogate_pairs() {
+        // U+1F600 (🙀-ish emoji range) encodes as a UTF-16 surrogate
+        // pair. Both halves must be emitted without either being
+        // mistaken for a low-value control.
+        let s = "x\u{1F600}y";
+        let bytes = emit(s).unwrap();
+        assert_eq!(bytes, utf16le(s));
+        assert_eq!(extract_text(&rec(bytes)).unwrap(), s);
+    }
+
+    #[test]
+    fn emit_extract_roundtrip_on_fixture_bytes() {
+        // Synthesise a pure-text PARA_TEXT payload (no extended
+        // controls), parse it, re-emit it, and expect byte equality.
+        // This is the invariant sync_paragraph_records relies on for
+        // unmutated paragraphs.
+        let original = {
+            let mut v = Vec::new();
+            v.extend_from_slice(&utf16le("안"));
+            v.extend_from_slice(&[0x09, 0]); // tab
+            v.extend_from_slice(&utf16le("녕"));
+            v.extend_from_slice(&[0x1E, 0]); // NBSP
+            v.extend_from_slice(&utf16le("하"));
+            v
+        };
+        let text = extract_text(&rec(original.clone())).unwrap();
+        let reemit = emit(&text).unwrap();
+        assert_eq!(reemit, original);
     }
 }
