@@ -1,20 +1,30 @@
 //! WASM bridge. Thin serde-wasm-bindgen glue over core/codec/render.
 //!
 //! Exported JS API:
-//!   loadHwp(bytes)                    → IrDocument (as JS object)
-//!   saveHwp(ir)                       → Uint8Array (.hwp binary, OLE)
-//!   saveHwpx(ir)                      → Uint8Array (stub)
-//!   exportMarkdown(ir, llm, roles,
-//!                  editable, domain,
-//!                  styles)            → Markdown string
-//!   exportHtml(ir, assetsPath,
-//!              styles, pages)         → HTML preview fragment
-//!   renderPage(ir, pageIdx)           → RenderCommandList
+//!   loadHwp(bytes)                    → u32 doc handle
+//!   loadHwpx(bytes)                   → u32 doc handle (ZIP-only)
+//!   saveHwp(handle)                   → Uint8Array (.hwp OLE)
+//!   saveHwpx(handle)                  → Uint8Array (.hwpx ZIP, stub)
+//!   exportMarkdown(handle, …flags)    → Markdown string
+//!   exportHtml(handle, …flags)        → HTML preview fragment
+//!   renderPage(handle, pageIdx)       → RenderCommandList
+//!   disposeDoc(handle)                → releases the doc from the
+//!                                        wasm-side registry
 //!   tokenizeFormula(script)           → token[]
 //!   version()                         → string
 //!
-//! `loadHwpx` and `importMarkdown` remain stubs: HWPX read isn't
-//! decoded yet, and md→hwp round-trip is a separate track.
+//! Handle model — an `IrDocument` stays resident on the wasm heap and
+//! is addressed by a plain u32 handle on the JS side. Every other
+//! call takes the handle, so nothing crosses the wasm boundary after
+//! initial load. This is a hard requirement for real-world documents:
+//! a 62 MB HWP with ~100 embedded binaries serialises into a multi-
+//! hundred-megabyte JS object tree through `serde_wasm_bindgen`, and
+//! that round-trips on every option-flip in the demo. Keeping the
+//! document resident drops the per-render cost from O(doc_size) to
+//! O(output_size).
+
+use std::cell::RefCell;
+use std::collections::HashMap;
 
 use hwp_transpiler_codec::export::markdown::{self, LlmOptions, MdOptions};
 use hwp_transpiler_codec::hwp::HwpReader;
@@ -25,16 +35,39 @@ use hwp_transpiler_render::html::{self, HtmlOptions};
 use hwp_transpiler_render::Renderer;
 use wasm_bindgen::prelude::*;
 
+thread_local! {
+    static DOCS: RefCell<HashMap<u32, IrDocument>> = RefCell::new(HashMap::new());
+    static NEXT_ID: RefCell<u32> = const { RefCell::new(1) };
+}
+
+fn insert_doc(doc: IrDocument) -> u32 {
+    let id = NEXT_ID.with(|n| {
+        let mut n = n.borrow_mut();
+        let id = *n;
+        *n = n.wrapping_add(1).max(1);
+        id
+    });
+    DOCS.with(|d| {
+        d.borrow_mut().insert(id, doc);
+    });
+    id
+}
+
+/// Look up a resident doc and run `f` against it. Any mutation or
+/// return value is the caller's responsibility — most callers just
+/// need read access.
+fn with_doc<T>(handle: u32, f: impl FnOnce(&IrDocument) -> T) -> Result<T, JsValue> {
+    DOCS.with(|d| {
+        let d = d.borrow();
+        let doc = d
+            .get(&handle)
+            .ok_or_else(|| JsValue::from_str("invalid doc handle"))?;
+        Ok(f(doc))
+    })
+}
+
 fn js_err<E: std::fmt::Display>(e: E) -> JsValue {
     JsValue::from_str(&e.to_string())
-}
-
-fn to_jsvalue(doc: &IrDocument) -> Result<JsValue, JsValue> {
-    serde_wasm_bindgen::to_value(doc).map_err(js_err)
-}
-
-fn from_jsvalue(doc: JsValue) -> Result<IrDocument, JsValue> {
-    serde_wasm_bindgen::from_value(doc).map_err(js_err)
 }
 
 #[wasm_bindgen]
@@ -42,70 +75,66 @@ pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
-/// Dispatches by the bytes' container magic so callers can feed
-/// either `.hwp` (OLE compound file) or `.hwpx` (ZIP) without
-/// picking the right entrypoint themselves. Same sniff as the
-/// `hwp-to-md` CLI.
+/// Magic-byte sniff so callers can feed either `.hwp` (OLE compound
+/// file) or `.hwpx` (ZIP) without picking the right reader
+/// themselves. Returns a handle into the wasm-side document registry.
 #[wasm_bindgen(js_name = loadHwp)]
-pub fn load_hwp(bytes: &[u8]) -> Result<JsValue, JsValue> {
+pub fn load_hwp(bytes: &[u8]) -> Result<u32, JsValue> {
     let doc = if bytes.starts_with(b"PK\x03\x04") {
         HwpxReader.read(bytes).map_err(js_err)?
     } else {
         HwpReader.read(bytes).map_err(js_err)?
     };
-    to_jsvalue(&doc)
+    Ok(insert_doc(doc))
 }
 
-/// Explicit HWPX-only entrypoint for callers that want to refuse
-/// anything that isn't OCF. Rejects HWP5 magic up front rather than
-/// falling through.
+/// Explicit HWPX-only entrypoint for callers that want to reject
+/// anything that isn't OCF. Rejects HWP5 magic up front.
 #[wasm_bindgen(js_name = loadHwpx)]
-pub fn load_hwpx(bytes: &[u8]) -> Result<JsValue, JsValue> {
+pub fn load_hwpx(bytes: &[u8]) -> Result<u32, JsValue> {
     if !bytes.starts_with(b"PK\x03\x04") {
         return Err(JsValue::from_str("loadHwpx: input is not a ZIP container"));
     }
     let doc = HwpxReader.read(bytes).map_err(js_err)?;
-    to_jsvalue(&doc)
+    Ok(insert_doc(doc))
+}
+
+/// Drop the document from the wasm-side registry, freeing its
+/// memory. The demo calls this on every new file selection so
+/// long-lived sessions don't accumulate garbage.
+#[wasm_bindgen(js_name = disposeDoc)]
+pub fn dispose_doc(handle: u32) {
+    DOCS.with(|d| {
+        d.borrow_mut().remove(&handle);
+    });
 }
 
 #[wasm_bindgen(js_name = saveHwp)]
-pub fn save_hwp(doc: JsValue) -> Result<Vec<u8>, JsValue> {
-    let d = from_jsvalue(doc)?;
-    let mut w = hwp_transpiler_codec::hwp::HwpWriter::default();
-    w.write(&d).map_err(js_err)
+pub fn save_hwp(handle: u32) -> Result<Vec<u8>, JsValue> {
+    with_doc(handle, |doc| doc.clone())?
+        .then_emit_hwp()
 }
 
 #[wasm_bindgen(js_name = saveHwpx)]
-pub fn save_hwpx(doc: JsValue) -> Result<Vec<u8>, JsValue> {
-    let d = from_jsvalue(doc)?;
-    let mut w = hwp_transpiler_codec::hwpx::HwpxWriter::default();
-    w.write(&d).map_err(js_err)
+pub fn save_hwpx(handle: u32) -> Result<Vec<u8>, JsValue> {
+    with_doc(handle, |doc| doc.clone())?
+        .then_emit_hwpx()
 }
 
-/// Run the Markdown exporter on an IR loaded via [`load_hwp`]. Flags
-/// mirror the `hwp-to-md` CLI one-for-one:
+/// Run the Markdown exporter. Flags mirror the `hwp-to-md` CLI.
 ///
-///   * `llm`             — switch to the structured LLM-friendly
-///                         record format (`SECTION[id=…]` etc.)
-///   * `emit_roles`      — tag cells with header/label/value/spacer
-///   * `emit_editable`   — tag cells with editable=true|false|unknown
-///   * `emit_domain_hints` — tag tables with kind=<domain>
-///   * `emit_styles`     — inline bold/italic/strike wrappers (human
-///                         path only; ignored under `llm`)
-///
-/// `assetsPath` is *not* taken here — the browser doesn't have a
-/// sidecar directory; image `![](…)` links should be rewritten by the
-/// caller if they plan to embed assets as Blob URLs.
+/// `assetsPath` is *not* taken — the browser doesn't have a sidecar
+/// directory; image `![](…)` links should be rewritten by the caller
+/// if they want to embed assets as Blob URLs.
 #[wasm_bindgen(js_name = exportMarkdown)]
 pub fn export_markdown(
-    doc: JsValue,
+    handle: u32,
     llm: bool,
     emit_roles: bool,
     emit_editable: bool,
     emit_domain_hints: bool,
     emit_styles: bool,
 ) -> Result<String, JsValue> {
-    let d = from_jsvalue(doc)?;
     let opts = MdOptions {
         assets_path: None,
         llm: llm.then(|| LlmOptions {
@@ -113,53 +142,41 @@ pub fn export_markdown(
             emit_editable,
             domain_hints: emit_domain_hints,
         }),
-        // Mirror flags apply only when llm is off (the LLM path has
-        // its own LlmOptions field for the same knobs).
         domain_hints: emit_domain_hints && !llm,
         emit_roles: emit_roles && !llm,
         emit_editable: emit_editable && !llm,
         emit_styles: emit_styles && !llm,
     };
-    Ok(markdown::to_markdown_with(&d, &opts))
+    with_doc(handle, |doc| markdown::to_markdown_with(doc, &opts))
 }
 
-/// Render an IR to the browser-preview HTML fragment.
-///
-///   * `assetsPath`   — URL prefix for `<img>` sources (typically
-///                      a blob: URL prefix or a static hosting path).
-///                      Pass `None` to omit images entirely.
-///   * `emit_styles`  — wrap CharShape runs with `<strong>/<em>/<s>`
-///                      plus a `<span style="…">` when colour / size /
-///                      font differ from HWP defaults.
-///   * `emit_pages`   — wrap each section with
-///                      `<section class="hwp-page" style="width:…mm;
-///                      height:…mm;padding:…">` from PAGE_DEF.
+/// Render to the browser-preview HTML fragment.
 #[wasm_bindgen(js_name = exportHtml)]
 pub fn export_html(
-    doc: JsValue,
+    handle: u32,
     assets_path: Option<String>,
     emit_styles: bool,
     emit_pages: bool,
 ) -> Result<String, JsValue> {
-    let d = from_jsvalue(doc)?;
     let opts = HtmlOptions {
         assets_path,
         emit_styles,
         emit_pages,
     };
-    Ok(html::to_html_with(&d, &opts))
+    with_doc(handle, |doc| html::to_html_with(doc, &opts))
 }
 
 #[wasm_bindgen(js_name = importMarkdown)]
-pub fn import_markdown(_md: &str) -> Result<JsValue, JsValue> {
+pub fn import_markdown(_md: &str) -> Result<u32, JsValue> {
     Err(JsValue::from_str("importMarkdown: not yet implemented"))
 }
 
 #[wasm_bindgen(js_name = renderPage)]
-pub fn render_page(doc: JsValue, page: usize) -> Result<JsValue, JsValue> {
-    let d = from_jsvalue(doc)?;
-    let mut r = hwp_transpiler_render::HwpRenderer::default();
-    let cmds = r.render_page(&d, page);
+pub fn render_page(handle: u32, page: usize) -> Result<JsValue, JsValue> {
+    let cmds = with_doc(handle, |doc| {
+        let mut r = hwp_transpiler_render::HwpRenderer::default();
+        r.render_page(doc, page)
+    })?;
     serde_wasm_bindgen::to_value(&cmds).map_err(js_err)
 }
 
@@ -171,4 +188,26 @@ pub fn tokenize_formula(script: &str) -> Result<JsValue, JsValue> {
         .map(|t| format!("{:?}", t.kind))
         .collect();
     serde_wasm_bindgen::to_value(&names).map_err(js_err)
+}
+
+// ── IrDocument write helpers ────────────────────────────────────────
+
+/// Small extension so the save_* functions can chain a clone → emit
+/// without having to borrow the registry across the write call (the
+/// writer takes `&IrDocument` so a short-lived clone is the
+/// cheapest way to satisfy the borrow checker).
+trait HwpEmit {
+    fn then_emit_hwp(&self) -> Result<Vec<u8>, JsValue>;
+    fn then_emit_hwpx(&self) -> Result<Vec<u8>, JsValue>;
+}
+
+impl HwpEmit for IrDocument {
+    fn then_emit_hwp(&self) -> Result<Vec<u8>, JsValue> {
+        let mut w = hwp_transpiler_codec::hwp::HwpWriter::default();
+        w.write(self).map_err(js_err)
+    }
+    fn then_emit_hwpx(&self) -> Result<Vec<u8>, JsValue> {
+        let mut w = hwp_transpiler_codec::hwpx::HwpxWriter::default();
+        w.write(self).map_err(js_err)
+    }
 }

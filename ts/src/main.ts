@@ -16,9 +16,10 @@
 import { createEditor } from "@rhwp/editor";
 
 import init, {
-  loadHwp,
+  disposeDoc,
   exportHtml,
   exportMarkdown,
+  loadHwp,
   version,
 } from "./wasm/hwp_transpiler_wasm.js";
 
@@ -43,9 +44,11 @@ const emitRolesEl = $<HTMLInputElement>("emit-roles");
 const domainHintsEl = $<HTMLInputElement>("domain-hints");
 const emitStylesEl = $<HTMLInputElement>("emit-styles");
 
-// Resident IR. We don't re-parse on option changes — just flip the
-// knobs against the cached IR.
-let ourIr: unknown = null;
+// Handle into the wasm-side document registry. We flip options
+// against this handle rather than re-parsing bytes; dispose it
+// before loading a new file so the wasm heap doesn't accumulate
+// abandoned docs.
+let ourIr: number | null = null;
 
 // Filename stem of the most recently loaded file; used to name the
 // download outputs (`.md`, `.pdf`) after their source document.
@@ -65,10 +68,10 @@ function setStatus(text: string, isError = false): void {
   statusEl.classList.toggle("error", isError);
 }
 
-function renderMarkdown(ir: unknown): { bytes: number; ms: number } {
+function renderMarkdown(handle: number): { bytes: number; ms: number } {
   const started = performance.now();
   const md = exportMarkdown(
-    ir,
+    handle,
     llmModeEl.checked,
     emitRolesEl.checked,
     // editable tagging rides with roles — the CLI emits them as a
@@ -94,7 +97,7 @@ function renderMarkdown(ir: unknown): { bytes: number; ms: number } {
 /// LLM-mode records render the same as human-mode bullets because
 /// both originate from the same parsed IR.
 function renderStructuredHtml(): void {
-  if (!ourIr) {
+  if (ourIr === null) {
     mdPreviewEl.innerHTML =
       '<p class="hint">파일을 선택하면 여기에 HTML 미리보기가 나타납니다.</p>';
     return;
@@ -139,6 +142,15 @@ async function loadIntoEditor(
 async function handleFile(file: File): Promise<void> {
   setStatus(`읽는 중… ${file.name}`);
   currentStem = stemOf(file.name);
+
+  // Free the previous resident doc in the wasm registry before
+  // parsing the new one. Large documents (62 MB+ HWP with embedded
+  // images) can accumulate into hundreds of MB if we skip this.
+  if (ourIr !== null) {
+    disposeDoc(ourIr);
+    ourIr = null;
+  }
+
   const buffer = await file.arrayBuffer();
   const bytes = new Uint8Array(buffer);
 
