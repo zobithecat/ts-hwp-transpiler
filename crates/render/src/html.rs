@@ -393,11 +393,17 @@ fn resolve_bin_extension(doc: &IrDocument, bin_id: u16) -> &str {
 
 /// Build a `data:<mime>;base64,<payload>` URI for the picture's
 /// embedded binary. Returns `None` when the binary isn't resident in
-/// `doc.bin_data` (e.g. the file was opened with images stripped).
-/// MIME is either taken from the `BinaryEntry` when the reader
-/// identified it, or inferred from the file extension as a fallback
-/// — HWP / HWPX always use one of a few well-known image formats so
-/// the mapping is finite.
+/// `doc.bin_data` (e.g. the file was opened with images stripped) or
+/// can't be decoded into a browser-compatible format.
+///
+/// Formats that browsers render directly (PNG / JPEG / GIF / WebP /
+/// SVG) pass through unchanged. Legacy HWP-native formats that
+/// browsers handle inconsistently (BMP, TIFF, DDS) get transcoded to
+/// JPEG via the `image` crate before embedding — better a slightly
+/// larger JPEG than a "broken image" icon in the preview. Anything
+/// the decoder can't recognise (WMF / EMF for now) returns `None`
+/// so the emitter drops the `<img>` and falls through to the
+/// caption-only figure.
 fn resolve_bin_data_uri(doc: &IrDocument, bin_id: u16) -> Option<String> {
     let ext = resolve_bin_extension(doc, bin_id);
     let filename = format!("BIN{:04}.{}", bin_id, ext);
@@ -405,9 +411,54 @@ fn resolve_bin_data_uri(doc: &IrDocument, bin_id: u16) -> Option<String> {
     if entry.bytes.is_empty() {
         return None;
     }
-    let mime = entry.mime.clone().unwrap_or_else(|| mime_for_ext(ext));
-    let payload = base64_encode(&entry.bytes);
-    Some(format!("data:{mime};base64,{payload}"))
+    if is_web_native(ext) {
+        let mime = entry.mime.clone().unwrap_or_else(|| mime_for_ext(ext));
+        let payload = base64_encode(&entry.bytes);
+        return Some(format!("data:{mime};base64,{payload}"));
+    }
+    // Legacy path: try to transcode to JPEG. JPEG wins over PNG here
+    // because HWP BMPs are usually either photos or scanned figures
+    // — both re-compress cleanly; PNG's lossless cost isn't worth it
+    // for preview. Quality 90 keeps size reasonable while staying
+    // well clear of visible blocking.
+    transcode_to_jpeg(&entry.bytes).map(|(mime, bytes)| {
+        format!("data:{mime};base64,{}", base64_encode(&bytes))
+    })
+}
+
+/// Formats the browser renders directly via `<img src="data:…">`.
+/// The exhaustive list keeps us from quietly sending a container
+/// format (AVIF / HEIC / ...) we haven't learned yet.
+fn is_web_native(ext: &str) -> bool {
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg"
+    )
+}
+
+/// Decode a legacy image via the `image` crate and re-encode it as
+/// JPEG. Returns `None` when `image` can't recognise the container
+/// (WMF / EMF / proprietary) — caller drops the `<img>` tag in that
+/// case rather than embed unreadable bytes.
+fn transcode_to_jpeg(bytes: &[u8]) -> Option<(String, Vec<u8>)> {
+    let img = image::load_from_memory(bytes).ok()?;
+    // JPEG doesn't support alpha, so collapse RGBA surfaces onto
+    // white before encoding to avoid the image crate erroring or
+    // producing transparent-artefact JPEGs.
+    let rgb = img.to_rgb8();
+    let mut buf: Vec<u8> = Vec::new();
+    let mut cursor = std::io::Cursor::new(&mut buf);
+    let encoder =
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, 90);
+    image::ImageEncoder::write_image(
+        encoder,
+        rgb.as_raw(),
+        rgb.width(),
+        rgb.height(),
+        image::ExtendedColorType::Rgb8,
+    )
+    .ok()?;
+    Some(("image/jpeg".to_string(), buf))
 }
 
 fn mime_for_ext(ext: &str) -> String {

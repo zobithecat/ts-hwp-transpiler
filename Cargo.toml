@@ -32,6 +32,13 @@ flate2 = "1.0"
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
 quick-xml = "0.36"
 
+# Legacy-image re-encoding — HTML preview inlines pictures as data URIs,
+# so BMP / TIFF / WMF-that-the-image-crate-can-load get transcoded to
+# JPEG before embedding since browsers render those inconsistently.
+# Pinned to 0.25.2 — 0.25.10+ requires rustc 1.88 and this workspace
+# is on 1.85 (see rust-toolchain.toml).
+image = { version = "=0.25.2", default-features = false, features = ["bmp", "gif", "jpeg", "png", "tiff", "webp"] }
+
 # Reference parser — used by readers, not writers.
 hwp = "*"
 
