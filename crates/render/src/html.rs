@@ -342,14 +342,24 @@ fn emit_figure(
     let h_mm = hwpunit_to_mm(pic.height_hwpu);
     let src = if let Some(prefix) = &opts.assets_path {
         // Explicit assets dir wins — caller has its own sidecar setup.
-        // Hancom names `/BinData/` OLE streams with uppercase-hex
-        // bin_ids (bin_id=10 → `BIN000A`, not `BIN0010`), so all
-        // filename formatting uses `{:04X}`.
-        let filename = format!(
-            "BIN{:04X}.{}",
-            pic.bin_id,
-            resolve_bin_extension(doc, pic.bin_id)
-        );
+        // Prefer the actual `BinaryEntry.id` when we have one, so both
+        // HWP5 (`BIN000A.png`) and HWPX (`image1.png`) conventions
+        // resolve. Fall back to HWP5's conventional hex-formatted
+        // filename when `doc.bin_data` is empty — covers docs whose
+        // raw bytes were stripped but whose DocInfo BinData list
+        // still identifies the extension.
+        let filename = doc
+            .bin_data
+            .iter()
+            .find(|e| matches_bin_id(&e.id, pic.bin_id))
+            .map(|entry| entry.id.clone())
+            .unwrap_or_else(|| {
+                format!(
+                    "BIN{:04X}.{}",
+                    pic.bin_id,
+                    resolve_bin_extension(doc, pic.bin_id),
+                )
+            });
         Some(format!("{}/{}", escape_attr(prefix), escape_attr(&filename)))
     } else {
         // No assets dir — inline as a data URI so the HTML is self-
@@ -360,14 +370,25 @@ fn emit_figure(
     };
 
     if let Some(src) = src {
-        // Intrinsic size from the HWP control (in mm) keeps print
-        // fidelity, while `max-width:100%` lets the preview pane's
-        // narrower width scale the image down instead of overflowing.
-        // `height:auto` defers to the image's own aspect ratio so a
-        // constrained width doesn't stretch the bitmap vertically.
+        // The HWP picture control's width / height carry the
+        // document's declared display size. Using `aspect-ratio`
+        // from those HWPUNIT values (ratios stay identical after
+        // mm rounding) preserves HWP-authored scaling — even
+        // deliberately stretched or squished images keep their
+        // intended proportions. `max-width:100%` still lets the
+        // preview pane scale the figure down when the pane is
+        // narrower than the declared width.
+        let aspect = if pic.width_hwpu > 0 && pic.height_hwpu > 0 {
+            format!(";aspect-ratio:{}/{}", pic.width_hwpu, pic.height_hwpu)
+        } else {
+            // Missing dimensions (old HWPX docs or shapes we haven't
+            // fully parsed) — fall back to the image's intrinsic
+            // aspect ratio via `height:auto`.
+            ";height:auto".to_string()
+        };
         out.push_str(&format!(
-            r#"  <img src="{}" style="display:block;margin:0 auto;width:{}mm;height:{}mm;max-width:100%;height:auto">{}"#,
-            src, w_mm, h_mm, "\n",
+            r#"  <img src="{}" style="display:block;margin:0 auto;width:{}mm;max-width:100%{}">{}"#,
+            src, w_mm, aspect, "\n",
         ));
     }
 
@@ -385,13 +406,54 @@ fn emit_figure(
     out.push_str("</figure>\n");
 }
 
-fn resolve_bin_extension(doc: &IrDocument, bin_id: u16) -> &str {
-    doc.doc_info
+fn resolve_bin_extension(doc: &IrDocument, bin_id: u16) -> String {
+    // HWP5 path: DocInfo's typed BinData list carries the extension
+    // per-record. When present, prefer that.
+    if let Some(ext) = doc
+        .doc_info
         .bin_data
         .iter()
         .find(|bd: &&BinData| bd.bin_data_id == Some(bin_id))
         .and_then(|bd| bd.extension.as_deref())
-        .unwrap_or("bin")
+    {
+        return ext.to_string();
+    }
+    // HWPX path: the archive's `BinData/image{N}.{ext}` is parked
+    // directly in `doc.bin_data` — pull the extension from the
+    // filename. Matches either HWPX pattern (`image1.png`) or a raw
+    // HWP5 leaf that slipped through (`BIN0001.png`).
+    for entry in &doc.bin_data {
+        if matches_bin_id(&entry.id, bin_id) {
+            if let Some(ext) = entry.id.rsplit_once('.').map(|(_, e)| e.to_string()) {
+                return ext;
+            }
+        }
+    }
+    "bin".to_string()
+}
+
+/// True when the `BinaryEntry.id` filename matches the numeric
+/// bin_id under either container's naming convention.
+fn matches_bin_id(id: &str, bin_id: u16) -> bool {
+    // HWPX: `image{dec}.{ext}`
+    if let Some(stem) = id.strip_prefix("image") {
+        if let Some((num, _)) = stem.split_once('.') {
+            if num.parse::<u16>() == Ok(bin_id) {
+                return true;
+            }
+        }
+    }
+    // HWP5: `BIN{HEX}.{ext}` — zero-padded 4 hex digits.
+    if let Some(stem) = id.strip_prefix("BIN") {
+        if let Some((hex, _)) = stem.split_once('.') {
+            if hex.len() == 4 {
+                if let Ok(n) = u16::from_str_radix(hex, 16) {
+                    return n == bin_id;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Build a `data:<mime>;base64,<payload>` URI for the picture's
@@ -408,14 +470,17 @@ fn resolve_bin_extension(doc: &IrDocument, bin_id: u16) -> &str {
 /// so the emitter drops the `<img>` and falls through to the
 /// caption-only figure.
 fn resolve_bin_data_uri(doc: &IrDocument, bin_id: u16) -> Option<String> {
-    let ext = resolve_bin_extension(doc, bin_id);
-    let filename = format!("BIN{:04X}.{}", bin_id, ext);
-    let entry = doc.bin_data.iter().find(|e| e.id == filename)?;
+    let entry = doc.bin_data.iter().find(|e| matches_bin_id(&e.id, bin_id))?;
     if entry.bytes.is_empty() {
         return None;
     }
-    if is_web_native(ext) {
-        let mime = entry.mime.clone().unwrap_or_else(|| mime_for_ext(ext));
+    let ext = entry
+        .id
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_string())
+        .unwrap_or_else(|| "bin".to_string());
+    if is_web_native(&ext) {
+        let mime = entry.mime.clone().unwrap_or_else(|| mime_for_ext(&ext));
         let payload = base64_encode(&entry.bytes);
         return Some(format!("data:{mime};base64,{payload}"));
     }
