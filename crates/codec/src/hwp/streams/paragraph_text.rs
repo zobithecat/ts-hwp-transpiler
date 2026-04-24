@@ -63,10 +63,16 @@ pub fn extract_text(rec: &Record) -> Result<String, IrError> {
             0x1F => { out.push(0x2003); i += 1; }
             0x00..=0x1F => {
                 if i + EXTENDED_UNITS > units.len() {
-                    return Err(IrError::Invalid(format!(
-                        "extended control 0x{:02X} truncated at unit {}",
-                        u, i
-                    )));
+                    // Graceful stop rather than hard error. Real-world
+                    // HWP5 documents (observed on a 62 MB report
+                    // fixture) sometimes end PARA_TEXT with a stray
+                    // low-value unit that doesn't leave room for the
+                    // 8-unit extended payload — padding artefacts
+                    // from the authoring tool. Surface what we got so
+                    // far; the caller still gets the record's typed
+                    // view and the raw bytes stay in `raw_records`
+                    // for byte-equal round-trip.
+                    break;
                 }
                 out.push(OBJECT_REPLACEMENT);
                 i += EXTENDED_UNITS;
@@ -180,10 +186,14 @@ mod tests {
     }
 
     #[test]
-    fn truncated_extended_errors() {
+    fn truncated_extended_stops_gracefully() {
+        // A truncated extended control at the end of PARA_TEXT used
+        // to error; we now return what we parsed so far so large
+        // real-world documents (observed on a 62 MB report fixture
+        // with a trailing null-unit artefact) still load.
         let mut data = utf16le("a");
         data.extend_from_slice(&[0x0B, 0, 0, 0]); // code + only 1 data u16
-        assert!(extract_text(&rec(data)).is_err());
+        assert_eq!(extract_text(&rec(data)).unwrap(), "a");
     }
 
     #[test]
