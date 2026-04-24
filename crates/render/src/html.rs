@@ -56,8 +56,16 @@ pub fn to_html_with(doc: &IrDocument, opts: &HtmlOptions) -> String {
     out.push_str("<article class=\"hwp-preview\">\n");
     for section in &doc.sections {
         emit_section_open(section, &mut out, opts);
+        // Track the last heading level so content between headings
+        // nests visually under its section. Resets to 0 (no
+        // indentation) per section so the first section never starts
+        // indented.
+        let mut depth: u8 = 0;
         for para in &section.paragraphs {
-            emit_paragraph(doc, para, &mut out, opts);
+            if let Some(level) = heading_level(doc, para) {
+                depth = level;
+            }
+            emit_paragraph(doc, para, &mut out, opts, depth);
         }
         out.push_str("</section>\n");
     }
@@ -145,15 +153,30 @@ fn emit_section_open(section: &Section, out: &mut String, opts: &HtmlOptions) {
     }
 }
 
-fn emit_paragraph(doc: &IrDocument, para: &Paragraph, out: &mut String, opts: &HtmlOptions) {
+fn emit_paragraph(
+    doc: &IrDocument,
+    para: &Paragraph,
+    out: &mut String,
+    opts: &HtmlOptions,
+    depth: u8,
+) {
     let body = render_para_text(doc, para, opts);
     let has_text = body_has_visible(&body);
+    // Headings nest one level less than their own depth so their
+    // body content lines up a step deeper than the heading itself.
+    // Non-heading content uses `depth` directly.
+    let heading_indent = depth.saturating_sub(1);
+    let body_indent = depth;
+
     if has_text {
         match heading_level(doc, para) {
             Some(level) => {
                 let tag = format!("h{}", level.clamp(1, 6));
                 out.push('<');
                 out.push_str(&tag);
+                if heading_indent > 0 {
+                    out.push_str(&indent_style_attr(heading_indent));
+                }
                 out.push('>');
                 out.push_str(&body);
                 out.push_str("</");
@@ -161,21 +184,57 @@ fn emit_paragraph(doc: &IrDocument, para: &Paragraph, out: &mut String, opts: &H
                 out.push_str(">\n");
             }
             None => {
-                out.push_str("<p>");
+                out.push_str("<p");
+                if body_indent > 0 {
+                    out.push_str(&indent_style_attr(body_indent));
+                }
+                out.push('>');
                 out.push_str(&body);
                 out.push_str("</p>\n");
             }
         }
     }
     for c in &para.controls {
+        // Tables and figures follow the body indent so they line up
+        // with the paragraph text under the current heading.
+        let indent = body_indent;
         match &c.kind {
-            ControlKind::Table(t) => emit_table(doc, t, out, opts),
+            ControlKind::Table(t) => {
+                if indent > 0 {
+                    out.push_str(&format!(
+                        r#"<div class="indent"{}>"#,
+                        indent_style_attr(indent),
+                    ));
+                }
+                emit_table(doc, t, out, opts);
+                if indent > 0 {
+                    out.push_str("</div>\n");
+                }
+            }
             ControlKind::Picture(p) => {
-                emit_figure(doc, p, c.caption_text.as_deref(), out, opts)
+                if indent > 0 {
+                    out.push_str(&format!(
+                        r#"<div class="indent"{}>"#,
+                        indent_style_attr(indent),
+                    ));
+                }
+                emit_figure(doc, p, c.caption_text.as_deref(), out, opts);
+                if indent > 0 {
+                    out.push_str("</div>\n");
+                }
             }
             _ => {}
         }
     }
+}
+
+/// Build the ` style="padding-left:Nem"` attribute (with leading
+/// space) for the given depth. Kept in one place so the unit and
+/// spacing decision stay consistent.
+fn indent_style_attr(depth: u8) -> String {
+    // 1em per heading level. 2 spaces ≈ 1em in Noto Sans KR body
+    // copy, matching the "스페이스 2개 정도" ask in practice.
+    format!(r#" style="padding-left:{depth}em""#)
 }
 
 /// Pick between styled and plain rendering. Styled goes through
@@ -272,22 +331,31 @@ fn emit_figure(
     opts: &HtmlOptions,
 ) {
     out.push_str("<figure>\n");
-    if let Some(prefix) = &opts.assets_path {
+    let w_mm = hwpunit_to_mm(pic.width_hwpu);
+    let h_mm = hwpunit_to_mm(pic.height_hwpu);
+    let src = if let Some(prefix) = &opts.assets_path {
+        // Explicit assets dir wins — caller has its own sidecar setup.
         let filename = format!(
             "BIN{:04}.{}",
             pic.bin_id,
             resolve_bin_extension(doc, pic.bin_id)
         );
-        let w_mm = hwpunit_to_mm(pic.width_hwpu);
-        let h_mm = hwpunit_to_mm(pic.height_hwpu);
+        Some(format!("{}/{}", escape_attr(prefix), escape_attr(&filename)))
+    } else {
+        // No assets dir — inline as a data URI so the HTML is self-
+        // contained (preview in an iframe without blob-URL plumbing,
+        // PDF print with embedded images, single-file copy). Falls
+        // through to caption-only when the binary isn't resident.
+        resolve_bin_data_uri(doc, pic.bin_id)
+    };
+
+    if let Some(src) = src {
         out.push_str(&format!(
-            "  <img src=\"{}/{}\" style=\"width:{}mm;height:{}mm\">\n",
-            escape_attr(prefix),
-            escape_attr(&filename),
-            w_mm,
-            h_mm
+            "  <img src=\"{}\" style=\"width:{}mm;height:{}mm\">\n",
+            src, w_mm, h_mm,
         ));
     }
+
     if let Some(cap) = caption_text {
         let cleaned = clean_text(cap);
         let stripped = strip_caption_label_prefix(&cleaned).trim();
@@ -307,6 +375,78 @@ fn resolve_bin_extension(doc: &IrDocument, bin_id: u16) -> &str {
         .find(|bd: &&BinData| bd.bin_data_id == Some(bin_id))
         .and_then(|bd| bd.extension.as_deref())
         .unwrap_or("bin")
+}
+
+/// Build a `data:<mime>;base64,<payload>` URI for the picture's
+/// embedded binary. Returns `None` when the binary isn't resident in
+/// `doc.bin_data` (e.g. the file was opened with images stripped).
+/// MIME is either taken from the `BinaryEntry` when the reader
+/// identified it, or inferred from the file extension as a fallback
+/// — HWP / HWPX always use one of a few well-known image formats so
+/// the mapping is finite.
+fn resolve_bin_data_uri(doc: &IrDocument, bin_id: u16) -> Option<String> {
+    let ext = resolve_bin_extension(doc, bin_id);
+    let filename = format!("BIN{:04}.{}", bin_id, ext);
+    let entry = doc.bin_data.iter().find(|e| e.id == filename)?;
+    if entry.bytes.is_empty() {
+        return None;
+    }
+    let mime = entry.mime.clone().unwrap_or_else(|| mime_for_ext(ext));
+    let payload = base64_encode(&entry.bytes);
+    Some(format!("data:{mime};base64,{payload}"))
+}
+
+fn mime_for_ext(ext: &str) -> String {
+    match ext.to_ascii_lowercase().as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "tif" | "tiff" => "image/tiff",
+        _ => "application/octet-stream",
+    }
+    .to_string()
+}
+
+/// Standard base64 (RFC 4648) — no line breaks. Avoids pulling in
+/// the `base64` crate for one call site; HWP image blobs are already
+/// compressed so a single pass is fine.
+fn base64_encode(data: &[u8]) -> String {
+    const ALPHA: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    let mut i = 0;
+    while i + 3 <= data.len() {
+        let triple = ((data[i] as u32) << 16)
+            | ((data[i + 1] as u32) << 8)
+            | (data[i + 2] as u32);
+        out.push(ALPHA[((triple >> 18) & 0x3F) as usize] as char);
+        out.push(ALPHA[((triple >> 12) & 0x3F) as usize] as char);
+        out.push(ALPHA[((triple >> 6) & 0x3F) as usize] as char);
+        out.push(ALPHA[(triple & 0x3F) as usize] as char);
+        i += 3;
+    }
+    let rem = data.len() - i;
+    match rem {
+        1 => {
+            let triple = (data[i] as u32) << 16;
+            out.push(ALPHA[((triple >> 18) & 0x3F) as usize] as char);
+            out.push(ALPHA[((triple >> 12) & 0x3F) as usize] as char);
+            out.push_str("==");
+        }
+        2 => {
+            let triple =
+                ((data[i] as u32) << 16) | ((data[i + 1] as u32) << 8);
+            out.push(ALPHA[((triple >> 18) & 0x3F) as usize] as char);
+            out.push(ALPHA[((triple >> 12) & 0x3F) as usize] as char);
+            out.push(ALPHA[((triple >> 6) & 0x3F) as usize] as char);
+            out.push('=');
+        }
+        _ => {}
+    }
+    out
 }
 
 fn hwpunit_to_mm(hwpu: u32) -> u32 {
@@ -650,7 +790,45 @@ mod tests {
             vec![para(1, "2장 제목")],
         );
         let html = to_html(&doc);
-        assert!(html.contains("<h2>2장 제목</h2>"), "got: {html}");
+        // H2 sits one indent level under H1 so subsection content
+        // visually nests underneath. Open tag carries the inline
+        // padding-left style; closing tag and body are unchanged.
+        assert!(
+            html.contains(r#"<h2 style="padding-left:1em">2장 제목</h2>"#),
+            "got: {html}"
+        );
+    }
+
+    #[test]
+    fn subsection_content_indents_under_heading() {
+        // Heading at level 2 → following body paragraph indents to
+        // depth=2 (`padding-left:2em`) so it reads as "subsection
+        // content" rather than a sibling of the heading.
+        let doc = make_doc(
+            vec![style("본문"), style("개요 2")],
+            vec![para(1, "2장 제목"), para(0, "본문 한 줄")],
+        );
+        let html = to_html(&doc);
+        assert!(
+            html.contains(r#"<p style="padding-left:2em">본문 한 줄</p>"#),
+            "subsection content should indent: {html}"
+        );
+    }
+
+    #[test]
+    fn h1_at_top_level_stays_flush_left() {
+        // Level 1 heading: heading_indent=0, body_indent=1. The
+        // heading itself shouldn't carry padding-left.
+        let doc = make_doc(
+            vec![style("본문"), style("개요 1")],
+            vec![para(1, "1장 제목"), para(0, "첫 줄")],
+        );
+        let html = to_html(&doc);
+        assert!(html.contains("<h1>1장 제목</h1>"), "got: {html}");
+        assert!(
+            html.contains(r#"<p style="padding-left:1em">첫 줄</p>"#),
+            "got: {html}"
+        );
     }
 
     #[test]
@@ -777,7 +955,7 @@ mod tests {
     }
 
     #[test]
-    fn figure_without_assets_renders_caption_only() {
+    fn figure_without_assets_or_bindata_renders_caption_only() {
         use hwp_transpiler_core::ir::PictureControl;
         let mut doc = IrDocument::default();
         doc.sections.push(Section {
@@ -797,6 +975,44 @@ mod tests {
         let html = to_html(&doc);
         assert!(!html.contains("<img"));
         assert!(html.contains("<figcaption>설명</figcaption>"));
+    }
+
+    #[test]
+    fn figure_inlines_as_data_uri_when_bindata_resident() {
+        use hwp_transpiler_core::ir::{BinData, BinaryEntry, PictureControl};
+        let mut doc = IrDocument::default();
+        doc.doc_info.bin_data.push(BinData {
+            bin_data_id: Some(1),
+            extension: Some("png".into()),
+            ..BinData::default()
+        });
+        // Fake 3-byte PNG magic to exercise base64 padding-0.
+        doc.bin_data.push(BinaryEntry {
+            id: "BIN0001.png".into(),
+            mime: Some("image/png".into()),
+            bytes: vec![0x89, b'P', b'N'],
+        });
+        doc.sections.push(Section {
+            paragraphs: vec![Paragraph {
+                controls: vec![Control {
+                    kind: ControlKind::Picture(PictureControl {
+                        bin_id: 1,
+                        width_hwpu: 7200,
+                        height_hwpu: 3600,
+                    }),
+                    caption_text: None,
+                }],
+                ..Paragraph::default()
+            }],
+            ..Section::default()
+        });
+        let html = to_html(&doc);
+        assert!(
+            html.contains("src=\"data:image/png;base64,"),
+            "got: {html}"
+        );
+        // 3 bytes → 4 base64 chars, no trailing `=`.
+        assert!(html.contains("iVBO"), "base64 of 0x89 'P' 'N': {html}");
     }
 
     #[test]
