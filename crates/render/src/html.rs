@@ -56,17 +56,43 @@ pub fn to_html_with(doc: &IrDocument, opts: &HtmlOptions) -> String {
     out.push_str("<article class=\"hwp-preview\">\n");
     for (si, section) in doc.sections.iter().enumerate() {
         emit_section_open(section, &mut out, opts, si);
-        // Track the last heading level so content between headings
-        // nests visually under its section. Resets to 0 (no
-        // indentation) per section so the first section never starts
-        // indented.
+        // Two overlapping stacks here:
+        //
+        //   * `depth` drives visual indentation — the current
+        //     heading level, used to set `padding-left` on content.
+        //   * `chapter_stack` wraps logical chapters in nested
+        //     `<section>` elements so the tree reads as a proper
+        //     document outline (accessible + anchor-friendly).
+        //     Each entry remembers the heading level that opened it
+        //     so we know when to close at `emit_heading_at_level`.
         let mut depth: u8 = 0;
+        let mut chapter_stack: Vec<u8> = Vec::new();
         for (pi, para) in section.paragraphs.iter().enumerate() {
+            let path = format!("s{si}-p{pi}");
             if let Some(level) = heading_level(doc, para) {
+                // Close any chapter sections that are same-level or
+                // deeper — their scope is ending.
+                while chapter_stack
+                    .last()
+                    .map(|&l| l >= level)
+                    .unwrap_or(false)
+                {
+                    chapter_stack.pop();
+                    out.push_str("</section>\n");
+                }
+                // Open a new chapter wrapper.
+                out.push_str(&format!(
+                    r#"<section class="hwp-chapter hwp-lv-{level}" id="sec-{path}">"#
+                ));
+                out.push('\n');
+                chapter_stack.push(level);
                 depth = level;
             }
-            let path = format!("s{si}-p{pi}");
             emit_paragraph(doc, para, &mut out, opts, depth, &path);
+        }
+        // Close any chapters still open at section end.
+        while chapter_stack.pop().is_some() {
+            out.push_str("</section>\n");
         }
         out.push_str("</section>\n");
     }
@@ -1144,6 +1170,51 @@ mod tests {
         // Should remain a paragraph, not a heading.
         assert!(!html.contains("<h1"), "got: {html}");
         assert!(html.contains("<p "), "got: {html}");
+    }
+
+    #[test]
+    fn chapter_section_wraps_headings_and_closes_at_same_level() {
+        // Sequence: H1, body, H2, body, H1. The second H1 closes
+        // both the previous H2 chapter and H1 chapter before opening
+        // a new one.
+        let doc = make_doc(
+            vec![style("본문"), style("개요 1"), style("개요 2")],
+            vec![
+                para(1, "1장"),
+                para(0, "첫 단락"),
+                para(2, "1.1절"),
+                para(0, "둘째 단락"),
+                para(1, "2장"),
+                para(0, "셋째 단락"),
+            ],
+        );
+        let html = to_html(&doc);
+        // First chapter opens.
+        assert!(
+            html.contains(r#"<section class="hwp-chapter hwp-lv-1" id="sec-s0-p0">"#),
+            "got: {html}"
+        );
+        // Subchapter opens under first.
+        assert!(
+            html.contains(r#"<section class="hwp-chapter hwp-lv-2" id="sec-s0-p2">"#),
+            "got: {html}"
+        );
+        // Second H1 closes both prior sections (2 close tags between
+        // "둘째 단락" and the new H1's wrapper).
+        let idx_close = html
+            .find(r#"<section class="hwp-chapter hwp-lv-1" id="sec-s0-p4">"#)
+            .expect("second H1 wrapper");
+        let before = &html[..idx_close];
+        // Count closes just before the second H1: should include at
+        // least two `</section>` tags to pop the H2 + first H1.
+        let closes_right_before = before
+            .rsplit("</section>")
+            .take(3)
+            .count();
+        assert!(
+            closes_right_before >= 3,
+            "expected two stacked closes before second H1: {html}"
+        );
     }
 
     #[test]
