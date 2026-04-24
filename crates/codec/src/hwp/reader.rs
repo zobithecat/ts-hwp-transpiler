@@ -67,7 +67,19 @@ impl Reader for HwpReader {
 
             if let Some(id) = bin_data_id_from_path(&path) {
                 let mime = mime_from_id(&id).map(String::from);
-                doc.bin_data.push(BinaryEntry { id, mime, bytes });
+                // HWP5 compresses `/BinData/*` streams with raw
+                // DEFLATE when the FileHeader `compressed` flag is
+                // set (same framing DocInfo / BodyText use). If we
+                // hand the compressed bytes back to callers that
+                // expect raw PNG / JPEG / etc, images render as
+                // scrambled base64 in the HTML preview. Decompress
+                // and verify the first bytes look like a known image
+                // magic; fall back to the raw bytes when the stream
+                // was stored uncompressed (some writers override via
+                // the per-BinData compression hint even when the
+                // file header says compressed).
+                let payload = resolve_bin_data_bytes(bytes, compressed);
+                doc.bin_data.push(BinaryEntry { id, mime, bytes: payload });
                 continue;
             }
 
@@ -99,6 +111,45 @@ fn populate_bin_data(info: &mut DocInfo) -> Result<(), IrError> {
         .map(streams::bin_data::parse)
         .collect::<Result<_, _>>()?;
     Ok(())
+}
+
+/// Decide what the caller actually wants in `BinaryEntry.bytes`.
+/// When the file-header compressed flag is off, the stream is stored
+/// as the literal image (PNG / JPG / BMP / ...) — return as-is.
+/// When compressed is on, HWP5 writes raw-DEFLATE-wrapped image
+/// bytes; decompress and sanity-check the first few bytes against
+/// known image magic. If the decompressed stream doesn't look like
+/// an image (some writers override the compression hint at the
+/// per-record level), fall through to the raw bytes so no data is
+/// lost.
+fn resolve_bin_data_bytes(bytes: Vec<u8>, compressed: bool) -> Vec<u8> {
+    if !compressed {
+        return bytes;
+    }
+    match streams::doc_info::decompress(&bytes) {
+        Ok(decompressed) if looks_like_image(&decompressed) => decompressed,
+        _ => bytes,
+    }
+}
+
+/// Sniff the first bytes for the handful of image formats HWP5 ever
+/// stores in `/BinData/`. Intentionally conservative — a file whose
+/// magic doesn't match here stays on the raw bytes path so we can't
+/// silently corrupt a format we haven't learned yet.
+fn looks_like_image(b: &[u8]) -> bool {
+    if b.len() < 4 {
+        return false;
+    }
+    b.starts_with(&[0x89, b'P', b'N', b'G']) // PNG
+        || b.starts_with(&[0xFF, 0xD8, 0xFF]) // JPEG
+        || b.starts_with(b"GIF8")             // GIF87a / GIF89a
+        || b.starts_with(b"BM")               // BMP
+        || b.starts_with(&[0x49, 0x49, 0x2A, 0x00]) // TIFF (little-endian)
+        || b.starts_with(&[0x4D, 0x4D, 0x00, 0x2A]) // TIFF (big-endian)
+        || b.starts_with(b"RIFF")             // WEBP container
+        || b.starts_with(b"<svg")             // SVG
+        || b.starts_with(&[0xD7, 0xCD, 0xC6, 0x9A]) // WMF
+        || b.starts_with(&[0x01, 0x00, 0x00, 0x00]) // EMF
 }
 
 /// `/BinData/BIN0001.png` → `Some("BIN0001.png")`. Anything else → `None`.
