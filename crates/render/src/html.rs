@@ -62,7 +62,79 @@ pub fn to_html_with(doc: &IrDocument, opts: &HtmlOptions) -> String {
         out.push_str("</section>\n");
     }
     out.push_str("</article>\n");
+    if opts.emit_styles {
+        out = hoist_inline_styles(&out);
+    }
     out
+}
+
+/// Promote repeated `<span style="…">` declarations into a
+/// document-scoped `<style>` block. A CharShape run's inline style
+/// string often repeats hundreds of times in a full document (one
+/// styled body run per paragraph), so leaving every occurrence inline
+/// bloats the DOM without adding information. Styles that appear
+/// **twice or more** get a short class name (`s0`, `s1`, …) scoped
+/// under `.hwp-preview` so the rules can't bleed into a host page;
+/// one-off styles stay inline since a class wouldn't save any bytes.
+///
+/// Output layout: the `<style>` block is prepended to the preview
+/// fragment so the first thing the caller serialises is the stylesheet
+/// followed by the `<article>`. When no style qualifies for hoisting
+/// (document has no styled runs, or every run has a unique shape),
+/// returns the input unchanged.
+fn hoist_inline_styles(html: &str) -> String {
+    use std::collections::HashMap;
+
+    // Walk the HTML counting occurrences of each inline span style.
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    let needle = r#"<span style=""#;
+    let mut cursor = 0;
+    while let Some(rel) = html[cursor..].find(needle) {
+        let start = cursor + rel + needle.len();
+        if let Some(end_rel) = html[start..].find('"') {
+            let style = &html[start..start + end_rel];
+            *counts.entry(style).or_insert(0) += 1;
+            cursor = start + end_rel + 1;
+        } else {
+            break;
+        }
+    }
+
+    // Assign class names to styles that repeat. Most-common-first so
+    // the CSS order reflects usage; class names stay short (`s0` …)
+    // since they're opaque anyway.
+    let mut sorted: Vec<(&str, usize)> = counts.into_iter().collect();
+    sorted.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    let mut class_map: Vec<(String, String)> = Vec::new();
+    for (i, (style, count)) in sorted.iter().enumerate() {
+        if *count >= 2 {
+            class_map.push((style.to_string(), format!("s{i}")));
+        }
+    }
+
+    if class_map.is_empty() {
+        return html.to_string();
+    }
+
+    // Build the <style> block. Scope under `.hwp-preview` so host
+    // pages that embed the fragment don't inherit `s0` etc. globally.
+    let mut css = String::from("<style>\n");
+    for (style, cls) in &class_map {
+        css.push_str(&format!(".hwp-preview .{cls} {{ {style} }}\n"));
+    }
+    css.push_str("</style>\n");
+
+    // Substitute inline forms with class refs. The replace is literal
+    // so we won't touch any `<span>` we didn't generate (e.g. user-
+    // authored raw HTML inside cell text — but our exporter escapes
+    // such things, so the concern is academic).
+    let mut rewritten = html.to_string();
+    for (style, cls) in &class_map {
+        let from = format!(r#"<span style="{style}">"#);
+        let to = format!(r#"<span class="{cls}">"#);
+        rewritten = rewritten.replace(&from, &to);
+    }
+    format!("{css}{rewritten}")
 }
 
 fn emit_section_open(section: &Section, out: &mut String, opts: &HtmlOptions) {
@@ -916,5 +988,68 @@ mod tests {
         // no real dimensions were decoded.
         assert!(html.contains("<section class=\"hwp-page\">"), "got: {html}");
         assert!(!html.contains("width:0mm"), "got: {html}");
+    }
+
+    #[test]
+    fn repeated_inline_styles_get_hoisted_to_class() {
+        // Three paragraphs sharing the same colored shape → the
+        // inline style repeats three times before hoisting and
+        // collapses to a single class rule afterwards.
+        let mut colored = default_shape();
+        colored.color = 0x00_00_CC_FF; // blue
+        let mut doc = IrDocument::default();
+        doc.doc_info.styles = vec![style("본문")];
+        doc.doc_info.char_shapes = vec![colored];
+        let make_run_para = |t: &str| Paragraph {
+            header: ParagraphHeader { style_id: 0, ..ParagraphHeader::default() },
+            text: t.into(),
+            char_shape_runs: vec![CharShapeRun { start: 0, char_shape_id: 0 }],
+            ..Paragraph::default()
+        };
+        doc.sections.push(Section {
+            paragraphs: vec![
+                make_run_para("aaa"),
+                make_run_para("bbb"),
+                make_run_para("ccc"),
+            ],
+            ..Section::default()
+        });
+        let html = to_html_with(
+            &doc,
+            &HtmlOptions { emit_styles: true, ..Default::default() },
+        );
+        // Stylesheet block appears once.
+        assert!(html.starts_with("<style>\n"), "got: {html}");
+        // CSS rule scoped under .hwp-preview.
+        assert!(html.contains(".hwp-preview .s0"), "got: {html}");
+        // Body spans now reference the class, not the literal color.
+        assert!(html.contains(r#"<span class="s0">"#), "got: {html}");
+        // No stragglers left with the original inline form.
+        assert!(
+            !html.contains(r#"<span style="color:#ff0000""#),
+            "no remaining inline: {html}"
+        );
+    }
+
+    #[test]
+    fn single_occurrence_style_stays_inline() {
+        // Only one paragraph with a unique style → no benefit to
+        // hoisting, keep it inline.
+        let mut colored = default_shape();
+        colored.color = 0x00_00_00_FF; // red
+        let doc = styled_doc(
+            "X",
+            vec![CharShapeRun { start: 0, char_shape_id: 0 }],
+            vec![colored],
+        );
+        let html = to_html_with(
+            &doc,
+            &HtmlOptions { emit_styles: true, ..Default::default() },
+        );
+        assert!(!html.starts_with("<style>"), "shouldn't hoist singletons");
+        assert!(
+            html.contains(r#"<span style="color:#ff0000">"#),
+            "inline kept: {html}"
+        );
     }
 }
