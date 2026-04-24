@@ -76,10 +76,13 @@ pub fn parse_section_xml(xml: &[u8]) -> Result<Section, IrError> {
 /// so earlier paragraphs can't be overridden by later ones.
 fn parse_paragraph<R: BufRead>(
     reader: &mut Reader<R>,
-    _start: &BytesStart,
+    start: &BytesStart,
     section_props: &mut SectionProperties,
 ) -> Result<Paragraph, IrError> {
     let mut para = Paragraph::default();
+    // Wire paraPrIDRef into `para.header.para_shape_id` so the
+    // render path can look up ParaShape.align() for text-align CSS.
+    para.header.para_shape_id = u32_attr(start, "paraPrIDRef").unwrap_or(0) as u16;
     let mut buf = Vec::new();
 
     loop {

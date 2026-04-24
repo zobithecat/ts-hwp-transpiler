@@ -23,7 +23,7 @@
 use std::io::BufRead;
 
 use hwp_transpiler_core::ir::{
-    BorderFill, CharShape, Fill, FontFace, FontFaces, IrError,
+    BorderFill, CharShape, Fill, FontFace, FontFaces, IrError, ParaShape,
 };
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
@@ -33,6 +33,7 @@ pub struct HeaderExtract {
     pub font_faces: FontFaces,
     pub border_fills: Vec<BorderFill>,
     pub char_shapes: Vec<CharShape>,
+    pub para_shapes: Vec<ParaShape>,
 }
 
 pub fn parse_header_xml(xml: &[u8]) -> Result<HeaderExtract, IrError> {
@@ -51,6 +52,7 @@ pub fn parse_header_xml(xml: &[u8]) -> Result<HeaderExtract, IrError> {
                 "fontfaces" => parse_fontfaces(&mut reader, &mut out.font_faces)?,
                 "borderFills" => parse_border_fills(&mut reader, &mut out.border_fills)?,
                 "charProperties" => parse_char_properties(&mut reader, &mut out.char_shapes)?,
+                "paraProperties" => parse_para_properties(&mut reader, &mut out.para_shapes)?,
                 _ => {}
             },
             Event::Eof => break,
@@ -416,6 +418,102 @@ fn fill_i8_array(e: &BytesStart<'_>, out: &mut [i8; 7]) {
         out[i] = i32_attr(e, key)
             .unwrap_or(0)
             .clamp(i8::MIN as i32, i8::MAX as i32) as i8;
+    }
+}
+
+// ─── Para shapes ────────────────────────────────────────────────────
+
+fn parse_para_properties<R: BufRead>(
+    reader: &mut Reader<R>,
+    shapes: &mut Vec<ParaShape>,
+) -> Result<(), IrError> {
+    let mut buf = Vec::new();
+    loop {
+        match reader
+            .read_event_into(&mut buf)
+            .map_err(|e| xml_err("paraProperties", e))?
+        {
+            Event::End(e) if local_name_bytes(e.name().as_ref()) == "paraProperties" => {
+                break
+            }
+            Event::Start(e) if local_name(&e) == "paraPr" => {
+                let id = u32_attr(&e, "id").unwrap_or(0) as usize;
+                let shape = parse_one_para_pr(reader)?;
+                while shapes.len() <= id {
+                    shapes.push(ParaShape::default());
+                }
+                shapes[id] = shape;
+            }
+            Event::Empty(e) if local_name(&e) == "paraPr" => {
+                // Rare variant: no children. Slot a default shape.
+                let id = u32_attr(&e, "id").unwrap_or(0) as usize;
+                while shapes.len() <= id {
+                    shapes.push(ParaShape::default());
+                }
+            }
+            Event::Eof => {
+                return Err(IrError::Invalid("EOF in paraProperties".into()));
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(())
+}
+
+/// Decode a single `<hh:paraPr>` child tree into `ParaShape`. Only
+/// the `<hh:align horizontal="…">` attribute is surfaced into the
+/// IR's `attribute` bitfield — the rest (line spacing, margins,
+/// borders) isn't consumed by the current render / export paths.
+/// Mirrors HWP5's `ParaShape.align()` encoding:
+///
+///   0 = JUSTIFY · 1 = LEFT · 2 = RIGHT · 3 = CENTER ·
+///   4 = DISTRIBUTE · 5 = DISTRIBUTE_SPACE
+fn parse_one_para_pr<R: BufRead>(reader: &mut Reader<R>) -> Result<ParaShape, IrError> {
+    let mut shape = ParaShape::default();
+    let mut buf = Vec::new();
+    loop {
+        match reader
+            .read_event_into(&mut buf)
+            .map_err(|e| xml_err("paraPr", e))?
+        {
+            Event::End(e) if local_name_bytes(e.name().as_ref()) == "paraPr" => break,
+            Event::Start(e) | Event::Empty(e) if local_name(&e) == "align" => {
+                if let Some(h) = string_attr(&e, "horizontal") {
+                    shape.attribute = (shape.attribute & !0x07) | align_bits_from_hwpx(&h);
+                }
+                // Consume children of `<hh:align>` in case it was a
+                // non-empty element (rare).
+                if matches!(
+                    reader.read_event_into(&mut Vec::new())
+                        .map_err(|e| xml_err("align", e))?,
+                    Event::End(_)
+                ) {
+                    // Normal close, already consumed.
+                }
+            }
+            Event::Start(e) => {
+                skip_until_close(reader, e.name().as_ref())?;
+            }
+            Event::Eof => {
+                return Err(IrError::Invalid("EOF in paraPr".into()));
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(shape)
+}
+
+fn align_bits_from_hwpx(horizontal: &str) -> u32 {
+    match horizontal.to_ascii_uppercase().as_str() {
+        "JUSTIFY" => 0,
+        "LEFT" => 1,
+        "RIGHT" => 2,
+        "CENTER" => 3,
+        "DISTRIBUTE" => 4,
+        "DISTRIBUTE_SPACE" => 5,
+        _ => 1, // Treat unrecognised as left.
     }
 }
 

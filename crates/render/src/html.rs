@@ -215,9 +215,7 @@ fn emit_paragraph(
                 out.push('<');
                 out.push_str(&tag);
                 out.push_str(&para_id);
-                if heading_indent > 0 {
-                    out.push_str(&indent_style_attr(heading_indent));
-                }
+                out.push_str(&paragraph_style_attr(doc, para, heading_indent));
                 out.push('>');
                 out.push_str(&body);
                 out.push_str("</");
@@ -227,9 +225,7 @@ fn emit_paragraph(
             None => {
                 out.push_str("<p");
                 out.push_str(&para_id);
-                if body_indent > 0 {
-                    out.push_str(&indent_style_attr(body_indent));
-                }
+                out.push_str(&paragraph_style_attr(doc, para, body_indent));
                 out.push('>');
                 out.push_str(&body);
                 out.push_str("</p>\n");
@@ -278,6 +274,57 @@ fn indent_style_attr(depth: u8) -> String {
     // 1em per heading level. 2 spaces ≈ 1em in Noto Sans KR body
     // copy, matching the "스페이스 2개 정도" ask in practice.
     format!(r#" style="padding-left:{depth}em""#)
+}
+
+/// Build a combined paragraph `style="…"` declaration from the
+/// heading-depth indent and the paragraph's ParaShape-declared
+/// alignment. Returns an empty string when nothing applies so the
+/// common case (left-aligned body text at depth 0) doesn't litter
+/// the DOM with empty attributes.
+///
+/// CSS `text-align` values:
+///
+///   * 0 / 4 / 5 (JUSTIFY / DISTRIBUTE / DISTRIBUTE_SPACE) →
+///     `text-align:justify`.
+///   * 1 (LEFT) → skip (default).
+///   * 2 (RIGHT) → `text-align:right`.
+///   * 3 (CENTER) → `text-align:center`.
+///
+/// When both indent and alignment apply they're joined with `;`
+/// into a single `style="…"` attribute.
+fn paragraph_style_attr(doc: &IrDocument, para: &Paragraph, indent: u8) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if indent > 0 {
+        parts.push(format!("padding-left:{indent}em"));
+    }
+    if let Some(css) = paragraph_text_align(doc, para) {
+        parts.push(format!("text-align:{css}"));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(r#" style="{}""#, parts.join(";"))
+    }
+}
+
+/// Look up the paragraph's `ParaShape.align()` via its
+/// `para_shape_id` and translate to the CSS `text-align` keyword.
+/// Returns `None` when the shape is missing, out of range, or
+/// aligns left (browser default — emitting it would just bulk up
+/// the HTML for no visual change).
+fn paragraph_text_align(doc: &IrDocument, para: &Paragraph) -> Option<&'static str> {
+    let shape = doc
+        .doc_info
+        .para_shapes
+        .get(para.header.para_shape_id as usize)?;
+    match shape.align() {
+        // Left is the default; skip to keep the HTML tidy.
+        1 => None,
+        0 | 4 | 5 => Some("justify"),
+        2 => Some("right"),
+        3 => Some("center"),
+        _ => None,
+    }
 }
 
 /// Pick between styled and plain rendering. Styled goes through
@@ -1214,6 +1261,89 @@ mod tests {
         assert!(
             closes_right_before >= 3,
             "expected two stacked closes before second H1: {html}"
+        );
+    }
+
+    #[test]
+    fn parashape_center_yields_text_align_css() {
+        use hwp_transpiler_core::ir::ParaShape;
+        let mut doc = IrDocument::default();
+        let mut center = ParaShape::default();
+        center.attribute = 3; // CENTER
+        doc.doc_info.para_shapes.push(center);
+        doc.doc_info.styles = vec![style("본문")];
+        doc.sections.push(Section {
+            paragraphs: vec![Paragraph {
+                header: ParagraphHeader {
+                    style_id: 0,
+                    para_shape_id: 0,
+                    ..ParagraphHeader::default()
+                },
+                text: "가운데 정렬".into(),
+                ..Paragraph::default()
+            }],
+            ..Section::default()
+        });
+        let html = to_html(&doc);
+        assert!(
+            html.contains(r#"style="text-align:center""#),
+            "got: {html}"
+        );
+    }
+
+    #[test]
+    fn parashape_left_is_default_not_emitted() {
+        use hwp_transpiler_core::ir::ParaShape;
+        let mut doc = IrDocument::default();
+        let mut left = ParaShape::default();
+        left.attribute = 1; // LEFT
+        doc.doc_info.para_shapes.push(left);
+        doc.doc_info.styles = vec![style("본문")];
+        doc.sections.push(Section {
+            paragraphs: vec![Paragraph {
+                header: ParagraphHeader {
+                    style_id: 0,
+                    para_shape_id: 0,
+                    ..ParagraphHeader::default()
+                },
+                text: "왼쪽 기본".into(),
+                ..Paragraph::default()
+            }],
+            ..Section::default()
+        });
+        let html = to_html(&doc);
+        assert!(
+            !html.contains("text-align"),
+            "left is default, should not emit: {html}"
+        );
+    }
+
+    #[test]
+    fn parashape_align_combines_with_indent() {
+        // Right-aligned heading at depth 2 → both text-align:right
+        // and padding-left:1em show up in one style attribute.
+        use hwp_transpiler_core::ir::ParaShape;
+        let mut doc = IrDocument::default();
+        let mut right = ParaShape::default();
+        right.attribute = 2; // RIGHT
+        doc.doc_info.para_shapes.push(right);
+        doc.doc_info.styles = vec![style("본문"), style("개요 2")];
+        doc.sections.push(Section {
+            paragraphs: vec![Paragraph {
+                header: ParagraphHeader {
+                    style_id: 1,
+                    para_shape_id: 0,
+                    ..ParagraphHeader::default()
+                },
+                text: "오른쪽 제목".into(),
+                ..Paragraph::default()
+            }],
+            ..Section::default()
+        });
+        let html = to_html(&doc);
+        assert!(
+            html.contains(r#"style="padding-left:1em;text-align:right""#),
+            "got: {html}"
         );
     }
 
