@@ -306,24 +306,40 @@ fn parse_one_char_pr<R: BufRead>(
         {
             Event::End(e) if local_name_bytes(e.name().as_ref()) == "charPr" => break,
             Event::Empty(e) => match local_name(&e) {
-                // HWPX encodes bold/italic/underline/strike as presence
-                // of a child element, not as an attribute. Map each
-                // onto the HWP5 `attr` bitfield layout so downstream
-                // CharShape accessors (shape.bold() etc.) keep working.
+                // HWPX always emits `<hh:strikeout/>` and
+                // `<hh:underline/>` as children of `<hh:charPr>`, even
+                // when neither is applied — the `shape` attribute
+                // carries the enable state (`"NONE"` = off, anything
+                // else = on). Bold / italic are truly presence-only.
+                // Setting strike/underline on every charPr by element
+                // presence alone would flip an entire document's
+                // worth of text to struck-through or underlined (real
+                // bug report: a business-plan HWPX rendered with 100%
+                // strikethrough). Check the shape attr before
+                // activating the bit.
                 "bold" => shape.attr |= 0x0000_0002,
                 "italic" => shape.attr |= 0x0000_0001,
                 "underline" => {
-                    // bits 2..=4 encode underline kind; "1" = a simple
-                    // underline, enough for `underline_kind() != 0`.
-                    shape.attr |= 0x0000_0004;
-                    if let Some(c) = string_attr(&e, "color").and_then(|s| parse_hex_color(&s)) {
-                        shape.underline_color = pack_color(c);
+                    if !shape_attr_is_none(&e) {
+                        // bits 2..=4 encode underline kind; "1" is a
+                        // simple underline, enough for
+                        // `underline_kind() != 0` to return true.
+                        shape.attr |= 0x0000_0004;
+                        if let Some(c) =
+                            string_attr(&e, "color").and_then(|s| parse_hex_color(&s))
+                        {
+                            shape.underline_color = pack_color(c);
+                        }
                     }
                 }
                 "strikeout" => {
-                    shape.attr |= 1 << 21;
-                    if let Some(c) = string_attr(&e, "color").and_then(|s| parse_hex_color(&s)) {
-                        shape.strike_color = Some(pack_color(c));
+                    if !shape_attr_is_none(&e) {
+                        shape.attr |= 1 << 21;
+                        if let Some(c) =
+                            string_attr(&e, "color").and_then(|s| parse_hex_color(&s))
+                        {
+                            shape.strike_color = Some(pack_color(c));
+                        }
                     }
                 }
                 "fontRef" => fill_u16_array(&e, &mut shape.font_ids),
@@ -335,9 +351,13 @@ fn parse_one_char_pr<R: BufRead>(
             },
             Event::Start(e) => match local_name(&e) {
                 "strikeout" => {
-                    shape.attr |= 1 << 21;
-                    if let Some(c) = string_attr(&e, "color").and_then(|s| parse_hex_color(&s)) {
-                        shape.strike_color = Some(pack_color(c));
+                    if !shape_attr_is_none(&e) {
+                        shape.attr |= 1 << 21;
+                        if let Some(c) =
+                            string_attr(&e, "color").and_then(|s| parse_hex_color(&s))
+                        {
+                            shape.strike_color = Some(pack_color(c));
+                        }
                     }
                     skip_until_close(reader, e.name().as_ref())?;
                 }
@@ -451,6 +471,17 @@ fn string_attr(e: &BytesStart<'_>, name: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// True when the element carries `shape="NONE"` — HWPX's way of
+/// signalling "this style hook is declared but not applied". Any
+/// other value (including the absence of the attribute) is treated
+/// as active; most documents emit e.g. `shape="SOLID"` for real
+/// strike / underline and `shape="NONE"` for the default.
+fn shape_attr_is_none(e: &BytesStart<'_>) -> bool {
+    string_attr(e, "shape")
+        .map(|s| s.eq_ignore_ascii_case("NONE"))
+        .unwrap_or(false)
 }
 
 /// Decode `#RRGGBB` (or `none`) into an (R, G, B) triple.
@@ -581,5 +612,35 @@ mod tests {
         assert!(!s.bold());
         assert!(!s.italic());
         assert!(!s.strike());
+    }
+
+    #[test]
+    fn strikeout_with_shape_none_does_not_flip_strike_bit() {
+        // Regression: HWPX always emits `<hh:strikeout/>` inside
+        // `<hh:charPr>`, with `shape="NONE"` as the "not applied"
+        // sentinel. A docset caught the original bug when every run
+        // inherited strike from a default charPr that carried
+        // `<hh:strikeout shape="NONE"/>`.
+        let xml = r##"<hh:head xmlns:hh="h">
+            <hh:refList>
+              <hh:charProperties itemCnt="2">
+                <hh:charPr id="0" height="1000" textColor="#000000">
+                  <hh:fontRef hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0"/>
+                  <hh:strikeout shape="NONE" color="#000000"/>
+                  <hh:underline shape="NONE" color="#000000"/>
+                </hh:charPr>
+                <hh:charPr id="1" height="1000" textColor="#000000">
+                  <hh:fontRef hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0"/>
+                  <hh:strikeout shape="SOLID" color="#FF0000"/>
+                  <hh:underline shape="SOLID" color="#00FF00"/>
+                </hh:charPr>
+              </hh:charProperties>
+            </hh:refList>
+          </hh:head>"##;
+        let h = parse_header_xml(xml.as_bytes()).expect("parse");
+        assert!(!h.char_shapes[0].strike(), "shape=NONE should not set strike");
+        assert_eq!(h.char_shapes[0].underline_kind(), 0);
+        assert!(h.char_shapes[1].strike(), "shape=SOLID should set strike");
+        assert_ne!(h.char_shapes[1].underline_kind(), 0);
     }
 }
