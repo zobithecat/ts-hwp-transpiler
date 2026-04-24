@@ -586,28 +586,104 @@ fn hwpunit_to_mm(hwpu: u32) -> u32 {
     ((hwpu as f64) * 25.4 / 7200.0).round() as u32
 }
 
-/// Inspect the paragraph's `Style` (via DocInfo lookup) for the
-/// Hangul/English outline-heading markers Hancom uses by default. Other
-/// heading-detection heuristics (box-as-heading, numeric-prefix
-/// promotion) live in the Markdown path — preview keeps one signal
-/// source so the output maps 1:1 to on-disk styles.
+/// Try to classify a paragraph as a heading via two independent
+/// signals so that subsection indentation reflects both documents
+/// that use Hancom's "개요" style and documents that only use plain
+/// numeric chapter prefixes.
+///
+///   1. Style-based — `Style.name` begins with one of the known
+///      outline tokens (`"개요 N"`, `"Heading N"`, `"제목 N"`,
+///      `"Outline N"`), or matches the table-of-contents title.
+///   2. Text-prefix fallback — the paragraph's first non-whitespace
+///      bytes look like a chapter number (`"1."`, `"1.1"`,
+///      `"1.1.2."`), the text is short enough to plausibly be a
+///      heading, and it isn't punctuation-terminated prose.
+///
+/// Only one signal needs to fire. Returning None leaves the depth
+/// tracker at the previous heading's level — which is the safer
+/// default for ambiguous paragraphs.
 fn heading_level(doc: &IrDocument, para: &Paragraph) -> Option<u8> {
-    let style = doc.doc_info.styles.get(para.header.style_id as usize)?;
-    for prefix in ["개요 ", "Outline "] {
-        for name in [&style.name, &style.english_name] {
-            if let Some(rest) = name.strip_prefix(prefix) {
-                if let Ok(n) = rest.trim().parse::<u8>() {
-                    if (1..=6).contains(&n) {
-                        return Some(n);
+    if let Some(style) = doc.doc_info.styles.get(para.header.style_id as usize) {
+        for prefix in ["개요 ", "Outline ", "Heading ", "제목 "] {
+            for name in [&style.name, &style.english_name] {
+                if let Some(rest) = name.strip_prefix(prefix) {
+                    if let Ok(n) = rest.trim().parse::<u8>() {
+                        if (1..=6).contains(&n) {
+                            return Some(n);
+                        }
                     }
                 }
             }
         }
+        if style.name == "차례 제목" || style.english_name == "TOC Heading" {
+            return Some(1);
+        }
     }
-    if style.name == "차례 제목" || style.english_name == "TOC Heading" {
-        return Some(1);
+    heading_level_from_text_prefix(&para.text)
+}
+
+/// Numeric-prefix heading detector. Handles:
+///
+///   "1. 제목"       → level 1
+///   "1.1 제목"      → level 2
+///   "1.1. 제목"     → level 2 (trailing dot optional)
+///   "1.1.2. 제목"   → level 3
+///
+/// Guardrails: text must be short enough to be a plausible heading
+/// (≤ 100 chars), must have non-empty numeric prefix and following
+/// whitespace + text, and must not end with a Korean sentence
+/// terminator (`"다."` / `"함."` / `"임."`) — those signal prose,
+/// not a heading.
+fn heading_level_from_text_prefix(raw: &str) -> Option<u8> {
+    // Use the cleaned text so PUA bullets / FFFC don't break prefix
+    // matching. Length budget is chars, not bytes — Korean headings
+    // hit the byte ceiling quickly otherwise.
+    let text = clean_text(raw);
+    let trimmed = text.trim_start();
+    if trimmed.is_empty() {
+        return None;
     }
-    None
+    if trimmed.chars().count() > 100 {
+        return None;
+    }
+    // Peel leading digits and dots off the prefix.
+    let prefix: String = trimmed
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    if prefix.is_empty() || !prefix.chars().any(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let rest = &trimmed[prefix.len()..];
+    // Must be followed by whitespace — rules out "1.2.3만" (Korean
+    // postposition stuck to a number).
+    let Some(first) = rest.chars().next() else {
+        return None;
+    };
+    if !first.is_whitespace() {
+        return None;
+    }
+    // Likely sentence-as-prose guard: ends with 다., 함., 임., 음.
+    // — Korean declarative endings. A real heading almost never
+    // closes with one of those.
+    let tail: String = trimmed.chars().rev().take(3).collect::<String>()
+        .chars().rev().collect();
+    for ender in ["다.", "함.", "임.", "음."] {
+        if tail.ends_with(ender) {
+            return None;
+        }
+    }
+    let parts: Vec<&str> = prefix
+        .split('.')
+        .filter(|p| !p.is_empty())
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    if !parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit())) {
+        return None;
+    }
+    Some((parts.len() as u8).min(6))
 }
 
 /// Preview-local text cleaner. Matches the Markdown exporter's FFFC /
@@ -962,6 +1038,75 @@ mod tests {
             html.contains(r#"<p style="padding-left:1em">첫 줄</p>"#),
             "got: {html}"
         );
+    }
+
+    #[test]
+    fn numeric_prefix_detected_as_heading() {
+        // Doc without "개요 N" styles — relies on the text-prefix
+        // heuristic so subsection indent still applies.
+        let doc = make_doc(
+            vec![style("본문")],
+            vec![
+                para(0, "1. 사업 개요"),
+                para(0, "본문 첫 줄"),
+                para(0, "1.1 세부 과제"),
+                para(0, "본문 둘째 줄"),
+                para(0, "1.1.1 더 세부"),
+                para(0, "본문 셋째 줄"),
+            ],
+        );
+        let html = to_html(&doc);
+        // H1 heading from "1." prefix, no indent on itself.
+        assert!(html.contains("<h1>1. 사업 개요</h1>"), "got: {html}");
+        // Body below H1 indents one level.
+        assert!(
+            html.contains(r#"<p style="padding-left:1em">본문 첫 줄</p>"#),
+            "got: {html}"
+        );
+        // H2 from "1.1" — heading itself indents one, body two.
+        assert!(
+            html.contains(r#"<h2 style="padding-left:1em">1.1 세부 과제</h2>"#),
+            "got: {html}"
+        );
+        assert!(
+            html.contains(r#"<p style="padding-left:2em">본문 둘째 줄</p>"#),
+            "got: {html}"
+        );
+        // H3 from "1.1.1" — heading indents two, body three.
+        assert!(
+            html.contains(r#"<h3 style="padding-left:2em">1.1.1 더 세부</h3>"#),
+            "got: {html}"
+        );
+        assert!(
+            html.contains(r#"<p style="padding-left:3em">본문 셋째 줄</p>"#),
+            "got: {html}"
+        );
+    }
+
+    #[test]
+    fn numeric_prefix_in_long_prose_not_promoted() {
+        // Too long to be a plausible heading; guard keeps it as <p>.
+        let doc = make_doc(
+            vec![style("본문")],
+            vec![para(0, "1. 본 연구는 여러 가지 복잡한 사항을 다루고 있으며, \
+                다양한 관점에서의 분석을 제공함으로써 독자로 하여금 깊이 있는 \
+                이해를 가능하게 한다.")],
+        );
+        let html = to_html(&doc);
+        // Should remain a paragraph, not a heading.
+        assert!(!html.contains("<h1"), "got: {html}");
+        assert!(html.contains("<p>"), "got: {html}");
+    }
+
+    #[test]
+    fn korean_sentence_ending_not_promoted() {
+        // Starts with "1." but ends with "다." — clearly prose.
+        let doc = make_doc(
+            vec![style("본문")],
+            vec![para(0, "1. 이는 주요한 의미를 갖는다.")],
+        );
+        let html = to_html(&doc);
+        assert!(!html.contains("<h1"), "got: {html}");
     }
 
     #[test]
