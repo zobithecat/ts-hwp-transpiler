@@ -7,7 +7,7 @@
 //! `IrDocument::unknown_streams` so a future writer round-trips them
 //! verbatim, but they're not decoded in this pass.
 
-use hwp_transpiler_core::ir::{IrDocument, IrError, Reader};
+use hwp_transpiler_core::ir::{BinaryEntry, IrDocument, IrError, Reader};
 
 use super::header_xml::parse_header_xml;
 use super::section_xml::parse_section_xml;
@@ -51,28 +51,71 @@ impl Reader for HwpxReader {
             doc.sections.push(section);
         }
 
-        // Every other part goes into `unknown_streams` keyed by its
-        // archive path. Callers that want images or styles can peek
-        // there; a later typed decoder can promote them out.
+        // Separate archive entries into two buckets:
+        //   * `BinData/*` → `doc.bin_data`, so the HTML preview's
+        //     inline data-URI path can resolve a picture's
+        //     `binaryItemIDRef` without round-tripping through the
+        //     verbatim-passthrough bucket.
+        //   * Everything else → `unknown_streams` for the writer's
+        //     passthrough loop (header.xml / settings.xml /
+        //     META-INF/... / Scripts/... all need to ride along
+        //     untouched).
         for name in archive.entry_names() {
             if is_section_xml(&name) {
                 continue;
             }
-            // Skip the OCF signature and zero-size entries — they're
-            // noise for a reader that only surfaces real payloads.
             if name == "mimetype" {
                 continue;
             }
-            if let Some(bytes) = archive.try_read_part(&name)? {
-                if bytes.is_empty() {
-                    continue;
-                }
+            let Some(bytes) = archive.try_read_part(&name)? else {
+                continue;
+            };
+            if bytes.is_empty() {
+                continue;
+            }
+            if is_bin_data_path(&name) {
+                let id = bin_data_id_from_hwpx_path(&name);
+                let mime = mime_from_filename(&id);
+                doc.bin_data.push(BinaryEntry {
+                    id,
+                    mime: mime.map(String::from),
+                    bytes,
+                });
+                // `bin_data` is the sole source-of-truth for image
+                // bytes; the writer knows to re-emit them under
+                // `BinData/<id>`, so they don't also need to live
+                // in `unknown_streams`.
+            } else {
                 doc.unknown_streams.insert(name, bytes);
             }
         }
 
         Ok(doc)
     }
+}
+
+fn is_bin_data_path(name: &str) -> bool {
+    name.starts_with("BinData/") && !name[8..].contains('/')
+}
+
+/// `"BinData/image1.png"` → `"image1.png"`. Mirrors HWP5's reader
+/// convention of using the OLE stream leaf as the `BinaryEntry.id`.
+fn bin_data_id_from_hwpx_path(name: &str) -> String {
+    name.strip_prefix("BinData/").unwrap_or(name).to_string()
+}
+
+fn mime_from_filename(id: &str) -> Option<&'static str> {
+    let ext = id.rsplit_once('.')?.1.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "tif" | "tiff" => "image/tiff",
+        _ => return None,
+    })
 }
 
 fn is_section_xml(name: &str) -> bool {

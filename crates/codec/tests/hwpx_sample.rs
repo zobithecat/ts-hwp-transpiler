@@ -63,19 +63,34 @@ fn real_hwpx_contains_tables() {
 }
 
 #[test]
-fn real_hwpx_preserves_bindata_in_unknown_streams() {
+fn real_hwpx_bindata_promoted_to_bin_data() {
     let Some(doc) = load_sample() else {
         return;
     };
-    // BinData/image*.png should be captured verbatim for future
-    // figure promotion.
-    let has_bin = doc
-        .unknown_streams
-        .keys()
-        .any(|k| k.starts_with("BinData/"));
+    // BinData/image*.{png,jpg,…} gets promoted from
+    // `unknown_streams` into `doc.bin_data` so the HTML preview can
+    // resolve `binaryItemIDRef`. The business-plan fixture carries
+    // three images — all should land here with non-empty bytes.
     assert!(
-        has_bin,
-        "expected BinData/ entries to land in unknown_streams"
+        doc.bin_data.len() >= 3,
+        "expected ≥3 binary entries, got {}",
+        doc.bin_data.len()
+    );
+    for entry in &doc.bin_data {
+        assert!(!entry.bytes.is_empty(), "empty payload for {}", entry.id);
+        assert!(
+            entry.id.starts_with("image") || entry.id.starts_with("BIN"),
+            "unexpected HWPX binary id: {}",
+            entry.id
+        );
+    }
+    // Sanity: the verbatim bucket no longer double-stores the
+    // binary bytes (that was the old pre-promotion shape).
+    assert!(
+        !doc.unknown_streams
+            .keys()
+            .any(|k| k.starts_with("BinData/")),
+        "BinData entries should be promoted, not duplicated"
     );
 }
 

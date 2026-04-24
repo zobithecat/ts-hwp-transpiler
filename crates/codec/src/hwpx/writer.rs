@@ -44,17 +44,32 @@ impl Writer for HwpxWriter {
             zip.add_part(&format!("Contents/section{i}.xml"), &xml)?;
         }
 
+        // Re-emit embedded binaries under `BinData/<id>` — the reader
+        // promotes those out of `unknown_streams` into `doc.bin_data`
+        // so the HTML preview can resolve `binaryItemIDRef`; the
+        // writer has to put them back.
+        for entry in &doc.bin_data {
+            if entry.bytes.is_empty() {
+                continue;
+            }
+            zip.add_part(&format!("BinData/{}", entry.id), &entry.bytes)?;
+        }
+
         // Passthrough every other archive part verbatim. Section
         // entries from the original are skipped because we just
         // emitted fresh ones — if an IR-side edit changed the
         // section count the original entries would conflict otherwise.
         // `mimetype` is also skipped because `write_mimetype` already
-        // placed it, stored uncompressed.
+        // placed it, stored uncompressed. `BinData/*` is skipped
+        // because bin_data above already handled it.
         for (name, bytes) in &doc.unknown_streams {
             if name == "mimetype" {
                 continue;
             }
             if is_section_xml(name) {
+                continue;
+            }
+            if name.starts_with("BinData/") {
                 continue;
             }
             zip.add_part(name, bytes)?;

@@ -189,16 +189,50 @@ fn picture_image_line(
     opts: &MdOptions,
 ) -> Option<String> {
     let prefix = opts.assets_path.as_deref()?;
-    let ext = resolve_bin_extension(doc, pic.bin_id);
-    // Hancom names `/BinData/BIN<hex>.<ext>` — bin_id=10 ends up
-    // as `BIN000A`, not `BIN0010`. The sidecar asset dumper mirrors
-    // that naming, so MD's `![](...)` link needs the same form.
-    let filename = format!("BIN{:04X}.{}", pic.bin_id, ext);
+    // Use the matching BinaryEntry's id as the sidecar filename.
+    // Covers both naming conventions the assets dumper actually
+    // writes: HWP5 uses uppercase hex (`BIN000A.bmp`), HWPX uses
+    // decimal (`image12.png`). Falling back to the hex-formatted
+    // `BIN{id:04X}` when no entry exists preserves the historical
+    // behaviour for docs that reference a missing binary.
+    let filename = doc
+        .bin_data
+        .iter()
+        .find(|e| matches_bin_entry(&e.id, pic.bin_id))
+        .map(|e| e.id.clone())
+        .unwrap_or_else(|| {
+            format!("BIN{:04X}.{}", pic.bin_id, resolve_bin_extension(doc, pic.bin_id))
+        });
     let w = hwpunit_to_mm(pic.width_hwpu);
     let h = hwpunit_to_mm(pic.height_hwpu);
     Some(format!(
         "![]({prefix}/{filename}){{width={w}mm; height={h}mm}}"
     ))
+}
+
+/// True when `id` is either HWPX's `image{dec}.{ext}` or HWP5's
+/// `BIN{HEX}.{ext}` naming for the given numeric bin_id. Mirrors
+/// `render::html::matches_bin_id` — duplicated here rather than
+/// routed through a cross-crate helper because codec deliberately
+/// doesn't depend on render.
+fn matches_bin_entry(id: &str, bin_id: u16) -> bool {
+    if let Some(stem) = id.strip_prefix("image") {
+        if let Some((num, _)) = stem.split_once('.') {
+            if num.parse::<u16>() == Ok(bin_id) {
+                return true;
+            }
+        }
+    }
+    if let Some(stem) = id.strip_prefix("BIN") {
+        if let Some((hex, _)) = stem.split_once('.') {
+            if hex.len() == 4 {
+                if let Ok(n) = u16::from_str_radix(hex, 16) {
+                    return n == bin_id;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Build the `{{그림 N. <caption>}}` placeholder string (no trailing

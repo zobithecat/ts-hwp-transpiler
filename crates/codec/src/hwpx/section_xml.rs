@@ -29,8 +29,8 @@
 use std::io::BufRead;
 
 use hwp_transpiler_core::ir::{
-    CharShapeRun, Control, ControlKind, IrError, Paragraph, Section, SectionProperties,
-    TableCell, TableControl,
+    CharShapeRun, Control, ControlKind, IrError, Paragraph, PictureControl, Section,
+    SectionProperties, TableCell, TableControl,
 };
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
@@ -166,6 +166,13 @@ fn parse_run<R: BufRead>(
                         caption_text: None,
                     });
                 }
+                "pic" => {
+                    let picture = parse_picture(reader, &e)?;
+                    para.controls.push(Control {
+                        kind: ControlKind::Picture(picture),
+                        caption_text: None,
+                    });
+                }
                 "secPr" => {
                     let props = parse_sec_pr(reader)?;
                     if section_props.page_width_hwpu == 0 {
@@ -189,6 +196,79 @@ fn parse_run<R: BufRead>(
         buf.clear();
     }
     Ok(())
+}
+
+/// Parse one `<hp:pic>` element into a `PictureControl`. HWPX pins
+/// the display size on `<hp:curSz width height>` in HWPUNIT and
+/// points at the binary with `<hc:img binaryItemIDRef="image1">`.
+/// We parse `"image1"` as a decimal bin_id so the HTML emitter's
+/// fallback lookup (`image{n}.{ext}`) finds the matching
+/// `BinaryEntry`. Everything else (clip / rendering matrix /
+/// rotation / etc.) is intentionally skipped for this pass.
+fn parse_picture<R: BufRead>(
+    reader: &mut Reader<R>,
+    _start: &BytesStart,
+) -> Result<PictureControl, IrError> {
+    let mut pic = PictureControl::default();
+    let mut buf = Vec::new();
+    loop {
+        match reader
+            .read_event_into(&mut buf)
+            .map_err(|e| xml_err("pic", e))?
+        {
+            Event::End(e) if local_name_bytes(e.name().as_ref()) == "pic" => break,
+            Event::Empty(e) => match local_name(&e) {
+                "curSz" => {
+                    pic.width_hwpu = u32_attr(&e, "width").unwrap_or(0);
+                    pic.height_hwpu = u32_attr(&e, "height").unwrap_or(0);
+                }
+                "img" => {
+                    if let Some(id_ref) = string_attr(&e, "binaryItemIDRef") {
+                        pic.bin_id = parse_hwpx_bin_id(&id_ref);
+                    }
+                }
+                _ => {}
+            },
+            Event::Start(e) => {
+                // `<hp:img>` can appear as a start+end pair in some
+                // HWPX variants — handle that shape too so the bin_id
+                // is still captured.
+                if local_name(&e) == "img" {
+                    if let Some(id_ref) = string_attr(&e, "binaryItemIDRef") {
+                        pic.bin_id = parse_hwpx_bin_id(&id_ref);
+                    }
+                }
+                skip_until_close(reader, e.name().as_ref())?;
+            }
+            Event::Eof => {
+                return Err(IrError::Invalid(
+                    "unexpected EOF inside <hp:pic>".into(),
+                ));
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(pic)
+}
+
+/// `"image12"` → `12`. Strips the literal `image` prefix that HWPX
+/// uses for `binaryItemIDRef` and parses the remainder as a decimal.
+/// Falls back to 0 for unrecognised ids — the render path checks
+/// whether the binary entry actually exists before emitting `<img>`.
+fn parse_hwpx_bin_id(s: &str) -> u16 {
+    s.strip_prefix("image")
+        .and_then(|n| n.parse::<u16>().ok())
+        .unwrap_or(0)
+}
+
+fn string_attr(e: &BytesStart<'_>, name: &str) -> Option<String> {
+    for attr in e.attributes().flatten() {
+        if attr.key.as_ref() == name.as_bytes() {
+            return std::str::from_utf8(&attr.value).ok().map(|s| s.to_string());
+        }
+    }
+    None
 }
 
 /// Parse one `<hp:tbl>` element. `rowCnt` / `colCnt` come from its
