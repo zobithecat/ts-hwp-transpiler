@@ -330,7 +330,14 @@ fn emit_figure(
     out: &mut String,
     opts: &HtmlOptions,
 ) {
-    out.push_str("<figure>\n");
+    // Centred block-level figure so images anchor in the column
+    // rather than left-hugging the text; the HWP picture-control
+    // position metadata (`horzAlign` / `vertRelTo` / offsets) isn't
+    // in the typed IR yet, so "centred" is the safer default for
+    // floating images and mirrors what Hancom viewers show when no
+    // explicit alignment is set.
+    out.push_str(r#"<figure style="margin:0.6em auto;text-align:center">"#);
+    out.push('\n');
     let w_mm = hwpunit_to_mm(pic.width_hwpu);
     let h_mm = hwpunit_to_mm(pic.height_hwpu);
     let src = if let Some(prefix) = &opts.assets_path {
@@ -350,9 +357,14 @@ fn emit_figure(
     };
 
     if let Some(src) = src {
+        // Intrinsic size from the HWP control (in mm) keeps print
+        // fidelity, while `max-width:100%` lets the preview pane's
+        // narrower width scale the image down instead of overflowing.
+        // `height:auto` defers to the image's own aspect ratio so a
+        // constrained width doesn't stretch the bitmap vertically.
         out.push_str(&format!(
-            "  <img src=\"{}\" style=\"width:{}mm;height:{}mm\">\n",
-            src, w_mm, h_mm,
+            r#"  <img src="{}" style="display:block;margin:0 auto;width:{}mm;height:{}mm;max-width:100%;height:auto">{}"#,
+            src, w_mm, h_mm, "\n",
         ));
     }
 
@@ -360,7 +372,9 @@ fn emit_figure(
         let cleaned = clean_text(cap);
         let stripped = strip_caption_label_prefix(&cleaned).trim();
         if !stripped.is_empty() {
-            out.push_str("  <figcaption>");
+            out.push_str(
+                r#"  <figcaption style="margin-top:0.25em;font-size:0.9em;color:#555">"#,
+            );
             out.push_str(&escape_html(stripped));
             out.push_str("</figcaption>\n");
         }
@@ -946,12 +960,16 @@ mod tests {
             &doc,
             &HtmlOptions { assets_path: Some("x.assets".into()), ..Default::default() },
         );
-        assert!(html.contains("<figure>"));
+        assert!(html.contains("<figure"), "got: {html}");
+        // Image source + intrinsic mm dimensions survive alongside
+        // the responsive constraints added for preview-pane fit.
         assert!(
-            html.contains("<img src=\"x.assets/BIN0001.png\" style=\"width:25mm;height:13mm\">"),
+            html.contains(r#"src="x.assets/BIN0001.png""#),
             "got: {html}"
         );
-        assert!(html.contains("<figcaption>시스템 도식</figcaption>"));
+        assert!(html.contains("width:25mm"), "got: {html}");
+        assert!(html.contains("max-width:100%"), "got: {html}");
+        assert!(html.contains("시스템 도식"), "got: {html}");
     }
 
     #[test]
@@ -974,7 +992,8 @@ mod tests {
         });
         let html = to_html(&doc);
         assert!(!html.contains("<img"));
-        assert!(html.contains("<figcaption>설명</figcaption>"));
+        assert!(html.contains("설명"), "got: {html}");
+        assert!(html.contains("<figcaption"), "got: {html}");
     }
 
     #[test]

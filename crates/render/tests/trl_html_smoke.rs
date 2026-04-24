@@ -58,12 +58,12 @@ fn trl_html_has_tables_and_figures() {
 
     // 9 pictures → some <figure> elements. With assets_path set, at
     // least one <img src="trl.assets/…"> appears.
-    assert!(html.contains("<figure>"));
-    assert!(html.contains("<img src=\"trl.assets/BIN"));
+    assert!(html.contains("<figure"));
+    assert!(html.contains(r#"src="trl.assets/BIN"#));
 
     // At least one caption survives into <figcaption>.
     assert!(
-        html.contains("<figcaption>"),
+        html.contains("<figcaption"),
         "caption-bearing pictures should emit figcaption"
     );
 
