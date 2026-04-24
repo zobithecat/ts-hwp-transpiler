@@ -342,8 +342,11 @@ fn emit_figure(
     let h_mm = hwpunit_to_mm(pic.height_hwpu);
     let src = if let Some(prefix) = &opts.assets_path {
         // Explicit assets dir wins — caller has its own sidecar setup.
+        // Hancom names `/BinData/` OLE streams with uppercase-hex
+        // bin_ids (bin_id=10 → `BIN000A`, not `BIN0010`), so all
+        // filename formatting uses `{:04X}`.
         let filename = format!(
-            "BIN{:04}.{}",
+            "BIN{:04X}.{}",
             pic.bin_id,
             resolve_bin_extension(doc, pic.bin_id)
         );
@@ -406,7 +409,7 @@ fn resolve_bin_extension(doc: &IrDocument, bin_id: u16) -> &str {
 /// caption-only figure.
 fn resolve_bin_data_uri(doc: &IrDocument, bin_id: u16) -> Option<String> {
     let ext = resolve_bin_extension(doc, bin_id);
-    let filename = format!("BIN{:04}.{}", bin_id, ext);
+    let filename = format!("BIN{:04X}.{}", bin_id, ext);
     let entry = doc.bin_data.iter().find(|e| e.id == filename)?;
     if entry.bytes.is_empty() {
         return None;

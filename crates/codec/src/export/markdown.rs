@@ -190,7 +190,10 @@ fn picture_image_line(
 ) -> Option<String> {
     let prefix = opts.assets_path.as_deref()?;
     let ext = resolve_bin_extension(doc, pic.bin_id);
-    let filename = format!("BIN{:04}.{}", pic.bin_id, ext);
+    // Hancom names `/BinData/BIN<hex>.<ext>` — bin_id=10 ends up
+    // as `BIN000A`, not `BIN0010`. The sidecar asset dumper mirrors
+    // that naming, so MD's `![](...)` link needs the same form.
+    let filename = format!("BIN{:04X}.{}", pic.bin_id, ext);
     let w = hwpunit_to_mm(pic.width_hwpu);
     let h = hwpunit_to_mm(pic.height_hwpu);
     Some(format!(
