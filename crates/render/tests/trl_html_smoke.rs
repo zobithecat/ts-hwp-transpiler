@@ -44,11 +44,11 @@ fn trl_html_has_tables_and_figures() {
     // Structural invariants:
     assert!(html.starts_with("<article class=\"hwp-preview\">"));
     assert!(html.trim_end().ends_with("</article>"));
-    assert!(html.contains("<section>"));
+    assert!(html.contains("<section id=\"sec-"));
     assert!(html.contains("</section>"));
 
     // 53 tables in TRL — at least one `<table>` appears.
-    assert!(html.contains("<table>"));
+    assert!(html.contains("<table id="));
 
     // At least one colspan or rowspan attribute (TRL has both).
     assert!(
@@ -122,7 +122,7 @@ fn trl_emit_pages_surfaces_page_dims_from_page_def() {
 
     // Inline style with real mm dimensions appears.
     assert!(
-        html.contains("<section class=\"hwp-page\" style=\"width:"),
+        html.contains("class=\"hwp-page\" style=\"width:"),
         "expected emit_pages to produce inline dims; got prefix:\n{}",
         &html[..html.len().min(400)]
     );

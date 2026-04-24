@@ -54,18 +54,19 @@ pub fn to_html(doc: &IrDocument) -> String {
 pub fn to_html_with(doc: &IrDocument, opts: &HtmlOptions) -> String {
     let mut out = String::new();
     out.push_str("<article class=\"hwp-preview\">\n");
-    for section in &doc.sections {
-        emit_section_open(section, &mut out, opts);
+    for (si, section) in doc.sections.iter().enumerate() {
+        emit_section_open(section, &mut out, opts, si);
         // Track the last heading level so content between headings
         // nests visually under its section. Resets to 0 (no
         // indentation) per section so the first section never starts
         // indented.
         let mut depth: u8 = 0;
-        for para in &section.paragraphs {
+        for (pi, para) in section.paragraphs.iter().enumerate() {
             if let Some(level) = heading_level(doc, para) {
                 depth = level;
             }
-            emit_paragraph(doc, para, &mut out, opts, depth);
+            let path = format!("s{si}-p{pi}");
+            emit_paragraph(doc, para, &mut out, opts, depth, &path);
         }
         out.push_str("</section>\n");
     }
@@ -145,11 +146,22 @@ fn hoist_inline_styles(html: &str) -> String {
     format!("{css}{rewritten}")
 }
 
-fn emit_section_open(section: &Section, out: &mut String, opts: &HtmlOptions) {
+fn emit_section_open(
+    section: &Section,
+    out: &mut String,
+    opts: &HtmlOptions,
+    si: usize,
+) {
+    let id = format!(r#" id="sec-{si}""#);
     if opts.emit_pages {
-        out.push_str(&page_open_tag(&section.properties));
+        // Splice the id into the page-dim tag. `page_open_tag`
+        // already emits `<section class="hwp-page" style="...">`;
+        // inject the id before `class=` so attribute order reads
+        // naturally.
+        let tag = page_open_tag(&section.properties);
+        out.push_str(&tag.replacen("<section", &format!("<section{id}"), 1));
     } else {
-        out.push_str("<section>\n");
+        out.push_str(&format!("<section{id}>\n"));
     }
 }
 
@@ -159,6 +171,7 @@ fn emit_paragraph(
     out: &mut String,
     opts: &HtmlOptions,
     depth: u8,
+    path: &str,
 ) {
     let body = render_para_text(doc, para, opts);
     let has_text = body_has_visible(&body);
@@ -167,6 +180,7 @@ fn emit_paragraph(
     // Non-heading content uses `depth` directly.
     let heading_indent = depth.saturating_sub(1);
     let body_indent = depth;
+    let para_id = format!(r#" id="par-{path}""#);
 
     if has_text {
         match heading_level(doc, para) {
@@ -174,6 +188,7 @@ fn emit_paragraph(
                 let tag = format!("h{}", level.clamp(1, 6));
                 out.push('<');
                 out.push_str(&tag);
+                out.push_str(&para_id);
                 if heading_indent > 0 {
                     out.push_str(&indent_style_attr(heading_indent));
                 }
@@ -185,6 +200,7 @@ fn emit_paragraph(
             }
             None => {
                 out.push_str("<p");
+                out.push_str(&para_id);
                 if body_indent > 0 {
                     out.push_str(&indent_style_attr(body_indent));
                 }
@@ -194,7 +210,8 @@ fn emit_paragraph(
             }
         }
     }
-    for c in &para.controls {
+    for (ci, c) in para.controls.iter().enumerate() {
+        let ctrl_path = format!("{path}-c{ci}");
         // Tables and figures follow the body indent so they line up
         // with the paragraph text under the current heading.
         let indent = body_indent;
@@ -206,7 +223,7 @@ fn emit_paragraph(
                         indent_style_attr(indent),
                     ));
                 }
-                emit_table(doc, t, out, opts);
+                emit_table(doc, t, out, opts, &ctrl_path);
                 if indent > 0 {
                     out.push_str("</div>\n");
                 }
@@ -218,7 +235,7 @@ fn emit_paragraph(
                         indent_style_attr(indent),
                     ));
                 }
-                emit_figure(doc, p, c.caption_text.as_deref(), out, opts);
+                emit_figure(doc, p, c.caption_text.as_deref(), out, opts, &ctrl_path);
                 if indent > 0 {
                     out.push_str("</div>\n");
                 }
@@ -272,8 +289,15 @@ fn body_has_visible(s: &str) -> bool {
     false
 }
 
-fn emit_table(doc: &IrDocument, t: &TableControl, out: &mut String, opts: &HtmlOptions) {
-    out.push_str("<table>\n");
+fn emit_table(
+    doc: &IrDocument,
+    t: &TableControl,
+    out: &mut String,
+    opts: &HtmlOptions,
+    path: &str,
+) {
+    out.push_str(&format!(r#"<table id="tbl-{path}">"#));
+    out.push('\n');
     // Group cells by row — cells covered by rowspan from a higher row
     // are *absent* from `t.cells` (HWP doesn't store phantom entries),
     // which is exactly what HTML expects: a `<tr>` lists only the
@@ -284,15 +308,22 @@ fn emit_table(doc: &IrDocument, t: &TableControl, out: &mut String, opts: &HtmlO
             t.cells.iter().filter(|c| c.row == r).collect();
         row_cells.sort_by_key(|c| c.col);
         for cell in row_cells {
-            emit_cell(doc, cell, out, opts);
+            let cell_path = format!("{path}-r{}c{}", cell.row, cell.col);
+            emit_cell(doc, cell, out, opts, &cell_path);
         }
         out.push_str("  </tr>\n");
     }
     out.push_str("</table>\n");
 }
 
-fn emit_cell(doc: &IrDocument, cell: &TableCell, out: &mut String, opts: &HtmlOptions) {
-    out.push_str("    <td");
+fn emit_cell(
+    doc: &IrDocument,
+    cell: &TableCell,
+    out: &mut String,
+    opts: &HtmlOptions,
+    path: &str,
+) {
+    out.push_str(&format!(r#"    <td id="cell-{path}""#));
     if cell.row_span > 1 {
         out.push_str(&format!(" rowspan=\"{}\"", cell.row_span));
     }
@@ -301,7 +332,7 @@ fn emit_cell(doc: &IrDocument, cell: &TableCell, out: &mut String, opts: &HtmlOp
     }
     out.push_str(">");
     let mut wrote_text = false;
-    for p in cell.paragraphs.iter() {
+    for (pi, p) in cell.paragraphs.iter().enumerate() {
         let body = render_para_text(doc, p, opts);
         if body_has_visible(&body) {
             if wrote_text {
@@ -310,12 +341,21 @@ fn emit_cell(doc: &IrDocument, cell: &TableCell, out: &mut String, opts: &HtmlOp
             out.push_str(&body);
             wrote_text = true;
         }
-        for ctrl in &p.controls {
+        let para_path = format!("{path}-p{pi}");
+        for (ci, ctrl) in p.controls.iter().enumerate() {
+            let nested_path = format!("{para_path}-c{ci}");
             match &ctrl.kind {
-                ControlKind::Table(nested) => emit_table(doc, nested, out, opts),
-                ControlKind::Picture(pic) => {
-                    emit_figure(doc, pic, ctrl.caption_text.as_deref(), out, opts)
+                ControlKind::Table(nested) => {
+                    emit_table(doc, nested, out, opts, &nested_path)
                 }
+                ControlKind::Picture(pic) => emit_figure(
+                    doc,
+                    pic,
+                    ctrl.caption_text.as_deref(),
+                    out,
+                    opts,
+                    &nested_path,
+                ),
                 _ => {}
             }
         }
@@ -329,14 +369,21 @@ fn emit_figure(
     caption_text: Option<&str>,
     out: &mut String,
     opts: &HtmlOptions,
+    path: &str,
 ) {
     // Centred block-level figure so images anchor in the column
     // rather than left-hugging the text; the HWP picture-control
     // position metadata (`horzAlign` / `vertRelTo` / offsets) isn't
     // in the typed IR yet, so "centred" is the safer default for
     // floating images and mirrors what Hancom viewers show when no
-    // explicit alignment is set.
-    out.push_str(r#"<figure style="margin:0.6em auto;text-align:center">"#);
+    // explicit alignment is set. Figure id follows the bin_id so
+    // anchors stay stable even if the paragraph ordering changes;
+    // `path` is carried for compat with the rest of the tree.
+    let _ = path;
+    let fig_id = format!("fig-{}", pic.bin_id);
+    out.push_str(&format!(
+        r#"<figure id="{fig_id}" style="margin:0.6em auto;text-align:center">"#
+    ));
     out.push('\n');
     let w_mm = hwpunit_to_mm(pic.width_hwpu);
     let h_mm = hwpunit_to_mm(pic.height_hwpu);
@@ -396,9 +443,9 @@ fn emit_figure(
         let cleaned = clean_text(cap);
         let stripped = strip_caption_label_prefix(&cleaned).trim();
         if !stripped.is_empty() {
-            out.push_str(
-                r#"  <figcaption style="margin-top:0.25em;font-size:0.9em;color:#555">"#,
-            );
+            out.push_str(&format!(
+                r#"  <figcaption id="cap-{fig_id}" style="margin-top:0.25em;font-size:0.9em;color:#555">"#
+            ));
             out.push_str(&escape_html(stripped));
             out.push_str("</figcaption>\n");
         }
@@ -989,7 +1036,8 @@ mod tests {
     fn basic_paragraph_renders_as_p() {
         let doc = make_doc(vec![style("본문")], vec![para(0, "안녕하세요")]);
         let html = to_html(&doc);
-        assert!(html.contains("<p>안녕하세요</p>"), "got: {html}");
+        assert!(html.contains("안녕하세요</p>"), "got: {html}");
+        assert!(html.contains(r#"<p id="par-s0-p0""#), "got: {html}");
     }
 
     #[test]
@@ -1003,7 +1051,7 @@ mod tests {
         // visually nests underneath. Open tag carries the inline
         // padding-left style; closing tag and body are unchanged.
         assert!(
-            html.contains(r#"<h2 style="padding-left:1em">2장 제목</h2>"#),
+            html.contains(r#"style="padding-left:1em">2장 제목</h2>"#),
             "got: {html}"
         );
     }
@@ -1019,7 +1067,7 @@ mod tests {
         );
         let html = to_html(&doc);
         assert!(
-            html.contains(r#"<p style="padding-left:2em">본문 한 줄</p>"#),
+            html.contains(r#"style="padding-left:2em">본문 한 줄</p>"#),
             "subsection content should indent: {html}"
         );
     }
@@ -1033,9 +1081,9 @@ mod tests {
             vec![para(1, "1장 제목"), para(0, "첫 줄")],
         );
         let html = to_html(&doc);
-        assert!(html.contains("<h1>1장 제목</h1>"), "got: {html}");
+        assert!(html.contains("1장 제목</h1>"), "got: {html}");
         assert!(
-            html.contains(r#"<p style="padding-left:1em">첫 줄</p>"#),
+            html.contains(r#"style="padding-left:1em">첫 줄</p>"#),
             "got: {html}"
         );
     }
@@ -1057,28 +1105,28 @@ mod tests {
         );
         let html = to_html(&doc);
         // H1 heading from "1." prefix, no indent on itself.
-        assert!(html.contains("<h1>1. 사업 개요</h1>"), "got: {html}");
+        assert!(html.contains("1. 사업 개요</h1>"), "got: {html}");
         // Body below H1 indents one level.
         assert!(
-            html.contains(r#"<p style="padding-left:1em">본문 첫 줄</p>"#),
+            html.contains(r#"style="padding-left:1em">본문 첫 줄</p>"#),
             "got: {html}"
         );
         // H2 from "1.1" — heading itself indents one, body two.
         assert!(
-            html.contains(r#"<h2 style="padding-left:1em">1.1 세부 과제</h2>"#),
+            html.contains(r#"style="padding-left:1em">1.1 세부 과제</h2>"#),
             "got: {html}"
         );
         assert!(
-            html.contains(r#"<p style="padding-left:2em">본문 둘째 줄</p>"#),
+            html.contains(r#"style="padding-left:2em">본문 둘째 줄</p>"#),
             "got: {html}"
         );
         // H3 from "1.1.1" — heading indents two, body three.
         assert!(
-            html.contains(r#"<h3 style="padding-left:2em">1.1.1 더 세부</h3>"#),
+            html.contains(r#"style="padding-left:2em">1.1.1 더 세부</h3>"#),
             "got: {html}"
         );
         assert!(
-            html.contains(r#"<p style="padding-left:3em">본문 셋째 줄</p>"#),
+            html.contains(r#"style="padding-left:3em">본문 셋째 줄</p>"#),
             "got: {html}"
         );
     }
@@ -1095,7 +1143,7 @@ mod tests {
         let html = to_html(&doc);
         // Should remain a paragraph, not a heading.
         assert!(!html.contains("<h1"), "got: {html}");
-        assert!(html.contains("<p>"), "got: {html}");
+        assert!(html.contains("<p "), "got: {html}");
     }
 
     #[test]
@@ -1138,10 +1186,10 @@ mod tests {
             ..Paragraph::default()
         }]);
         let html = to_html(&doc);
-        assert!(html.contains("<table>"));
+        assert!(html.contains("<table id="));
         assert!(html.contains("<tr>"));
-        assert!(html.contains("<td>a</td>"));
-        assert!(html.contains("<td>d</td>"));
+        assert!(html.contains("a</td>"));
+        assert!(html.contains("d</td>"));
     }
 
     #[test]
@@ -1168,10 +1216,10 @@ mod tests {
         }]);
         let html = to_html(&doc);
         assert!(
-            html.contains("<td colspan=\"3\">merged header</td>"),
+            html.contains("colspan=\"3\">merged header</td>"),
             "got: {html}"
         );
-        assert!(html.contains("<td>x</td>"));
+        assert!(html.contains("x</td>"));
     }
 
     #[test]
@@ -1194,7 +1242,7 @@ mod tests {
             ..Paragraph::default()
         }]);
         let html = to_html(&doc);
-        assert!(html.contains("<td rowspan=\"2\">vmerge</td>"));
+        assert!(html.contains("rowspan=\"2\">vmerge</td>"));
     }
 
     #[test]
@@ -1426,7 +1474,7 @@ mod tests {
         let html = to_html_with(&doc, &HtmlOptions { emit_styles: true, ..Default::default() });
         // No colour, default size, no font-face data → no span, no tag noise.
         assert!(!html.contains("<span"), "default shape shouldn't emit span: {html}");
-        assert!(html.contains("<p>ABC</p>"), "got: {html}");
+        assert!(html.contains("ABC</p>"), "got: {html}");
     }
 
     #[test]
@@ -1455,7 +1503,7 @@ mod tests {
     fn emit_pages_off_keeps_plain_section() {
         let doc = make_doc(vec![style("본문")], vec![para(0, "hi")]);
         let html = to_html(&doc);
-        assert!(html.contains("<section>\n"), "got: {html}");
+        assert!(html.contains("<section id=\"sec-0\">"), "got: {html}");
         assert!(!html.contains("hwp-page"), "got: {html}");
     }
 
@@ -1471,7 +1519,7 @@ mod tests {
         };
         let html = to_html_with(&doc, &HtmlOptions { emit_pages: true, ..Default::default() });
         assert!(
-            html.contains("<section class=\"hwp-page\""),
+            html.contains("class=\"hwp-page\""),
             "got: {html}"
         );
         assert!(html.contains("width:210mm"), "got: {html}");
@@ -1485,7 +1533,7 @@ mod tests {
         let html = to_html_with(&doc, &HtmlOptions { emit_pages: true, ..Default::default() });
         // Class still present so CSS can target; no inline style when
         // no real dimensions were decoded.
-        assert!(html.contains("<section class=\"hwp-page\">"), "got: {html}");
+        assert!(html.contains("class=\"hwp-page\">"), "got: {html}");
         assert!(!html.contains("width:0mm"), "got: {html}");
     }
 
