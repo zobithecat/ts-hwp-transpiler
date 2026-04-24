@@ -49,24 +49,24 @@
       </section>
 
       <section class="split">
-        <article class="pane preview-pane" data-tab="editor">
+        <article class="pane preview-pane" data-tab="html">
           <header class="pane-header">
             <nav class="tabs" role="tablist">
               <button
                 type="button"
                 class="tab is-active"
                 role="tab"
-                data-target="editor"
+                data-target="html"
               >
-                에디터 <span class="tag">@rhwp/editor</span>
+                HTML 미리보기 <span class="tag">exportHtml</span>
               </button>
               <button
                 type="button"
                 class="tab"
                 role="tab"
-                data-target="html"
+                data-target="editor"
               >
-                HTML 미리보기 <span class="tag">exportHtml</span>
+                에디터 <span class="tag">@rhwp/editor</span>
               </button>
             </nav>
             <span id="preview-meta"></span>
@@ -74,10 +74,10 @@
               PDF 다운로드
             </button>
           </header>
-          <div id="preview" class="preview-host editor-host">
-            <p class="hint">iframe 로드 중…</p>
+          <div id="preview" class="preview-host editor-host" hidden>
+            <p class="hint">에디터 탭을 클릭하면 rhwp 편집기가 로드됩니다.</p>
           </div>
-          <div id="md-preview" class="preview-host md-preview-host" hidden>
+          <div id="md-preview" class="preview-host md-preview-host">
             <p class="hint">파일을 선택하면 여기에 HTML 미리보기가 나타납니다.</p>
           </div>
         </article>

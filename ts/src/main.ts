@@ -56,12 +56,28 @@ let currentStem = "document";
 
 // Currently-visible left-pane tab. The editor iframe and our
 // structure-preserving HTML render coexist as sibling divs;
-// switching toggles `hidden` without tearing down either.
+// switching toggles `hidden` without tearing down either. HTML is
+// the default tab so users see our structured render first; the
+// rhwp editor iframe only boots when the user explicitly switches
+// to it.
 type LeftTab = "editor" | "html";
-let activeTab: LeftTab = "editor";
+let activeTab: LeftTab = "html";
 
-// rhwp-editor handle; populated by createEditor() at boot.
+// rhwp-editor handle — created lazily on the first editor-tab
+// click. This keeps the initial page weight down (no cross-origin
+// iframe, no 3 MB rhwp wasm fetch) until the user actually wants
+// the editor surface. `editorInitPromise` caches the in-flight
+// createEditor call so double-clicks don't race.
 let editor: Awaited<ReturnType<typeof createEditor>> | null = null;
+let editorInitPromise: Promise<void> | null = null;
+
+// Most-recently loaded file bytes. Stored so the editor tab can
+// deferred-load them when the user first clicks over.
+let lastBuffer: ArrayBuffer | null = null;
+let lastFileName: string | null = null;
+// Tracks whether the currently-loaded buffer has reached the
+// editor iframe yet — set after a successful `editor.loadFile()`.
+let lastBufferLoadedInEditor = false;
 
 function setStatus(text: string, isError = false): void {
   statusEl.textContent = text;
@@ -127,16 +143,45 @@ function setTab(target: LeftTab): void {
   pdfBtn.disabled = target !== "html" || ourIr === null;
   if (target === "html") {
     renderStructuredHtml();
+  } else if (target === "editor") {
+    void ensureEditorLoaded();
   }
 }
 
-async function loadIntoEditor(
-  buffer: ArrayBuffer,
-  fileName: string,
-): Promise<number> {
-  if (!editor) throw new Error("editor not ready");
-  const result = await editor.loadFile(buffer, fileName);
-  return result?.pageCount ?? 0;
+/// Boot the rhwp-editor iframe on demand, then hand it the most-
+/// recently loaded bytes. Subsequent calls no-op until a new file
+/// arrives. All state transitions funnel through the shared
+/// `editorInitPromise` so concurrent tab clicks don't spawn two
+/// iframes.
+async function ensureEditorLoaded(): Promise<void> {
+  if (editor === null && editorInitPromise === null) {
+    editorInitPromise = (async () => {
+      // Clear the "iframe 로드 중…" placeholder before the iframe mounts.
+      previewEl.innerHTML = "";
+      editor = await createEditor(previewEl);
+    })();
+  }
+  if (editorInitPromise) {
+    try {
+      await editorInitPromise;
+    } catch (err) {
+      editorInitPromise = null;
+      setStatus(`에디터 로드 실패: ${String(err)}`, true);
+      return;
+    }
+  }
+  if (!editor) return;
+  if (lastBuffer && !lastBufferLoadedInEditor && lastFileName) {
+    try {
+      const result = await editor.loadFile(lastBuffer, lastFileName);
+      const pages = result?.pageCount ?? 0;
+      previewMeta.textContent = `${pages} pages`;
+      lastBufferLoadedInEditor = true;
+    } catch (err) {
+      previewMeta.textContent = "preview load failed";
+      setStatus(`에디터 파일 로드 실패: ${String(err)}`, true);
+    }
+  }
 }
 
 async function handleFile(file: File): Promise<void> {
@@ -154,18 +199,21 @@ async function handleFile(file: File): Promise<void> {
   const buffer = await file.arrayBuffer();
   const bytes = new Uint8Array(buffer);
 
-  // Kick off both paths in parallel — the editor iframe load and our
-  // wasm parse are completely independent.
-  const started = performance.now();
-  const [pagesResult, irResult] = await Promise.allSettled([
-    loadIntoEditor(buffer, file.name),
-    Promise.resolve().then(() => loadHwp(bytes)),
-  ]);
+  // Remember the buffer for the editor iframe's deferred load.
+  // The editor is only booted when the user switches to that tab,
+  // so we can't push bytes into it here.
+  lastBuffer = buffer;
+  lastFileName = file.name;
+  lastBufferLoadedInEditor = false;
 
-  if (pagesResult.status === "fulfilled") {
-    previewMeta.textContent = `${pagesResult.value} pages`;
-  } else {
-    previewMeta.textContent = "preview load failed";
+  // Parse into our wasm immediately — the HTML / MD panes need a
+  // resident IR to render against.
+  const started = performance.now();
+  let irResult: PromiseSettledResult<number>;
+  try {
+    irResult = { status: "fulfilled", value: loadHwp(bytes) };
+  } catch (err) {
+    irResult = { status: "rejected", reason: err };
   }
 
   if (irResult.status === "fulfilled") {
@@ -181,6 +229,14 @@ async function handleFile(file: File): Promise<void> {
     setStatus(`loadHwp 실패: ${String(irResult.reason)}`, true);
   }
   pdfBtn.disabled = activeTab !== "html" || ourIr === null;
+
+  // If the user is already on the editor tab, deferred-load now so
+  // they don't have to tab-click to retrigger; if they're still on
+  // HTML, leave the editor alone — ensureEditorLoaded() runs when
+  // they switch.
+  if (activeTab === "editor") {
+    void ensureEditorLoaded();
+  }
 }
 
 /// Strip the directory path and trailing extension from a filename —
@@ -311,15 +367,13 @@ function downloadBlob(blob: Blob, filename: string): void {
   URL.revokeObjectURL(url);
 }
 
-// Boot in parallel: our wasm self-initialises from its sidecar file;
-// the editor mounts into the preview pane and spins up its own iframe
-// against the default rhwp-studio URL.
-await Promise.all([
-  init(),
-  (async () => {
-    // Clear the static "pick a file" placeholder before the iframe mounts.
-    previewEl.innerHTML = "";
-    editor = await createEditor(previewEl);
-  })(),
-]);
-setStatus(`ready · ts-hwp-transpiler ${version()} · @rhwp/editor hosted`);
+// Align initial tab state with `activeTab` default ("html"). The
+// HTML `is-active` class in `index.html` can lag behind; force-sync
+// here so the visuals match regardless.
+setTab(activeTab);
+
+// Boot: only our wasm. The editor iframe stays dark until the user
+// clicks its tab — no eager cross-origin fetch, no 3 MB of rhwp
+// wasm pulled when the user only wants Markdown.
+await init();
+setStatus(`ready · ts-hwp-transpiler ${version()}`);
