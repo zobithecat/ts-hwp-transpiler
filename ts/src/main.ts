@@ -19,7 +19,9 @@ import init, {
   disposeDoc,
   exportHtml,
   exportMarkdown,
+  importMarkdown,
   loadHwp,
+  saveHwpx,
   version,
 } from "./wasm/hwp_transpiler_wasm.js";
 
@@ -35,6 +37,7 @@ const markdownEl = $<HTMLPreElement>("markdown");
 const copyBtn = $<HTMLButtonElement>("copy-md");
 const pdfBtn = $<HTMLButtonElement>("pdf-download");
 const mdDlBtn = $<HTMLButtonElement>("md-download");
+const hwpxDlBtn = $<HTMLButtonElement>("hwpx-download");
 const tabButtons = document.querySelectorAll<HTMLButtonElement>(
   ".tabs .tab",
 );
@@ -100,6 +103,7 @@ function renderMarkdown(handle: number): { bytes: number; ms: number } {
   markdownEl.textContent = md;
   copyBtn.disabled = md.length === 0;
   mdDlBtn.disabled = md.length === 0;
+  hwpxDlBtn.disabled = md.length === 0;
   if (activeTab === "html") {
     renderStructuredHtml();
   }
@@ -226,6 +230,7 @@ async function handleFile(file: File): Promise<void> {
     markdownEl.textContent = "";
     copyBtn.disabled = true;
     mdDlBtn.disabled = true;
+    hwpxDlBtn.disabled = true;
     setStatus(`loadHwp 실패: ${String(irResult.reason)}`, true);
   }
   pdfBtn.disabled = activeTab !== "html" || ourIr === null;
@@ -294,6 +299,39 @@ mdDlBtn.addEventListener("click", () => {
     new Blob([text], { type: "text/markdown;charset=utf-8" }),
     `${currentStem}.md`,
   );
+});
+
+/// MD → IR → HWPX round-trip via the wasm import path. Imports the
+/// currently-rendered Markdown into a fresh IR (with the bundled
+/// HWPX skeleton), saves through HwpxWriter, and downloads. The
+/// import handle is disposed right after to keep the wasm registry
+/// from accumulating throwaway docs across repeated clicks.
+hwpxDlBtn.addEventListener("click", () => {
+  const text = markdownEl.textContent ?? "";
+  if (!text) return;
+  let importedHandle: number | null = null;
+  try {
+    const started = performance.now();
+    importedHandle = importMarkdown(text);
+    const bytes = saveHwpx(importedHandle);
+    const ms = Math.round(performance.now() - started);
+    downloadBlob(
+      // wasm-bindgen types `Uint8Array.buffer` as `ArrayBufferLike`,
+      // which TS won't widen to `BlobPart`. Cast through `BlobPart`
+      // — the runtime accepts Uint8Array directly.
+      new Blob([bytes as BlobPart], { type: "application/hwp+zip" }),
+      `${currentStem}.hwpx`,
+    );
+    setStatus(
+      `HWPX ${bytes.length.toLocaleString()} bytes / ${ms}ms (MD → IR → HWPX)`,
+    );
+  } catch (err) {
+    setStatus(`.hwpx 변환 실패: ${String(err)}`, true);
+  } finally {
+    if (importedHandle !== null) {
+      disposeDoc(importedHandle);
+    }
+  }
 });
 
 /// Open a print-ready popup with our structured HTML render and

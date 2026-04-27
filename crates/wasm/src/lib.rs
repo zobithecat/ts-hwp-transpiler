@@ -28,7 +28,9 @@ use std::collections::HashMap;
 
 use hwp_transpiler_codec::export::markdown::{self, LlmOptions, MdOptions};
 use hwp_transpiler_codec::hwp::HwpReader;
+use hwp_transpiler_codec::hwpx::skeleton::bundle_default_skeleton;
 use hwp_transpiler_codec::hwpx::HwpxReader;
+use hwp_transpiler_codec::import::markdown as md_import;
 use hwp_transpiler_core::formula::Lexer;
 use hwp_transpiler_core::ir::{IrDocument, Reader, Writer};
 use hwp_transpiler_render::html::{self, HtmlOptions};
@@ -166,9 +168,16 @@ pub fn export_html(
     with_doc(handle, |doc| html::to_html_with(doc, &opts))
 }
 
+/// Parse a UTF-8 Markdown string into an `IrDocument`, bundle the
+/// minimum-viable HWPX skeleton (META-INF/container.xml,
+/// Contents/content.hpf, Contents/header.xml) into
+/// `unknown_streams`, and return a wasm-side handle. Pair with
+/// `saveHwpx(handle)` for the MD → HWPX leg of the round-trip.
 #[wasm_bindgen(js_name = importMarkdown)]
-pub fn import_markdown(_md: &str) -> Result<u32, JsValue> {
-    Err(JsValue::from_str("importMarkdown: not yet implemented"))
+pub fn import_markdown(md: &str) -> Result<u32, JsValue> {
+    let mut doc = md_import::from_markdown(md).map_err(js_err)?;
+    bundle_default_skeleton(&mut doc);
+    Ok(insert_doc(doc))
 }
 
 #[wasm_bindgen(js_name = renderPage)]
