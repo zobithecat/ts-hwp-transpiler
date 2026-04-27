@@ -21,3 +21,7 @@ path = "src/bin/roundtrip.rs"
 [[bin]]
 name = "hwp-to-md"
 path = "src/bin/hwp_to_md.rs"
+
+[[bin]]
+name = "md-to-hwpx"
+path = "src/bin/md_to_hwpx.rs"

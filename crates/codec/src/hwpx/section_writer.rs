@@ -54,8 +54,10 @@ pub fn write_section_xml(section: &Section) -> Result<Vec<u8>, IrError> {
 }
 
 fn emit_paragraph(para: &Paragraph, out: &mut String, id: u32) {
+    let para_pr = para.header.para_shape_id;
+    let style = para.header.style_id;
     out.push_str(&format!(
-        r#"<hp:p id="{id}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">"#
+        r#"<hp:p id="{id}" paraPrIDRef="{para_pr}" styleIDRef="{style}" pageBreak="0" columnBreak="0" merged="0">"#
     ));
 
     // HWPX paragraph bodies are structured as a sequence of `<hp:run>`s.

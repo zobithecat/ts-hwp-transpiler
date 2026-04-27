@@ -12,6 +12,7 @@ pub mod header_xml;
 pub mod reader;
 pub mod section_writer;
 pub mod section_xml;
+pub mod skeleton;
 pub mod writer;
 pub mod zip_reader;
 pub mod zip_writer;
