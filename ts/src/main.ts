@@ -36,6 +36,7 @@ const previewMeta = $("preview-meta");
 const markdownEl = $<HTMLPreElement>("markdown");
 const copyBtn = $<HTMLButtonElement>("copy-md");
 const pdfBtn = $<HTMLButtonElement>("pdf-download");
+const htmlBtn = $<HTMLButtonElement>("html-download");
 const mdDlBtn = $<HTMLButtonElement>("md-download");
 const hwpxDlBtn = $<HTMLButtonElement>("hwpx-download");
 const tabButtons = document.querySelectorAll<HTMLButtonElement>(
@@ -145,6 +146,7 @@ function setTab(target: LeftTab): void {
   // the rhwp iframe is cross-origin and can't be snapshotted from
   // the parent frame.
   pdfBtn.disabled = target !== "html" || ourIr === null;
+  htmlBtn.disabled = target !== "html" || ourIr === null;
   if (target === "html") {
     renderStructuredHtml();
   } else if (target === "editor") {
@@ -239,6 +241,7 @@ async function handleFile(file: File): Promise<void> {
     setStatus(`loadHwp 실패: ${String(irResult.reason)}`, true);
   }
   pdfBtn.disabled = activeTab !== "html" || ourIr === null;
+  htmlBtn.disabled = activeTab !== "html" || ourIr === null;
 
   // If the user is already on the editor tab, deferred-load now so
   // they don't have to tab-click to retrigger; if they're still on
@@ -275,6 +278,7 @@ async function handleMarkdownFile(file: File): Promise<void> {
     mdDlBtn.disabled = true;
     hwpxDlBtn.disabled = true;
     pdfBtn.disabled = true;
+    htmlBtn.disabled = true;
     setStatus(`importMarkdown 실패: ${String(err)}`, true);
     return;
   }
@@ -293,6 +297,7 @@ async function handleMarkdownFile(file: File): Promise<void> {
     renderStructuredHtml();
   }
   pdfBtn.disabled = activeTab !== "html";
+  htmlBtn.disabled = activeTab !== "html";
   const ms = Math.round(performance.now() - started);
   setStatus(`loaded .md in ${ms}ms · ${text.length.toLocaleString()} chars`);
 }
@@ -390,6 +395,20 @@ hwpxDlBtn.addEventListener("click", () => {
       disposeDoc(importedHandle);
     }
   }
+});
+
+/// Save the structured HTML render as a standalone `.html` document.
+/// Uses the same print-ready shell as the PDF path so the file
+/// stands on its own when opened in a browser — fonts via CDN, A4
+/// page widths, table borders all baked in.
+htmlBtn.addEventListener("click", () => {
+  if (!ourIr || activeTab !== "html") return;
+  const body = exportHtml(ourIr, undefined, emitStylesEl.checked, true);
+  const html = printableHtmlShell(currentStem, body);
+  downloadBlob(
+    new Blob([html], { type: "text/html;charset=utf-8" }),
+    `${currentStem}.html`,
+  );
 });
 
 /// Open a print-ready popup with our structured HTML render and
