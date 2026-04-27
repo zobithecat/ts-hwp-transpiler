@@ -10,6 +10,7 @@ cfb = { workspace = true }
 flate2 = { workspace = true }
 zip = { workspace = true }
 quick-xml = { workspace = true }
+pulldown-cmark = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 

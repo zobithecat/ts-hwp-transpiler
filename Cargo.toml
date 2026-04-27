@@ -42,6 +42,10 @@ image = { version = "=0.25.2", default-features = false, features = ["bmp", "gif
 # Reference parser — used by readers, not writers.
 hwp = "*"
 
+# Markdown CommonMark + tables parser for the MD → IR import path.
+# Pure Rust, MSRV-friendly.
+pulldown-cmark = "0.12"
+
 [profile.release]
 opt-level = "z"
 lto = true
