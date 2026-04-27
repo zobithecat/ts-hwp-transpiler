@@ -285,6 +285,48 @@ fn mutating_char_shape_color_flows_through_writer() {
     );
 }
 
+/// Mutation flow: editing multi-script CharShape arrays (font_ids,
+/// ratios, rel_sizes, char_spacings, char_offsets) on the IR before
+/// write must surface in the re-parsed document.
+#[test]
+fn mutating_char_shape_multi_script_arrays_flows_through_writer() {
+    let Some(mut doc) = load_sample() else {
+        return;
+    };
+    if doc.doc_info.char_shapes.is_empty() {
+        return;
+    }
+    let idx = 0;
+    doc.doc_info.char_shapes[idx].font_ids = [7, 9, 0, 0, 0, 0, 0];
+    doc.doc_info.char_shapes[idx].ratios = [120, 90, 100, 100, 100, 100, 100];
+    doc.doc_info.char_shapes[idx].char_spacings = [-3, 5, 0, 0, 0, 0, 0];
+    doc.doc_info.char_shapes[idx].char_offsets = [2, -1, 0, 0, 0, 0, 0];
+
+    let bytes = HwpxWriter::default().write(&doc).expect("write");
+    let reloaded = HwpxReader.read(&bytes).expect("reload");
+
+    assert_eq!(
+        reloaded.doc_info.char_shapes[idx].font_ids,
+        [7, 9, 0, 0, 0, 0, 0],
+        "font_ids mutation lost"
+    );
+    assert_eq!(
+        reloaded.doc_info.char_shapes[idx].ratios,
+        [120, 90, 100, 100, 100, 100, 100],
+        "ratios mutation lost"
+    );
+    assert_eq!(
+        reloaded.doc_info.char_shapes[idx].char_spacings,
+        [-3, 5, 0, 0, 0, 0, 0],
+        "char_spacings mutation lost"
+    );
+    assert_eq!(
+        reloaded.doc_info.char_shapes[idx].char_offsets,
+        [2, -1, 0, 0, 0, 0, 0],
+        "char_offsets mutation lost"
+    );
+}
+
 /// Mutation flow: editing `FontFace.name` on the IR before write must
 /// surface in the re-parsed document.
 #[test]

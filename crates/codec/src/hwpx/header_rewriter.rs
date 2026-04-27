@@ -17,7 +17,7 @@
 //! Start tags but viewers don't care); mutated docs reflect the IR
 //! change in exactly the attribute that moved.
 //!
-//! Supported overlays (Phase 1):
+//! Supported overlays:
 //!   * `<hh:align horizontal=…>` inside `<hh:paraPr>` — from
 //!     `ParaShape::align()`.
 //!   * `<hh:charPr height=… textColor=… shadeColor=… borderFillIDRef=…>`
@@ -26,6 +26,10 @@
 //!   * `<hh:strikeout shape=… color=…>` and `<hh:underline shape=… color=…>`
 //!     inside `<hh:charPr>` — from `CharShape::strike()`/
 //!     `underline_kind()` and the matching colour fields.
+//!   * `<hh:fontRef>`, `<hh:ratio>`, `<hh:relSz>`, `<hh:spacing>`,
+//!     `<hh:offset>` (multi-script 7-attribute children of
+//!     `<hh:charPr>`) — from `CharShape::font_ids` / `ratios` /
+//!     `rel_sizes` / `char_spacings` / `char_offsets`.
 //!   * `<hh:font face=…>` inside `<hh:fontface>` — from
 //!     `FontFace::name`.
 //!   * `<hc:winBrush faceColor=…>` inside `<hh:borderFill>` — from
@@ -34,10 +38,9 @@
 //!
 //! Not yet handled — bold / italic toggling (presence-only children
 //! that need structural insert before `</hh:charPr>`), full add /
-//! remove of whole shapes, multi-script CharShape arrays
-//! (`<hh:fontRef>` / `<hh:ratio>` / …), gradation / image fill
-//! mutation. The unmutated path round-trips these correctly because
-//! the rewriter never touches their bytes.
+//! remove of whole shapes, gradation / image fill mutation. The
+//! unmutated path round-trips these correctly because the rewriter
+//! never touches their bytes.
 
 use std::collections::HashMap;
 
@@ -114,6 +117,15 @@ pub fn rewrite_header_xml(original: &[u8], doc: &IrDocument) -> Result<Vec<u8>, 
                             doc, original, &mut out, &mut cursor,
                             event_start, event_end,
                             e, false, char_pr_id.unwrap(),
+                        )?;
+                    }
+                    "fontRef" | "ratio" | "relSz" | "spacing" | "offset"
+                        if char_pr_id.is_some() =>
+                    {
+                        rewrite_charpr_array_child(
+                            doc, original, &mut out, &mut cursor,
+                            event_start, event_end,
+                            e, false, char_pr_id.unwrap(), name,
                         )?;
                     }
                     _ => {}
@@ -206,6 +218,15 @@ pub fn rewrite_header_xml(original: &[u8], doc: &IrDocument) -> Result<Vec<u8>, 
                             doc, original, &mut out, &mut cursor,
                             event_start, event_end,
                             e, true, char_pr_id.unwrap(),
+                        )?;
+                    }
+                    "fontRef" | "ratio" | "relSz" | "spacing" | "offset"
+                        if char_pr_id.is_some() =>
+                    {
+                        rewrite_charpr_array_child(
+                            doc, original, &mut out, &mut cursor,
+                            event_start, event_end,
+                            e, true, char_pr_id.unwrap(), name,
                         )?;
                     }
                     _ => {}
@@ -318,6 +339,72 @@ fn rewrite_underline(
         if shape.underline_kind() == 0 { "NONE".to_string() } else { "SOLID".to_string() },
     );
     overrides.insert("color".to_string(), color_to_hex(shape.underline_color));
+    replace_with_overlay(
+        original, out, cursor,
+        event_start, event_end,
+        e, is_empty, &overrides,
+    )
+}
+
+/// Slot order for `<hh:fontRef>` / `<hh:ratio>` / `<hh:relSz>` /
+/// `<hh:spacing>` / `<hh:offset>`. Mirrors the parser's
+/// `SCRIPT_SLOTS` so the IR's 7-element arrays line up with the
+/// HWPX attribute names.
+const SCRIPT_SLOTS: [&str; 7] = [
+    "hangul", "latin", "hanja", "japanese", "other", "symbol", "user",
+];
+
+fn rewrite_charpr_array_child(
+    doc: &IrDocument,
+    original: &[u8],
+    out: &mut Vec<u8>,
+    cursor: &mut usize,
+    event_start: usize,
+    event_end: usize,
+    e: &BytesStart<'_>,
+    is_empty: bool,
+    char_pr_id: u32,
+    elem_name: &str,
+) -> Result<(), IrError> {
+    let shape = match doc.doc_info.char_shapes.get(char_pr_id as usize) {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+    let mut overrides = HashMap::new();
+    match elem_name {
+        "fontRef" => {
+            for (i, slot) in SCRIPT_SLOTS.iter().enumerate() {
+                overrides.insert(slot.to_string(), shape.font_ids[i].to_string());
+            }
+        }
+        "ratio" => {
+            for (i, slot) in SCRIPT_SLOTS.iter().enumerate() {
+                overrides.insert(slot.to_string(), shape.ratios[i].to_string());
+            }
+        }
+        "relSz" => {
+            for (i, slot) in SCRIPT_SLOTS.iter().enumerate() {
+                overrides.insert(slot.to_string(), shape.rel_sizes[i].to_string());
+            }
+        }
+        "spacing" => {
+            for (i, slot) in SCRIPT_SLOTS.iter().enumerate() {
+                overrides.insert(
+                    slot.to_string(),
+                    shape.char_spacings[i].to_string(),
+                );
+            }
+        }
+        "offset" => {
+            for (i, slot) in SCRIPT_SLOTS.iter().enumerate() {
+                overrides.insert(
+                    slot.to_string(),
+                    shape.char_offsets[i].to_string(),
+                );
+            }
+        }
+        _ => return Ok(()),
+    }
     replace_with_overlay(
         original, out, cursor,
         event_start, event_end,
@@ -641,6 +728,73 @@ mod tests {
         // hatchColor + alpha preserved verbatim.
         assert!(s.contains(r##"hatchColor="#999999""##), "hatch preserved: {s}");
         assert!(s.contains(r#"alpha="0""#), "alpha preserved: {s}");
+    }
+
+    #[test]
+    fn fontref_ratio_relsz_arrays_overlaid() {
+        let xml = br##"<hh:head xmlns:hh="h">
+            <hh:charProperties>
+              <hh:charPr id="0" height="1000" textColor="#000000">
+                <hh:fontRef hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0"/>
+                <hh:ratio hangul="100" latin="100" hanja="100" japanese="100" other="100" symbol="100" user="100"/>
+                <hh:relSz hangul="100" latin="100" hanja="100" japanese="100" other="100" symbol="100" user="100"/>
+              </hh:charPr>
+            </hh:charProperties>
+          </hh:head>"##;
+        let mut doc = IrDocument::default();
+        let mut cs = CharShape::default();
+        cs.font_ids = [3, 5, 0, 0, 0, 0, 0];
+        cs.ratios = [120, 90, 100, 100, 100, 100, 100];
+        cs.rel_sizes = [80, 110, 100, 100, 100, 100, 100];
+        doc.doc_info.char_shapes = vec![cs];
+        let out = rewrite_header_xml(xml, &doc).expect("rewrite");
+        let s = std::str::from_utf8(&out).unwrap();
+        assert!(s.contains(r#"<hh:fontRef hangul="3" latin="5""#), "fontRef hangul/latin overlaid: {s}");
+        assert!(s.contains(r#"<hh:ratio hangul="120" latin="90""#), "ratio overlaid: {s}");
+        assert!(s.contains(r#"<hh:relSz hangul="80" latin="110""#), "relSz overlaid: {s}");
+        assert!(s.contains(r#"hanja="0""#), "hanja zero preserved on fontRef: {s}");
+        assert!(s.contains(r#"hanja="100""#), "hanja default preserved on ratio/relSz: {s}");
+    }
+
+    #[test]
+    fn spacing_offset_signed_arrays_overlaid() {
+        let xml = br##"<hh:head xmlns:hh="h">
+            <hh:charProperties>
+              <hh:charPr id="0" height="1000" textColor="#000000">
+                <hh:fontRef hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0"/>
+                <hh:spacing hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0"/>
+                <hh:offset hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0"/>
+              </hh:charPr>
+            </hh:charProperties>
+          </hh:head>"##;
+        let mut doc = IrDocument::default();
+        let mut cs = CharShape::default();
+        cs.char_spacings = [-5, 10, 0, 0, 0, 0, 0];
+        cs.char_offsets = [3, -7, 0, 0, 0, 0, 0];
+        doc.doc_info.char_shapes = vec![cs];
+        let out = rewrite_header_xml(xml, &doc).expect("rewrite");
+        let s = std::str::from_utf8(&out).unwrap();
+        assert!(s.contains(r#"<hh:spacing hangul="-5" latin="10""#), "negative spacing overlaid: {s}");
+        assert!(s.contains(r#"<hh:offset hangul="3" latin="-7""#), "negative offset overlaid: {s}");
+    }
+
+    #[test]
+    fn array_children_outside_charpr_left_alone() {
+        // A `<hh:fontRef>` outside charPr context should NOT be
+        // rewritten — only charPr's child overlays run.
+        let xml = br##"<hh:head xmlns:hh="h">
+            <hh:bogusOuter>
+              <hh:fontRef hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0"/>
+            </hh:bogusOuter>
+          </hh:head>"##;
+        let mut doc = IrDocument::default();
+        let mut cs = CharShape::default();
+        cs.font_ids = [99, 99, 99, 99, 99, 99, 99];
+        doc.doc_info.char_shapes = vec![cs];
+        let out = rewrite_header_xml(xml, &doc).expect("rewrite");
+        let s = std::str::from_utf8(&out).unwrap();
+        assert!(s.contains(r#"hangul="0""#), "outside charPr context kept: {s}");
+        assert!(!s.contains(r#"hangul="99""#), "should not overlay outside charPr: {s}");
     }
 
     #[test]
