@@ -73,6 +73,9 @@ fn line(out: &mut String, s: &str) {
 pub fn to_llm_markdown(doc: &IrDocument, opts: &MdOptions) -> String {
     let llm = opts.llm.clone().unwrap_or_default();
     let mut out = String::new();
+    out.push_str(super::markdown::FORMAT_HEADER_LLM);
+    out.push('\n');
+    out.push('\n');
     for (si, section) in doc.sections.iter().enumerate() {
         line(&mut out, &format!("SECTION[id=sec-{si}]"));
         out.push('\n');

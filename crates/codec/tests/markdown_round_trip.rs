@@ -9,7 +9,12 @@ use hwp_transpiler_codec::import::markdown::from_markdown;
 
 fn round_trip(src: &str) -> String {
     let doc = from_markdown(src).expect("import");
-    to_markdown(&doc)
+    // The exporter stamps a `<!-- hwp-transpiler: format=human -->`
+    // header so the importer can dispatch deterministically. Strip
+    // it here so the structural assertions stay focused on the body.
+    let raw = to_markdown(&doc);
+    let header = "<!-- hwp-transpiler: format=human -->\n";
+    raw.strip_prefix(header).map(|s| s.to_string()).unwrap_or(raw)
 }
 
 /// Strip trailing whitespace + collapse runs of blank lines so the

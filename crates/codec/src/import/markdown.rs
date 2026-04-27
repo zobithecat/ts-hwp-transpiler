@@ -42,10 +42,51 @@ use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 /// HWP / HWPX readers so callers can treat all import paths
 /// uniformly.
 pub fn from_markdown(src: &str) -> Result<IrDocument, IrError> {
-    if super::markdown_llm::looks_like_llm_format(src) {
-        return super::markdown_llm::from_llm_markdown(src);
+    match detect_format(src) {
+        FormatHint::Llm => super::markdown_llm::from_llm_markdown(src),
+        FormatHint::Human => from_gfm_markdown(src),
+        FormatHint::Unknown => {
+            // No explicit header — fall back to sigil-sniffing the
+            // LLM record format so docs from older exports still
+            // dispatch correctly.
+            if super::markdown_llm::looks_like_llm_format(src) {
+                super::markdown_llm::from_llm_markdown(src)
+            } else {
+                from_gfm_markdown(src)
+            }
+        }
     }
-    from_gfm_markdown(src)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FormatHint {
+    Human,
+    Llm,
+    Unknown,
+}
+
+/// Read the leading `<!-- hwp-transpiler: format=… -->` HTML comment
+/// stamped by the matching exporter. Tolerates blank lines before
+/// the marker. Anything else returns `Unknown` so the caller can
+/// fall back to content-based detection.
+fn detect_format(src: &str) -> FormatHint {
+    for line in src.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("<!-- hwp-transpiler: format=") {
+            if let Some(value) = rest.strip_suffix("-->") {
+                return match value.trim() {
+                    "human" => FormatHint::Human,
+                    "llm" => FormatHint::Llm,
+                    _ => FormatHint::Unknown,
+                };
+            }
+        }
+        return FormatHint::Unknown;
+    }
+    FormatHint::Unknown
 }
 
 /// Plain GFM-Markdown branch of `from_markdown`. Exposed as its own

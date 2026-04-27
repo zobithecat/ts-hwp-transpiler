@@ -90,11 +90,25 @@ pub fn to_markdown(doc: &IrDocument) -> String {
     to_markdown_with(doc, &MdOptions::default())
 }
 
+/// Stamped at the top of every human-mode export so the importer
+/// can dispatch by header rather than sniffing content. HTML
+/// comment so it stays invisible in rendered Markdown.
+pub const FORMAT_HEADER_HUMAN: &str = "<!-- hwp-transpiler: format=human -->";
+
+/// Stamped at the top of every LLM-mode export. Same role as
+/// [`FORMAT_HEADER_HUMAN`].
+pub const FORMAT_HEADER_LLM: &str = "<!-- hwp-transpiler: format=llm -->";
+
 pub fn to_markdown_with(doc: &IrDocument, opts: &MdOptions) -> String {
     if opts.llm.is_some() {
         return super::markdown_llm::to_llm_markdown(doc, opts);
     }
     let mut out = String::new();
+    // Format header so the importer can dispatch deterministically
+    // back into the human-Markdown branch even if the document
+    // happens to start with content that resembles the LLM sigil.
+    out.push_str(FORMAT_HEADER_HUMAN);
+    out.push('\n');
     let mut picture_counter: u32 = 0;
     for section in &doc.sections {
         for para in &section.paragraphs {
@@ -1018,6 +1032,16 @@ mod tests {
         TableControl,
     };
 
+    /// Strip the leading `<!-- hwp-transpiler: format=human -->\n`
+    /// stamp so legacy exact-string assertions stay focused on the
+    /// document body rather than the dispatch header.
+    fn body(s: String) -> String {
+        s.strip_prefix(FORMAT_HEADER_HUMAN)
+            .and_then(|r| r.strip_prefix('\n'))
+            .map(|r| r.to_string())
+            .unwrap_or(s)
+    }
+
     fn make_doc(styles: Vec<Style>, paragraphs: Vec<Paragraph>) -> IrDocument {
         let mut doc = IrDocument::default();
         doc.doc_info.styles = styles;
@@ -1073,7 +1097,7 @@ mod tests {
             vec![para(0, "intro"), para(1, "Chapter One"), para(2, "Subsection")],
         );
         assert_eq!(
-            to_markdown(&doc),
+            body(to_markdown(&doc)),
             "intro\n\n# Chapter One\n\n### Subsection\n"
         );
     }
@@ -1090,7 +1114,7 @@ mod tests {
                 "\u{F2B1} 과제 개요\n\u{F02B2} 부록\n\u{F2BA} 마지막\n\u{F02C4} 끝",
             )],
         );
-        let md = to_markdown(&doc);
+        let md = body(to_markdown(&doc));
         assert!(md.contains("① 과제 개요"), "got: {md}");
         assert!(md.contains("② 부록"), "got: {md}");
         assert!(md.contains("⑩ 마지막"), "got: {md}");
@@ -1106,7 +1130,7 @@ mod tests {
             vec![style("본문")],
             vec![para(0, "hello\u{FFFC}\u{00A0}world")],
         );
-        assert_eq!(to_markdown(&doc), "hello world\n");
+        assert_eq!(body(to_markdown(&doc)), "hello world\n");
     }
 
     #[test]
@@ -1124,7 +1148,7 @@ mod tests {
             ..TableControl::default()
         };
         let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
-        let md = to_markdown(&doc);
+        let md = body(to_markdown(&doc));
         assert!(md.contains("| a | b |"));
         assert!(md.contains("| --- | --- |"));
         assert!(md.contains("| c | d |"));
@@ -1145,7 +1169,7 @@ mod tests {
             ..TableControl::default()
         };
         let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
-        assert_eq!(to_markdown(&doc), "## 1. 기술개발 목표\n");
+        assert_eq!(body(to_markdown(&doc)), "## 1. 기술개발 목표\n");
     }
 
     #[test]
@@ -1282,7 +1306,7 @@ mod tests {
             ..TableControl::default()
         };
         let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
-        let md = to_markdown(&doc);
+        let md = body(to_markdown(&doc));
         assert!(
             md.contains("<!-- table 2×2"),
             "picture should force bullet fallback, not grid: {md}"
@@ -1335,7 +1359,7 @@ mod tests {
             vec![style("본문")],
             vec![top_pic, para_with_table(t)],
         );
-        let md = to_markdown(&doc);
+        let md = body(to_markdown(&doc));
         let n1 = md.find("{{그림 1.}}").expect("top-level N=1");
         let n2 = md.find("{{그림 2.}}").expect("cell-embedded N=2");
         assert!(n1 < n2, "counter order broken: {md}");
@@ -1360,7 +1384,7 @@ mod tests {
             }],
             ..Section::default()
         });
-        let md = to_markdown(&doc);
+        let md = body(to_markdown(&doc));
         assert!(md.contains("{{그림 1.}}"), "got: {md}");
         assert!(!md.contains("{{그림 1. "), "no trailing space-text: {md}");
     }
@@ -1392,7 +1416,7 @@ mod tests {
             ..TableControl::default()
         };
         let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
-        let md = to_markdown(&doc);
+        let md = body(to_markdown(&doc));
         assert_eq!(
             md,
             "## 7. 연구개발성과의 활용방안 및 기대효과 (기술성·시장성 및 사업성 검토 방안 등)\n"
@@ -1417,7 +1441,7 @@ mod tests {
             ..TableControl::default()
         };
         let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
-        assert_eq!(to_markdown(&doc), "## 1. 기술개발 목표\n");
+        assert_eq!(body(to_markdown(&doc)), "## 1. 기술개발 목표\n");
     }
 
     #[test]
@@ -1437,7 +1461,7 @@ mod tests {
             ..TableControl::default()
         };
         let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
-        let md = to_markdown(&doc);
+        let md = body(to_markdown(&doc));
         assert!(!md.starts_with("## "), "got: {md}");
         assert!(!md.starts_with("### "), "got: {md}");
     }
@@ -1450,7 +1474,7 @@ mod tests {
             ..TableControl::default()
         };
         let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
-        assert_eq!(to_markdown(&doc), "### (1) 선행연구개발 이력\n");
+        assert_eq!(body(to_markdown(&doc)), "### (1) 선행연구개발 이력\n");
     }
 
     #[test]
@@ -1466,7 +1490,7 @@ mod tests {
             ..TableControl::default()
         };
         let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
-        let md = to_markdown(&doc);
+        let md = body(to_markdown(&doc));
         assert!(!md.starts_with("## "), "long body must not become heading: {md:?}");
     }
 
@@ -1478,7 +1502,7 @@ mod tests {
             ..TableControl::default()
         };
         let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
-        let md = to_markdown(&doc);
+        let md = body(to_markdown(&doc));
         assert!(!md.starts_with("## "), "no prefix must not promote to heading");
         assert!(!md.starts_with("### "));
     }
@@ -1505,7 +1529,7 @@ mod tests {
             ..TableControl::default()
         };
         let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
-        let md = to_markdown(&doc);
+        let md = body(to_markdown(&doc));
         assert!(md.contains("| merged header |  |  |"), "got: {md}");
         assert!(md.contains("| --- | --- | --- |"));
         assert!(md.contains("| x | y | z |"));
@@ -1531,7 +1555,7 @@ mod tests {
             ..TableControl::default()
         };
         let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
-        let md = to_markdown(&doc);
+        let md = body(to_markdown(&doc));
         assert!(md.contains("<!-- table 2×2"), "got: {md}");
         assert!(md.contains("- [0,0] span 2×1: vmerged"));
     }
@@ -1558,7 +1582,7 @@ mod tests {
             ..TableControl::default()
         };
         let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
-        let md = to_markdown(&doc);
+        let md = body(to_markdown(&doc));
         assert!(md.contains("- [1,1]: task A"), "got: {md}");
         assert!(md.contains("- [1,2..5]: (empty)"), "got: {md}");
         // The expanded version (4 separate `- [1,c]:` lines) must NOT
@@ -1585,7 +1609,7 @@ mod tests {
             ..TableControl::default()
         };
         let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
-        let md = to_markdown(&doc);
+        let md = body(to_markdown(&doc));
         assert!(md.contains("- [1,2]:"), "got: {md}");
         assert!(!md.contains("(empty)"), "single empty must not be range-collapsed: {md}");
     }
@@ -1615,7 +1639,7 @@ mod tests {
             ..TableControl::default()
         };
         let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
-        let md = to_markdown(&doc);
+        let md = body(to_markdown(&doc));
         assert!(md.contains("- [0,0] span 2×1: 1차 · 예비 · 연구"), "got: {md}");
         // Old broken form (raw newlines) must not reappear.
         assert!(!md.contains("- [0,0] span 2×1: 1차\n예비"), "got: {md}");
@@ -1655,7 +1679,7 @@ mod tests {
             ..TableControl::default()
         };
         let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
-        let md = to_markdown(&doc);
+        let md = body(to_markdown(&doc));
         assert!(md.contains("- [0,0]:\n"), "got: {md}");
         assert!(md.contains("  - ○ 첫 번째 단락\n"), "got: {md}");
         assert!(md.contains("  - ○ 마지막 단락\n"), "got: {md}");
@@ -1692,7 +1716,7 @@ mod tests {
             ..TableControl::default()
         };
         let doc = make_doc(vec![style("본문")], vec![para_with_table(outer)]);
-        let md = to_markdown(&doc);
+        let md = body(to_markdown(&doc));
         // Inner content surfaces at the top level — no `[0,0]:` wrapper
         // line, no extra indent. (After unwrap the inner 1×1 then takes
         // the passage path and renders as plain prose.)
@@ -1728,7 +1752,7 @@ mod tests {
             ..TableControl::default()
         };
         let doc = make_doc(vec![style("본문")], vec![para_with_table(outer)]);
-        let md = to_markdown(&doc);
+        let md = body(to_markdown(&doc));
         assert!(md.contains("outer caption"), "outer text must survive: {md}");
         assert!(md.contains("inner"));
     }
@@ -1745,7 +1769,7 @@ mod tests {
             ..TableControl::default()
         };
         let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
-        let md = to_markdown(&doc);
+        let md = body(to_markdown(&doc));
         assert_eq!(md, "민관공동기술사업화 연구개발계획서 1단계\n");
     }
 
@@ -1767,7 +1791,7 @@ mod tests {
             ..TableControl::default()
         };
         let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
-        let md = to_markdown(&doc);
+        let md = body(to_markdown(&doc));
         assert_eq!(md, "민관공동기술사업화 연구개발계획서 1단계 (PoC·PoM)\n");
     }
 
@@ -1781,7 +1805,7 @@ mod tests {
             ..TableControl::default()
         };
         let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
-        let md = to_markdown(&doc);
+        let md = body(to_markdown(&doc));
         assert_eq!(md, "문서 제목\n");
     }
 
@@ -1800,7 +1824,7 @@ mod tests {
             ..TableControl::default()
         };
         let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
-        let md = to_markdown(&doc);
+        let md = body(to_markdown(&doc));
         assert!(md.contains("| header"), "got: {md}");
         assert!(md.contains("| --- "), "got: {md}");
     }
@@ -1818,7 +1842,7 @@ mod tests {
             ..TableControl::default()
         };
         let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
-        let md = to_markdown(&doc);
+        let md = body(to_markdown(&doc));
         assert!(md.contains("<!-- table 2×2"));
     }
 
@@ -1834,7 +1858,7 @@ mod tests {
             ..TableControl::default()
         };
         let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
-        let md = to_markdown(&doc);
+        let md = body(to_markdown(&doc));
         assert!(md.contains("| a\\|b |"), "got: {md}");
     }
 
@@ -1864,7 +1888,7 @@ mod tests {
             vec![style("본문")],
             vec![para_with_controls(vec![equation("x^2 + y^2 = z^2")])],
         );
-        let md = to_markdown(&doc);
+        let md = body(to_markdown(&doc));
         assert!(md.contains("$$"), "got: {md}");
         assert!(md.contains("x^{2}"), "got: {md}");
         assert!(md.contains("z^{2}"), "got: {md}");
@@ -1882,7 +1906,7 @@ mod tests {
             vec![style("본문")],
             vec![para_with_controls(vec![equation("OVER {a} {b}")])],
         );
-        let md = to_markdown(&doc);
+        let md = body(to_markdown(&doc));
         assert!(md.contains("$$"), "got: {md}");
         // OVER with braced args emits \frac via the infix handler
         // (empty LHS picks up from the following braced atom).
@@ -1897,7 +1921,7 @@ mod tests {
             vec![style("본문")],
             vec![para_with_controls(vec![equation("")])],
         );
-        let md = to_markdown(&doc);
+        let md = body(to_markdown(&doc));
         assert!(md.contains("{{수식:}}"), "got: {md}");
         // No display-math block for empty scripts.
         assert!(!md.contains("$$\n\n$$"), "got: {md}");
@@ -1928,7 +1952,7 @@ mod tests {
             ..TableControl::default()
         };
         let doc = make_doc_with_owner_heading("", t);
-        let md = to_markdown(&doc);
+        let md = body(to_markdown(&doc));
         assert!(!md.contains("<!-- kind"), "got: {md}");
     }
 
@@ -1987,7 +2011,7 @@ mod tests {
     #[test]
     fn role_attribute_absent_by_default() {
         let doc = make_doc(vec![style("본문")], vec![para_with_table(three_by_two_complex_bullet())]);
-        let md = to_markdown(&doc);
+        let md = body(to_markdown(&doc));
         // Default options: no role=, no editable= anywhere.
         assert!(!md.contains("role="), "got: {md}");
         assert!(!md.contains("editable="), "got: {md}");
@@ -2139,7 +2163,7 @@ mod tests {
         ];
         let shapes = vec![char_shape_with_attr(0), char_shape_with_attr(0x02)]; // bold
         let doc = styled_doc("plainBOLD!", runs, shapes);
-        let md = to_markdown(&doc);
+        let md = body(to_markdown(&doc));
         assert!(!md.contains("**"), "default output must not wrap: {md}");
     }
 
@@ -2287,7 +2311,7 @@ mod tests {
             ..TableControl::default()
         };
         let doc = make_doc(vec![style("본문")], vec![para_with_table(t)]);
-        let md = to_markdown(&doc);
+        let md = body(to_markdown(&doc));
         assert!(md.contains("<!-- table 1×1"), "should pick bullet path: {md}");
         // Inline math survives in a bullet — `$…$` rather than a
         // multi-line `$$` block so the list structure is preserved.
