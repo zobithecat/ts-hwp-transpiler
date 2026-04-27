@@ -13,15 +13,13 @@
 //! numberings, lineSpacing, kerning flags, Panose typeInfo).
 //!
 //! Missing compared to a full writer:
-//!   * Bold / italic toggling on individual char shapes — the HWPX
-//!     `<hh:bold/>` / `<hh:italic/>` are presence-only and would
-//!     require structural insert / remove inside `<hh:charPr>`. The
-//!     unmutated round-trip path works (those bytes flow verbatim).
-//!   * Multi-script CharShape arrays (`<hh:fontRef>`, `<hh:ratio>`,
-//!     …) are not overlaid. Mutating them in IR will not flow into
-//!     the written file.
-//!   * Adding / removing whole shapes (new charPr, new paraPr) is
-//!     structural and not supported.
+//!   * Adding / removing whole shapes (new charPr, new paraPr,
+//!     fontface entries) is structural and not supported. The
+//!     unmutated round-trip path works because their bytes flow
+//!     verbatim.
+//!   * Gradation / image fill mutation — the IR's `Fill` doesn't
+//!     reflect these as typed fields, so the rewriter can't safely
+//!     overlay them. Solid-color fills are supported.
 //!   * Pictures / equations in paragraph controls don't emit back
 //!     into the XML; they still exist in the IR and would need their
 //!     own serialisers to reach the output.

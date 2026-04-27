@@ -327,6 +327,67 @@ fn mutating_char_shape_multi_script_arrays_flows_through_writer() {
     );
 }
 
+/// Mutation flow: toggling bold / italic on a CharShape (presence-only
+/// children in HWPX) must surface in the re-parsed document. Picks
+/// a charShape that doesn't already have both bold and italic.
+#[test]
+fn toggling_bold_italic_flows_through_writer() {
+    let Some(mut doc) = load_sample() else {
+        return;
+    };
+    if doc.doc_info.char_shapes.is_empty() {
+        return;
+    }
+    // Pick the first charShape that's not already both-on. Force
+    // both bold and italic bits on.
+    let target_idx = doc
+        .doc_info
+        .char_shapes
+        .iter()
+        .position(|cs| !cs.bold() || !cs.italic());
+    let Some(idx) = target_idx else {
+        eprintln!("skipping: every charShape already has bold+italic");
+        return;
+    };
+    doc.doc_info.char_shapes[idx].attr |= 0x0000_0003; // bold + italic
+
+    let bytes = HwpxWriter::default().write(&doc).expect("write");
+    let reloaded = HwpxReader.read(&bytes).expect("reload");
+
+    assert!(
+        reloaded.doc_info.char_shapes[idx].bold(),
+        "bold mutation lost on charShape[{idx}]"
+    );
+    assert!(
+        reloaded.doc_info.char_shapes[idx].italic(),
+        "italic mutation lost on charShape[{idx}]"
+    );
+}
+
+/// Mutation flow: turning bold OFF on a charShape that originally had
+/// it must surface in the re-parsed document — the writer needs to
+/// drop the original `<hh:bold/>` event from output.
+#[test]
+fn turning_bold_off_flows_through_writer() {
+    let Some(mut doc) = load_sample() else {
+        return;
+    };
+    let target_idx = doc.doc_info.char_shapes.iter().position(|cs| cs.bold());
+    let Some(idx) = target_idx else {
+        eprintln!("skipping: no charShape originally has bold on");
+        return;
+    };
+    doc.doc_info.char_shapes[idx].attr &= !0x0000_0002;
+
+    let bytes = HwpxWriter::default().write(&doc).expect("write");
+    let reloaded = HwpxReader.read(&bytes).expect("reload");
+
+    assert!(
+        !reloaded.doc_info.char_shapes[idx].bold(),
+        "bold-off mutation lost on charShape[{idx}]"
+    );
+}
+
 /// Mutation flow: editing `FontFace.name` on the IR before write must
 /// surface in the re-parsed document.
 #[test]

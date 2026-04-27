@@ -25,22 +25,26 @@
 //!     the element are touched).
 //!   * `<hh:strikeout shape=… color=…>` and `<hh:underline shape=… color=…>`
 //!     inside `<hh:charPr>` — from `CharShape::strike()`/
-//!     `underline_kind()` and the matching colour fields.
+//!     `underline_kind()` and the matching colour fields. Inserted
+//!     before `</hh:charPr>` when the IR wants the flag on but the
+//!     original document never carried the element.
 //!   * `<hh:fontRef>`, `<hh:ratio>`, `<hh:relSz>`, `<hh:spacing>`,
 //!     `<hh:offset>` (multi-script 7-attribute children of
 //!     `<hh:charPr>`) — from `CharShape::font_ids` / `ratios` /
 //!     `rel_sizes` / `char_spacings` / `char_offsets`.
+//!   * `<hh:bold/>` / `<hh:italic/>` (presence-only children of
+//!     `<hh:charPr>`) — IR-on inserts before `</hh:charPr>` when the
+//!     original lacked the element; IR-off skips an existing event's
+//!     bytes from output.
 //!   * `<hh:font face=…>` inside `<hh:fontface>` — from
 //!     `FontFace::name`.
 //!   * `<hc:winBrush faceColor=…>` inside `<hh:borderFill>` — from
 //!     the IR's solid colour fill (gradation / image fills are left
 //!     alone).
 //!
-//! Not yet handled — bold / italic toggling (presence-only children
-//! that need structural insert before `</hh:charPr>`), full add /
-//! remove of whole shapes, gradation / image fill mutation. The
-//! unmutated path round-trips these correctly because the rewriter
-//! never touches their bytes.
+//! Not yet handled — full add / remove of whole shapes, gradation /
+//! image fill mutation. The unmutated path round-trips these
+//! correctly because the rewriter never touches their bytes.
 
 use std::collections::HashMap;
 
@@ -61,6 +65,15 @@ pub fn rewrite_header_xml(original: &[u8], doc: &IrDocument) -> Result<Vec<u8>, 
     let mut fontface_index: usize = 0;
     let mut border_fill_id: Option<u32> = None;
 
+    // Track which presence-driven children appeared inside the current
+    // `<hh:charPr>`. On `</hh:charPr>` end we insert any missing ones
+    // that the IR wants enabled, and on entry we skip bold / italic
+    // events the IR wants disabled.
+    let mut seen_bold = false;
+    let mut seen_italic = false;
+    let mut seen_strikeout = false;
+    let mut seen_underline = false;
+
     let mut buf = Vec::new();
 
     loop {
@@ -79,6 +92,10 @@ pub fn rewrite_header_xml(original: &[u8], doc: &IrDocument) -> Result<Vec<u8>, 
                     }
                     "charPr" => {
                         char_pr_id = u32_attr(e, "id");
+                        seen_bold = false;
+                        seen_italic = false;
+                        seen_strikeout = false;
+                        seen_underline = false;
                         if let Some(id) = char_pr_id {
                             if let Some(shape) = doc.doc_info.char_shapes.get(id as usize) {
                                 let overrides = charpr_attr_overrides(shape);
@@ -106,6 +123,7 @@ pub fn rewrite_header_xml(original: &[u8], doc: &IrDocument) -> Result<Vec<u8>, 
                         border_fill_id = u32_attr(e, "id");
                     }
                     "strikeout" if char_pr_id.is_some() => {
+                        seen_strikeout = true;
                         rewrite_strikeout(
                             doc, original, &mut out, &mut cursor,
                             event_start, event_end,
@@ -113,11 +131,23 @@ pub fn rewrite_header_xml(original: &[u8], doc: &IrDocument) -> Result<Vec<u8>, 
                         )?;
                     }
                     "underline" if char_pr_id.is_some() => {
+                        seen_underline = true;
                         rewrite_underline(
                             doc, original, &mut out, &mut cursor,
                             event_start, event_end,
                             e, false, char_pr_id.unwrap(),
                         )?;
+                    }
+                    "bold" if char_pr_id.is_some() => {
+                        // Rare: `<hh:bold>` Start variant. Mark as
+                        // seen so the End handler doesn't insert a
+                        // duplicate. We don't skip the bytes because
+                        // we can't safely strip a Start/End span
+                        // here; the unmutated path keeps it intact.
+                        seen_bold = true;
+                    }
+                    "italic" if char_pr_id.is_some() => {
+                        seen_italic = true;
                     }
                     "fontRef" | "ratio" | "relSz" | "spacing" | "offset"
                         if char_pr_id.is_some() =>
@@ -207,6 +237,7 @@ pub fn rewrite_header_xml(original: &[u8], doc: &IrDocument) -> Result<Vec<u8>, 
                         }
                     }
                     "strikeout" if char_pr_id.is_some() => {
+                        seen_strikeout = true;
                         rewrite_strikeout(
                             doc, original, &mut out, &mut cursor,
                             event_start, event_end,
@@ -214,11 +245,43 @@ pub fn rewrite_header_xml(original: &[u8], doc: &IrDocument) -> Result<Vec<u8>, 
                         )?;
                     }
                     "underline" if char_pr_id.is_some() => {
+                        seen_underline = true;
                         rewrite_underline(
                             doc, original, &mut out, &mut cursor,
                             event_start, event_end,
                             e, true, char_pr_id.unwrap(),
                         )?;
+                    }
+                    "bold" if char_pr_id.is_some() => {
+                        seen_bold = true;
+                        let id = char_pr_id.unwrap();
+                        if let Some(shape) =
+                            doc.doc_info.char_shapes.get(id as usize)
+                        {
+                            if !shape.bold() {
+                                // IR says bold off — skip the event
+                                // bytes so the original `<hh:bold/>`
+                                // doesn't reappear in output.
+                                skip_event_bytes(
+                                    original, &mut out, &mut cursor,
+                                    event_start, event_end,
+                                );
+                            }
+                        }
+                    }
+                    "italic" if char_pr_id.is_some() => {
+                        seen_italic = true;
+                        let id = char_pr_id.unwrap();
+                        if let Some(shape) =
+                            doc.doc_info.char_shapes.get(id as usize)
+                        {
+                            if !shape.italic() {
+                                skip_event_bytes(
+                                    original, &mut out, &mut cursor,
+                                    event_start, event_end,
+                                );
+                            }
+                        }
                     }
                     "fontRef" | "ratio" | "relSz" | "spacing" | "offset"
                         if char_pr_id.is_some() =>
@@ -238,7 +301,37 @@ pub fn rewrite_header_xml(original: &[u8], doc: &IrDocument) -> Result<Vec<u8>, 
                 let name = local_name_from_bytes(name_bytes);
                 match name {
                     "paraPr" => para_pr_id = None,
-                    "charPr" => char_pr_id = None,
+                    "charPr" => {
+                        // Insert any presence-driven children the IR
+                        // wants on but the original lacked. Keeps
+                        // `</hh:charPr>` byte range intact — we splice
+                        // before it.
+                        if let Some(id) = char_pr_id {
+                            if let Some(shape) =
+                                doc.doc_info.char_shapes.get(id as usize)
+                            {
+                                let insertion = build_charpr_missing_inserts(
+                                    shape,
+                                    seen_bold,
+                                    seen_italic,
+                                    seen_strikeout,
+                                    seen_underline,
+                                );
+                                if !insertion.is_empty() {
+                                    insert_before_event(
+                                        original, &mut out, &mut cursor,
+                                        event_start, event_end,
+                                        &insertion,
+                                    );
+                                }
+                            }
+                        }
+                        char_pr_id = None;
+                        seen_bold = false;
+                        seen_italic = false;
+                        seen_strikeout = false;
+                        seen_underline = false;
+                    }
                     "fontface" => fontface_slot = None,
                     "borderFill" => border_fill_id = None,
                     _ => {}
@@ -439,6 +532,73 @@ fn replace_with_overlay(
     emit_tag_with_overrides(e, is_empty, overrides, out)?;
     *cursor = event_end;
     Ok(())
+}
+
+/// Drop an event's bytes from the output entirely. Whitespace before
+/// the event (in a separate `Event::Text`) still flows through, which
+/// can leave a tiny extra newline / indent where the element used to
+/// be — harmless to readers, slightly noisy on byte diff.
+fn skip_event_bytes(
+    original: &[u8],
+    out: &mut Vec<u8>,
+    cursor: &mut usize,
+    event_start: usize,
+    event_end: usize,
+) {
+    out.extend_from_slice(&original[*cursor..event_start]);
+    *cursor = event_end;
+}
+
+/// Splice arbitrary bytes in just before an event (typically an End
+/// tag) without disturbing the event's own bytes.
+fn insert_before_event(
+    original: &[u8],
+    out: &mut Vec<u8>,
+    cursor: &mut usize,
+    event_start: usize,
+    event_end: usize,
+    insertion: &[u8],
+) {
+    out.extend_from_slice(&original[*cursor..event_start]);
+    out.extend_from_slice(insertion);
+    out.extend_from_slice(&original[event_start..event_end]);
+    *cursor = event_end;
+}
+
+/// Build the bytes to splice before `</hh:charPr>` for any presence-
+/// driven children the IR wants enabled but the original didn't
+/// emit. Inserts `<hh:bold/>` / `<hh:italic/>` directly; for
+/// strikeout / underline the original convention always emits
+/// `shape="NONE"` when off, so we only need to insert when both the
+/// IR is on AND the document never carried the element. Returns an
+/// empty Vec when nothing needs inserting (the common case).
+fn build_charpr_missing_inserts(
+    shape: &CharShape,
+    seen_bold: bool,
+    seen_italic: bool,
+    seen_strikeout: bool,
+    seen_underline: bool,
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    if shape.bold() && !seen_bold {
+        out.extend_from_slice(b"<hh:bold/>");
+    }
+    if shape.italic() && !seen_italic {
+        out.extend_from_slice(b"<hh:italic/>");
+    }
+    if shape.strike() && !seen_strikeout {
+        let color = color_to_hex(shape.strike_color.unwrap_or(0));
+        out.extend_from_slice(b"<hh:strikeout shape=\"SOLID\" color=\"");
+        out.extend_from_slice(color.as_bytes());
+        out.extend_from_slice(b"\"/>");
+    }
+    if shape.underline_kind() != 0 && !seen_underline {
+        let color = color_to_hex(shape.underline_color);
+        out.extend_from_slice(b"<hh:underline shape=\"SOLID\" color=\"");
+        out.extend_from_slice(color.as_bytes());
+        out.extend_from_slice(b"\"/>");
+    }
+    out
 }
 
 fn emit_tag_with_overrides(
@@ -728,6 +888,101 @@ mod tests {
         // hatchColor + alpha preserved verbatim.
         assert!(s.contains(r##"hatchColor="#999999""##), "hatch preserved: {s}");
         assert!(s.contains(r#"alpha="0""#), "alpha preserved: {s}");
+    }
+
+    #[test]
+    fn bold_italic_inserted_before_end_when_ir_says_on() {
+        // Original lacks `<hh:bold/>` / `<hh:italic/>`. IR has both
+        // on. Rewriter should insert just before `</hh:charPr>`.
+        let xml = br##"<hh:head xmlns:hh="h">
+            <hh:charProperties>
+              <hh:charPr id="0" height="1000" textColor="#000000">
+                <hh:fontRef hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0"/>
+              </hh:charPr>
+            </hh:charProperties>
+          </hh:head>"##;
+        let mut doc = IrDocument::default();
+        let mut cs = CharShape::default();
+        cs.attr = 0x0000_0003; // bold + italic bits
+        doc.doc_info.char_shapes = vec![cs];
+        let out = rewrite_header_xml(xml, &doc).expect("rewrite");
+        let s = std::str::from_utf8(&out).unwrap();
+        assert!(s.contains("<hh:bold/>"), "bold inserted: {s}");
+        assert!(s.contains("<hh:italic/>"), "italic inserted: {s}");
+        let bold_pos = s.find("<hh:bold/>").unwrap();
+        let end_pos = s.find("</hh:charPr>").unwrap();
+        assert!(bold_pos < end_pos, "bold insert before End: {s}");
+    }
+
+    #[test]
+    fn bold_skipped_when_ir_says_off() {
+        // Original has `<hh:bold/>`. IR has bold off. Rewriter
+        // should drop the event from output.
+        let xml = br##"<hh:head xmlns:hh="h">
+            <hh:charProperties>
+              <hh:charPr id="0" height="1000" textColor="#000000">
+                <hh:fontRef hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0"/>
+                <hh:bold/>
+                <hh:italic/>
+              </hh:charPr>
+            </hh:charProperties>
+          </hh:head>"##;
+        let mut doc = IrDocument::default();
+        let cs = CharShape::default(); // attr = 0 → bold/italic off
+        doc.doc_info.char_shapes = vec![cs];
+        let out = rewrite_header_xml(xml, &doc).expect("rewrite");
+        let s = std::str::from_utf8(&out).unwrap();
+        assert!(!s.contains("<hh:bold/>"), "bold dropped: {s}");
+        assert!(!s.contains("<hh:italic/>"), "italic dropped: {s}");
+        // charPr / fontRef structure intact.
+        assert!(s.contains("<hh:fontRef"), "fontRef preserved: {s}");
+        assert!(s.contains("</hh:charPr>"), "End tag preserved: {s}");
+    }
+
+    #[test]
+    fn bold_italic_unchanged_when_ir_matches_original() {
+        // Original has bold (italic absent). IR matches. Output
+        // should preserve the original — no extra italic inserted.
+        let xml = br##"<hh:head xmlns:hh="h">
+            <hh:charProperties>
+              <hh:charPr id="0" height="1000" textColor="#000000">
+                <hh:fontRef hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0"/>
+                <hh:bold/>
+              </hh:charPr>
+            </hh:charProperties>
+          </hh:head>"##;
+        let mut doc = IrDocument::default();
+        let mut cs = CharShape::default();
+        cs.attr = 0x0000_0002; // bold only
+        doc.doc_info.char_shapes = vec![cs];
+        let out = rewrite_header_xml(xml, &doc).expect("rewrite");
+        let s = std::str::from_utf8(&out).unwrap();
+        assert_eq!(s.matches("<hh:bold/>").count(), 1, "bold once: {s}");
+        assert!(!s.contains("<hh:italic/>"), "no spurious italic: {s}");
+    }
+
+    #[test]
+    fn missing_strikeout_inserted_when_ir_strike_on() {
+        // Original lacks `<hh:strikeout/>` element entirely (rare —
+        // most HWPX always emits it). IR has strike=true. Insert.
+        let xml = br##"<hh:head xmlns:hh="h">
+            <hh:charProperties>
+              <hh:charPr id="0" height="1000" textColor="#000000">
+                <hh:fontRef hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0"/>
+              </hh:charPr>
+            </hh:charProperties>
+          </hh:head>"##;
+        let mut doc = IrDocument::default();
+        let mut cs = CharShape::default();
+        cs.attr = 1 << 21; // strike bit
+        cs.strike_color = Some(0x0000_00FF); // R=FF
+        doc.doc_info.char_shapes = vec![cs];
+        let out = rewrite_header_xml(xml, &doc).expect("rewrite");
+        let s = std::str::from_utf8(&out).unwrap();
+        assert!(
+            s.contains(r##"<hh:strikeout shape="SOLID" color="#FF0000"/>"##),
+            "strikeout inserted: {s}"
+        );
     }
 
     #[test]
