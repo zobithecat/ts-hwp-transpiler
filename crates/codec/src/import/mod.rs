@@ -7,3 +7,4 @@
 //! depends on.
 
 pub mod markdown;
+pub mod markdown_llm;

@@ -33,11 +33,26 @@ use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 /// Parse a UTF-8 Markdown string into an [`IrDocument`].
 ///
-/// One Section, no DocInfo enrichment beyond the synthesised
-/// ParaShape table. Always succeeds for valid UTF-8 input — the
-/// `Result` shape mirrors HWP / HWPX readers so callers can treat
-/// all import paths uniformly.
+/// Auto-dispatches: if the input is recognisably the LLM emit format
+/// (leading `SECTION[id=…]` line), routes to
+/// [`super::markdown_llm::from_llm_markdown`]; otherwise parses as
+/// CommonMark with GFM tables.
+///
+/// Always succeeds for valid UTF-8 input — the `Result` shape mirrors
+/// HWP / HWPX readers so callers can treat all import paths
+/// uniformly.
 pub fn from_markdown(src: &str) -> Result<IrDocument, IrError> {
+    if super::markdown_llm::looks_like_llm_format(src) {
+        return super::markdown_llm::from_llm_markdown(src);
+    }
+    from_gfm_markdown(src)
+}
+
+/// Plain GFM-Markdown branch of `from_markdown`. Exposed as its own
+/// fn so the LLM dispatcher can opt in / out cleanly, and tests can
+/// target one path without the auto-detect clouding which entrypoint
+/// they exercised.
+pub fn from_gfm_markdown(src: &str) -> Result<IrDocument, IrError> {
     let mut doc = IrDocument::default();
     doc.doc_info.para_shapes = synthesise_heading_para_shapes();
     doc.doc_info.char_shapes = synthesise_heading_char_shapes();
