@@ -200,6 +200,11 @@ async function handleFile(file: File): Promise<void> {
     ourIr = null;
   }
 
+  if (isMarkdownFile(file.name)) {
+    await handleMarkdownFile(file);
+    return;
+  }
+
   const buffer = await file.arrayBuffer();
   const bytes = new Uint8Array(buffer);
 
@@ -242,6 +247,59 @@ async function handleFile(file: File): Promise<void> {
   if (activeTab === "editor") {
     void ensureEditorLoaded();
   }
+}
+
+/// `.md` / `.markdown` upload path. Reads as UTF-8 text, runs through
+/// `importMarkdown`, and registers the resulting IR exactly like a
+/// HWP/HWPX load — `ourIr` points at the imported doc so all three
+/// panes (Markdown / HTML preview / .hwpx download) work against it.
+/// The rhwp-editor iframe stays empty for this path because we don't
+/// have HWP bytes to feed it; clicking the .hwpx download button
+/// produces those after the fact.
+async function handleMarkdownFile(file: File): Promise<void> {
+  const text = await file.text();
+  // Editor iframe has nothing to consume from a .md upload, so
+  // clear any leftover buffer state from a previous HWP load.
+  lastBuffer = null;
+  lastFileName = null;
+  lastBufferLoadedInEditor = false;
+
+  const started = performance.now();
+  let importedHandle: number;
+  try {
+    importedHandle = importMarkdown(text);
+  } catch (err) {
+    ourIr = null;
+    markdownEl.textContent = "";
+    copyBtn.disabled = true;
+    mdDlBtn.disabled = true;
+    hwpxDlBtn.disabled = true;
+    pdfBtn.disabled = true;
+    setStatus(`importMarkdown 실패: ${String(err)}`, true);
+    return;
+  }
+
+  ourIr = importedHandle;
+  // Show the *original* uploaded Markdown in the right pane so the
+  // user sees what they fed in. Re-exporting through `exportMarkdown`
+  // would round-trip-and-lose-fidelity, which is misleading at upload
+  // time. The HTML preview pane below renders our IR via exportHtml
+  // so the user can sanity-check the import did the right thing.
+  markdownEl.textContent = text;
+  copyBtn.disabled = text.length === 0;
+  mdDlBtn.disabled = text.length === 0;
+  hwpxDlBtn.disabled = text.length === 0;
+  if (activeTab === "html") {
+    renderStructuredHtml();
+  }
+  pdfBtn.disabled = activeTab !== "html";
+  const ms = Math.round(performance.now() - started);
+  setStatus(`loaded .md in ${ms}ms · ${text.length.toLocaleString()} chars`);
+}
+
+function isMarkdownFile(name: string): boolean {
+  const lower = name.toLowerCase();
+  return lower.endsWith(".md") || lower.endsWith(".markdown");
 }
 
 /// Strip the directory path and trailing extension from a filename —
