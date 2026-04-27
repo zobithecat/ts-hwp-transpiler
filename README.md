@@ -9,9 +9,12 @@
 시키되 구조 손실 없이 처리하고, 결과물을 일반 MD (LLM·에디터용) 또는
 고충실도 미리보기 (사람용) 두 형태로 모두 렌더링하는 것.
 
-> 상태: 초기 — reader는 읽기 경로를 잘 다루고 writer는 verbatim 캐시로
-> 라운드트립하며, 마크다운 export는 테스트 코퍼스에서 충분히 사용 가능.
-> WASM과 미리보기 레이어는 스텁 상태. 현재 진행 상황은
+> 상태: HWP5/HWPX 양쪽 reader/writer 동작 중, HWPX writer는
+> DocInfo-side mutation도 surgical rewriter로 round-trip. WASM은
+> handle-based 레지스트리로 큰 파일까지 처리하며 Vite 데모에서 라이브.
+> 의미 구조 기반 HTML preview + Markdown export 모두 실문서 fixture로
+> 검증됨. 원본 페이지의 픽셀 단위 fidelity 뷰는 `@rhwp/editor` iframe
+> 임베드에 위임 — 자체 구현 안 함. 현재 진행 상황은
 > `docs/memory/CURRENT.md` 참고.
 
 ## 이 프로젝트가 이미 보여준 가치
@@ -175,38 +178,67 @@ npm run dev                       # http://localhost:5173
 
 ## 현재 동작하는 것
 
-- **/FileHeader, /DocInfo, /BodyText/Section{N}** — 타입드 read +
-  verbatim 스트림 캐시를 통한 바이트 동일 라운드트립 (mutate된 record는
-  re-encode 트리거).
+- **HWP5 read/write** — `/FileHeader`, `/DocInfo`, `/BodyText/Section{N}`,
+  `/BinData/*` 모두 타입드 read + verbatim 스트림 캐시 기반 round-trip.
+  Mutate된 record는 re-encode를 트리거하고, 안 건드린 스트림은 byte-equal
+  유지.
+- **HWPX read/write** — ZIP+XML 컨테이너 분해, `Contents/section{N}.xml`
+  IR 왕복, `BinData/image{N}.{ext}` 자동 promotion. `Contents/header.xml`
+  은 **surgical rewriter**가 처리 — DocInfo IR mutation
+  (`para_shapes` align, `char_shapes` height/textColor/strike/underline,
+  `font_faces` 이름, `border_fills` solid color)이 출력에 반영되며,
+  IR이 노출하지 않은 영역(스타일·numbering·lineSpacing·typeInfo Panose)
+  은 verbatim 통과해 손실 없음.
 - **DocInfo 레코드** 타입화: `DocumentProperties`, `IdMappings`,
-  `FaceName ×7 슬롯`, `BorderFill`, `CharShape`, `ParaShape`,
-  `Style`, `BinData`. 미타입 태그는 `raw_records`로 무손실 통과.
-- **BodyText 레코드** 타입화: paragraph header / text / char-shape
-  runs / line segments, `LIST_HEADER` (cell), `TABLE` + cells,
-  그리고 `gso → SHAPE_COMPONENT → SHAPE_COMPONENT_PICTURE` 체인을
-  `ControlKind::Picture` 로.
-- **임베디드 바이너리** — `/BinData/<id>.<ext>` 스트림이
-  `IrDocument.bin_data`로 들어가며 MIME 자동 결정.
-- **마크다운 export** — 여러 단계 품질 개선: 헤딩 감지,
+  `FaceName ×7 슬롯`, `BorderFill`, `CharShape`, `ParaShape`, `Style`,
+  `BinData`. 미타입 태그는 `raw_records`로 무손실 통과.
+- **BodyText 레코드** 타입화: paragraph header / text / char-shape runs /
+  line segments, `LIST_HEADER` (cell), `TABLE` + cells, gso →
+  SHAPE_COMPONENT → SHAPE_COMPONENT_PICTURE 체인을 `ControlKind::Picture`
+  로. HWPX `<hp:pic>` 도 동일 IR로 디코드.
+- **임베디드 바이너리** — HWP5 `/BinData/*` (DEFLATE 자동 해제) +
+  HWPX `BinData/*` 둘 다 `IrDocument.bin_data`로 promotion. MIME
+  자동 결정. 레거시 BMP/TIFF는 미리보기용 JPEG 트랜스코딩.
+- **마크다운 export** — 헤딩 감지(스타일 이름 + 숫자 prefix 폴백),
   colspan 그리드 확장, 단일행 박스 표 → 본문 변환, wrapper 표 unwrap,
   긴 셀 nested sub-bullet, 빈 셀 range 압축, 한컴 PUA 글머리표
-  (`󰊱` 등) → 표준 `①..⑳` 정규화. 병합 셀 정보는
-  `[r,c] span N×M:` annotation으로 무손실 보존 (시각적 렌더링은
-  미리보기 레이어 책임).
+  (`󰊱` 등) → 표준 `①..⑳` 정규화. 병합 셀은 `[r,c] span N×M:`
+  annotation으로 무손실 보존.
+- **수식 → LaTeX** — HWP equation script를 토크나이즈해 LaTeX로 출력.
+  MD/HTML export 양쪽에 wired.
+- **HTML preview (구조형)** — 위치 기반 stable IDs (`sec-`, `par-`,
+  `tbl-`, `cell-`, `fig-`, `cap-`), `<section class="hwp-chapter
+  hwp-lv-N">` 중첩 챕터, ParaShape align → `text-align`,
+  `aspect-ratio` 보존, base64 data URI 인라인 그림. 픽셀 fidelity 뷰는
+  rhwp iframe에 위임.
+- **WASM + 데모** — handle-based doc registry (62MB+ 처리), rhwp-editor
+  iframe lazy-load, HTML/MD 탭 전환, PDF/MD 다운로드.
 
-TRL R&D 계획서 fixture (5 MB, 53 표, 9 임베디드 이미지) 기준으로
-바이트 동일 라운드트립 + 가독성 있는 마크다운 export 모두 통과.
+TRL R&D 계획서 fixture (5 MB, 53 표, 9 임베디드 이미지) + 실 사업계획서
+HWPX (3 MB, 그림 다수) 기준으로 round-trip + export 모두 통과.
 
 ## 아직 없는 것
 
-- **마크다운 writer** (md → hwp) 가 다음 큰 단계. 현재는 read 방향만
-  end-to-end; writer surface는 verbatim 캐시 통과.
-- **WASM 브라우저 미리보기** — `crates/wasm`, `crates/render` 가
-  스캐폴드는 있지만 실제 렌더러 미구현.
-- **이미지 마크다운 emit** — 그림은 IR로 파싱되지만 CLI가 아직
-  사이드카 파일 (`<doc>.assets/`) 을 dump 안 함; `MdOptions
-  .assets_path` 는 있고 wiring 진행 중.
-- **캡션, 수식, 각주, 변경 이력 등** — verbatim 보존되지만 표면화 안 됨.
+- **MD → HWP/HWPX 진짜 양방향**의 마무리 — read/write IR은 동작하지만
+  새 문서를 from-scratch로 쓸 때 일부 미타입 레코드 (`ID_MAPPINGS`,
+  `NUMBERING`, `FACE_NAME emit`, `TRACK_CHANGE_*`, `LAYOUT_COMPATIBILITY`)
+  는 hwplib 템플릿 번들에 의존. typed encoders로 점진 대체 중.
+- **HWPX writer Phase 2** — `<hh:bold/>`/`<hh:italic/>` 토글
+  (presence-only structural insert), 멀티스크립트 CharShape 배열
+  (`<hh:fontRef>`, `<hh:ratio>` 등), paraPr/charPr 추가·제거, gradation
+  /image fill mutation. Unmutated round-trip은 verbatim으로 통과되므로
+  영향 없음.
+- **이미지 마크다운 사이드카 dump** — IR 측 그림은 파싱되어 있고
+  `MdOptions.assets_path` wiring 진행 중. CLI에서 `<doc>.assets/` dump
+  미완.
+- **각주·변경 이력 표면화** — verbatim 보존은 되지만 export 측에서
+  의미 단위로 surface 안 됨.
+
+## 자체 구현하지 않는 것
+
+- **원본 페이지 픽셀 fidelity 렌더러** — `@rhwp/editor` iframe 임베드로
+  대체. 데모의 첫 탭이 rhwp 뷰. 우리 HTML preview는 의미 구조 표현
+  전용으로 유지.
 
 ## 문서
 
