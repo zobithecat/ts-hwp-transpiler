@@ -66,7 +66,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use hwp_transpiler_core::ir::{CharShape, Fill, IrDocument, IrError, ParaShape};
+use hwp_transpiler_core::ir::{CharShape, Fill, IrDocument, IrError, ParaShape, Style};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 
@@ -114,6 +114,11 @@ pub fn rewrite_header_xml(original: &[u8], doc: &IrDocument) -> Result<Vec<u8>, 
     // by element name. We never nest these containers in HWPX so a
     // single Option suffices.
     let mut container: Option<HashSet<u32>> = None;
+    // Styles live in a sibling container (`<hh:styles>`); track its
+    // own seen-id set so we can splice missing IR-side styles before
+    // its End. Separate from `container` because the element name
+    // differs and we may technically encounter both in any order.
+    let mut styles_container: Option<HashSet<u32>> = None;
     let mut skip: Option<SkipState> = None;
 
     let mut buf = Vec::new();
@@ -163,6 +168,29 @@ pub fn rewrite_header_xml(original: &[u8], doc: &IrDocument) -> Result<Vec<u8>, 
                     }
                     "charProperties" => {
                         container = Some(HashSet::new());
+                    }
+                    "styles" => {
+                        styles_container = Some(HashSet::new());
+                    }
+                    "style" if styles_container.is_some() => {
+                        // Rare Start variant `<hh:style ...>...</hh:style>`.
+                        // Track id; skip the span if IR removed it.
+                        let id = u32_attr(e, "id");
+                        if let (Some(id), Some(c)) = (id, styles_container.as_mut()) {
+                            c.insert(id);
+                        }
+                        if let Some(id) = id {
+                            if (id as usize) >= doc.doc_info.styles.len() {
+                                out.extend_from_slice(&original[cursor..event_start]);
+                                cursor = event_end;
+                                skip = Some(SkipState {
+                                    elem_name: "style".into(),
+                                    depth: 1,
+                                });
+                                buf.clear();
+                                continue;
+                            }
+                        }
                     }
                     "paraPr" => {
                         let id = u32_attr(e, "id");
@@ -335,6 +363,28 @@ pub fn rewrite_header_xml(original: &[u8], doc: &IrDocument) -> Result<Vec<u8>, 
                             // — there's no align child to overlay.
                         }
                     }
+                    "style" if styles_container.is_some() => {
+                        // Self-closing `<hh:style id=N/>` is the
+                        // typical form. Track the id and drop it if
+                        // IR has truncated past it. Other attributes
+                        // (name / paraPrIDRef / charPrIDRef …) flow
+                        // through verbatim — IR-side mutation of an
+                        // existing style isn't supported in this pass
+                        // because the parser doesn't surface the
+                        // styles container to the IR.
+                        let id = u32_attr(e, "id");
+                        if let (Some(id), Some(c)) = (id, styles_container.as_mut()) {
+                            c.insert(id);
+                        }
+                        if let Some(id) = id {
+                            if (id as usize) >= doc.doc_info.styles.len() {
+                                skip_event_bytes(
+                                    original, &mut out, &mut cursor,
+                                    event_start, event_end,
+                                );
+                            }
+                        }
+                    }
                     "font" => {
                         rewrite_font_event(
                             doc, original, &mut out, &mut cursor,
@@ -481,6 +531,27 @@ pub fn rewrite_header_xml(original: &[u8], doc: &IrDocument) -> Result<Vec<u8>, 
                             }
                         }
                         container = None;
+                    }
+                    "styles" => {
+                        if let Some(c) = styles_container.as_ref() {
+                            let mut insertion = Vec::new();
+                            for (idx, style) in
+                                doc.doc_info.styles.iter().enumerate()
+                            {
+                                let id = idx as u32;
+                                if !c.contains(&id) {
+                                    emit_new_style(id, style, &mut insertion);
+                                }
+                            }
+                            if !insertion.is_empty() {
+                                insert_before_event(
+                                    original, &mut out, &mut cursor,
+                                    event_start, event_end,
+                                    &insertion,
+                                );
+                            }
+                        }
+                        styles_container = None;
                     }
                     "paraPr" => para_pr_id = None,
                     "charPr" => {
@@ -745,6 +816,36 @@ fn insert_before_event(
     out.extend_from_slice(insertion);
     out.extend_from_slice(&original[event_start..event_end]);
     *cursor = event_end;
+}
+
+/// Emit a from-scratch `<hh:style>` element for an IR-side style.
+/// HWPX style schema: `id`, `type` (PARA / CHAR), `name`, `engName`,
+/// `paraPrIDRef`, `charPrIDRef`, `lockForm`. We always emit them as
+/// self-closing — the schema allows children but our IR doesn't carry
+/// any.
+fn emit_new_style(id: u32, style: &Style, out: &mut Vec<u8>) {
+    let style_type = if (style.properties & 0x07) == 1 { "CHAR" } else { "PARA" };
+    out.extend_from_slice(b"<hh:style id=\"");
+    out.extend_from_slice(id.to_string().as_bytes());
+    out.extend_from_slice(b"\" type=\"");
+    out.extend_from_slice(style_type.as_bytes());
+    out.extend_from_slice(b"\" name=\"");
+    let mut escaped = Vec::new();
+    xml_escape_attr_value(&style.name, &mut escaped);
+    out.extend_from_slice(&escaped);
+    out.extend_from_slice(b"\" engName=\"");
+    let mut escaped = Vec::new();
+    xml_escape_attr_value(&style.english_name, &mut escaped);
+    out.extend_from_slice(&escaped);
+    out.extend_from_slice(b"\" paraPrIDRef=\"");
+    out.extend_from_slice(style.para_shape_id.to_string().as_bytes());
+    out.extend_from_slice(b"\" charPrIDRef=\"");
+    out.extend_from_slice(style.char_shape_id.to_string().as_bytes());
+    out.extend_from_slice(b"\" lockForm=\"0\" nextStyleIDRef=\"");
+    out.extend_from_slice(style.next_style_id.to_string().as_bytes());
+    out.extend_from_slice(b"\" langID=\"");
+    out.extend_from_slice(style.lang_id.to_string().as_bytes());
+    out.extend_from_slice(b"\"/>");
 }
 
 /// Emit a from-scratch `<hh:paraPr>` block for an IR-side paraShape
