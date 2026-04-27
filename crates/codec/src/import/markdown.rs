@@ -1,15 +1,23 @@
 //! Markdown → [`IrDocument`] importer.
 //!
-//! Phase-1 scope: ATX-style headings (`#` … `######`) and plain
-//! paragraphs. Inline emphasis (`**bold**`, `*italic*`) is decoded
-//! via pulldown-cmark events but flattened to plain text in the IR
-//! for now — typed `CharShapeRun` decoration is the next iteration.
+//! Supported blocks:
+//!   * ATX-style headings (`#` … `######`).
+//!   * Plain paragraphs (soft breaks → spaces, hard breaks → `\n`).
+//!   * GFM pipe tables (uniform grid, `col_span = row_span = 1` per
+//!     cell, no merge). Each table emits a wrapper `Paragraph`
+//!     carrying a single `ControlKind::Table` control with text set
+//!     to the IR's `\u{FFFC}` object-replacement marker, matching
+//!     the convention HWP / HWPX writers expect.
 //!
-//! Tables, lists, code blocks, links, images, equations, and the
-//! domain-specific hint annotations the exporter emits (cell merge
-//! spans, role tags, …) are not yet handled. They land as text in
-//! the surrounding paragraph rather than throwing — graceful
-//! degradation while we iterate.
+//! Inline emphasis (`**bold**`, `*italic*`) is decoded via
+//! pulldown-cmark events but flattened to plain text in the IR for
+//! now — typed `CharShapeRun` decoration is the next iteration.
+//!
+//! Lists, code blocks, links, images, equations, and the domain-
+//! specific hint annotations the exporter emits (cell merge spans,
+//! role tags, …) are not yet handled. They land as text in the
+//! surrounding paragraph rather than throwing — graceful degradation
+//! while we iterate.
 //!
 //! Output shape — every imported document is one `Section`,
 //! paragraphs collected in source order, with synthesised
@@ -18,9 +26,10 @@
 //! heading bits via `ParaShape::heading_level()`.
 
 use hwp_transpiler_core::ir::{
-    IrDocument, IrError, Paragraph, ParagraphHeader, ParaShape, Section, Style,
+    Control, ControlKind, IrDocument, IrError, Paragraph, ParagraphHeader, ParaShape, Section,
+    Style, TableCell, TableControl,
 };
-use pulldown_cmark::{Event, HeadingLevel, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 /// Parse a UTF-8 Markdown string into an [`IrDocument`].
 ///
@@ -36,7 +45,7 @@ pub fn from_markdown(src: &str) -> Result<IrDocument, IrError> {
     let mut section = Section::default();
     let mut state = ParseState::Idle;
 
-    for event in Parser::new(src) {
+    for event in Parser::new_ext(src, Options::ENABLE_TABLES) {
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
                 flush(&mut state, &mut section);
@@ -52,30 +61,69 @@ pub fn from_markdown(src: &str) -> Result<IrDocument, IrError> {
                     text: String::new(),
                 };
             }
-            Event::Text(t) | Event::Code(t) => {
-                if let ParseState::Collecting { text, .. } = &mut state {
-                    text.push_str(&t);
+            Event::Start(Tag::Table(alignments)) => {
+                flush(&mut state, &mut section);
+                state = ParseState::Table(TableBuilder::new(alignments.len() as u16));
+            }
+            Event::Start(Tag::TableHead) | Event::Start(Tag::TableRow) => {
+                if let ParseState::Table(t) = &mut state {
+                    t.current_col = 0;
                 }
             }
-            Event::SoftBreak => {
-                if let ParseState::Collecting { text, .. } = &mut state {
-                    text.push(' ');
+            Event::Start(Tag::TableCell) => {
+                if let ParseState::Table(t) = &mut state {
+                    t.in_cell = true;
+                    t.cell_text.clear();
                 }
             }
-            Event::HardBreak => {
-                if let ParseState::Collecting { text, .. } = &mut state {
-                    text.push('\n');
+            Event::End(TagEnd::TableCell) => {
+                if let ParseState::Table(t) = &mut state {
+                    t.finish_cell();
                 }
             }
-            // (other branches unchanged)
+            Event::End(TagEnd::TableHead) | Event::End(TagEnd::TableRow) => {
+                if let ParseState::Table(t) = &mut state {
+                    t.current_row += 1;
+                }
+            }
+            Event::End(TagEnd::Table) => {
+                if let ParseState::Table(t) =
+                    std::mem::replace(&mut state, ParseState::Idle)
+                {
+                    let mut wrapper = Paragraph::default();
+                    wrapper.text = "\u{FFFC}".to_string();
+                    wrapper.controls.push(Control {
+                        kind: ControlKind::Table(t.finish()),
+                        caption_text: None,
+                    });
+                    section.paragraphs.push(wrapper);
+                }
+            }
+            Event::Text(t) | Event::Code(t) => match &mut state {
+                ParseState::Collecting { text, .. } => text.push_str(&t),
+                ParseState::Table(b) if b.in_cell => b.cell_text.push_str(&t),
+                _ => {}
+            },
+            Event::SoftBreak => match &mut state {
+                ParseState::Collecting { text, .. } => text.push(' '),
+                ParseState::Table(b) if b.in_cell => b.cell_text.push(' '),
+                _ => {}
+            },
+            Event::HardBreak => match &mut state {
+                ParseState::Collecting { text, .. } => text.push('\n'),
+                ParseState::Table(b) if b.in_cell => b.cell_text.push('\n'),
+                _ => {}
+            },
             Event::End(TagEnd::Heading(_)) | Event::End(TagEnd::Paragraph) => {
                 flush(&mut state, &mut section);
             }
-            // Inline emphasis is observed via Start(Emphasis) /
-            // End(Emphasis), with the wrapped Text events between.
-            // First slice surfaces the inner text without typed
-            // formatting — collection just keeps writing into the
-            // current paragraph's buffer through the wrapper events.
+            // Inline emphasis (`**bold**`, `*italic*`) opens with
+            // Start(Strong)/Start(Emphasis), encloses Text events,
+            // closes with the matching End. First slice surfaces the
+            // inner text without typed formatting — the wrapper
+            // events fall through to the catch-all here and the
+            // contained Text events flow to whichever buffer is
+            // currently active.
             _ => {}
         }
     }
@@ -94,6 +142,67 @@ enum ParseState {
     /// existing exporter (which keys off `style.name`) and any future
     /// `ParaShape::heading_level()` consumer agree.
     Collecting { level: u8, text: String },
+    /// Inside a `<Tag::Table>` — rows / cells accumulate into
+    /// `TableBuilder` until `End(Table)` flushes them as a single
+    /// wrapper Paragraph carrying a `ControlKind::Table` control.
+    Table(TableBuilder),
+}
+
+/// Accumulator for the current Markdown table. MD tables are uniform
+/// grids (no merge), so cells always have `col_span = row_span = 1`
+/// and every row carries exactly `cols` cells.
+struct TableBuilder {
+    cols: u16,
+    current_row: u16,
+    current_col: u16,
+    cells: Vec<TableCell>,
+    cell_text: String,
+    in_cell: bool,
+}
+
+impl TableBuilder {
+    fn new(cols: u16) -> Self {
+        Self {
+            cols,
+            current_row: 0,
+            current_col: 0,
+            cells: Vec::new(),
+            cell_text: String::new(),
+            in_cell: false,
+        }
+    }
+
+    fn finish_cell(&mut self) {
+        if !self.in_cell {
+            return;
+        }
+        let mut para = Paragraph::default();
+        para.text = std::mem::take(&mut self.cell_text);
+        let cell = TableCell {
+            row: self.current_row,
+            col: self.current_col,
+            col_span: 1,
+            row_span: 1,
+            para_count: 1,
+            paragraphs: vec![para],
+            ..TableCell::default()
+        };
+        self.cells.push(cell);
+        self.current_col += 1;
+        self.in_cell = false;
+    }
+
+    fn finish(self) -> TableControl {
+        let rows = self.current_row;
+        let row_cell_counts = vec![self.cols; rows as usize];
+        TableControl {
+            rows,
+            cols: self.cols,
+            row_cell_counts,
+            cells: self.cells,
+            ..TableControl::default()
+        }
+    }
 }
 
 fn flush(state: &mut ParseState, section: &mut Section) {
@@ -247,6 +356,89 @@ mod tests {
         let doc = from_markdown("a **bold** word").expect("parse");
         let p = &doc.sections[0].paragraphs[0];
         assert_eq!(p.text, "a bold word");
+    }
+
+    #[test]
+    fn simple_table_creates_wrapper_paragraph_with_table_control() {
+        let md = "| A | B |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |";
+        let doc = from_markdown(md).expect("parse");
+        let paras = &doc.sections[0].paragraphs;
+        assert_eq!(paras.len(), 1, "table should land in one wrapper");
+        let p = &paras[0];
+        assert_eq!(p.text, "\u{FFFC}", "wrapper text marker present");
+        assert_eq!(p.controls.len(), 1, "exactly one control");
+        let table = match &p.controls[0].kind {
+            ControlKind::Table(t) => t,
+            _ => panic!("expected table control"),
+        };
+        assert_eq!(table.cols, 2);
+        assert_eq!(table.rows, 3, "header + 2 body rows");
+        assert_eq!(table.cells.len(), 6);
+    }
+
+    #[test]
+    fn table_cell_positions_filled_in_row_major_order() {
+        let md = "| A | B |\n|---|---|\n| 1 | 2 |";
+        let doc = from_markdown(md).expect("parse");
+        let table = match &doc.sections[0].paragraphs[0].controls[0].kind {
+            ControlKind::Table(t) => t,
+            _ => panic!(),
+        };
+        let positions: Vec<(u16, u16, &str)> = table
+            .cells
+            .iter()
+            .map(|c| (c.row, c.col, c.paragraphs[0].text.as_str()))
+            .collect();
+        assert_eq!(
+            positions,
+            vec![
+                (0, 0, "A"),
+                (0, 1, "B"),
+                (1, 0, "1"),
+                (1, 1, "2"),
+            ],
+        );
+    }
+
+    #[test]
+    fn table_cells_default_to_unit_spans() {
+        let md = "| A |\n|---|\n| 1 |";
+        let doc = from_markdown(md).expect("parse");
+        let table = match &doc.sections[0].paragraphs[0].controls[0].kind {
+            ControlKind::Table(t) => t,
+            _ => panic!(),
+        };
+        for c in &table.cells {
+            assert_eq!(c.col_span, 1);
+            assert_eq!(c.row_span, 1);
+        }
+    }
+
+    #[test]
+    fn body_then_table_then_body_preserves_section_order() {
+        let md = "Before.\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\nAfter.";
+        let doc = from_markdown(md).expect("parse");
+        let ps = &doc.sections[0].paragraphs;
+        assert_eq!(ps.len(), 3);
+        assert_eq!(ps[0].text, "Before.");
+        assert!(matches!(
+            ps[1].controls[0].kind,
+            ControlKind::Table(_)
+        ));
+        assert_eq!(ps[2].text, "After.");
+    }
+
+    #[test]
+    fn table_cell_with_inline_emphasis_flattens_to_text() {
+        // First slice: bold/italic in cells emit plain text, same as
+        // body paragraphs.
+        let md = "| Plain | Styled |\n|---|---|\n| a | **bold** |";
+        let doc = from_markdown(md).expect("parse");
+        let table = match &doc.sections[0].paragraphs[0].controls[0].kind {
+            ControlKind::Table(t) => t,
+            _ => panic!(),
+        };
+        assert_eq!(table.cells[3].paragraphs[0].text, "bold");
     }
 
     #[test]

@@ -72,6 +72,34 @@ fn empty_input_round_trips_to_empty() {
 }
 
 #[test]
+fn simple_table_round_trips_via_existing_exporter() {
+    let md = "| A | B |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |";
+    let doc = from_markdown(md).expect("import");
+    // Sanity: re-exporting must produce a pipe table that contains
+    // the four data cells. The exact whitespace depends on the
+    // exporter's column-width heuristic, so don't byte-compare.
+    let back = to_markdown(&doc);
+    assert!(back.contains("| A"), "header A: {back}");
+    assert!(back.contains("| B"), "header B: {back}");
+    assert!(back.contains("| 1"), "cell 1,1: {back}");
+    assert!(back.contains("| 4"), "cell 2,2: {back}");
+    // Markdown table separator line.
+    assert!(back.contains("|---") || back.contains("| ---"),
+        "separator row present: {back}");
+}
+
+#[test]
+fn body_then_table_then_body_round_trips_each_block() {
+    let md = "Intro paragraph.\n\n| K | V |\n|---|---|\n| name | foo |\n\nClosing.";
+    let doc = from_markdown(md).expect("import");
+    let back = to_markdown(&doc);
+    assert!(back.contains("Intro paragraph."), "lead body: {back}");
+    assert!(back.contains("| K"), "table header: {back}");
+    assert!(back.contains("| name"), "table cell: {back}");
+    assert!(back.contains("Closing."), "trailing body: {back}");
+}
+
+#[test]
 fn multi_line_body_paragraph_collapses_to_single_line() {
     // Soft breaks become spaces in the IR's paragraph text. A
     // re-export emits a single line. Acceptable round-trip — the
