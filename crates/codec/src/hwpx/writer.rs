@@ -13,10 +13,10 @@
 //! numberings, lineSpacing, kerning flags, Panose typeInfo).
 //!
 //! Missing compared to a full writer:
-//!   * Adding / removing whole shapes (new charPr, new paraPr,
-//!     fontface entries) is structural and not supported. The
-//!     unmutated round-trip path works because their bytes flow
-//!     verbatim.
+//!   * fontface add / remove — entries are partitioned by `lang`
+//!     slot (HANGUL / LATIN / …), each with its own count. Per-slot
+//!     accounting needs separate work. paraPr / charPr add+remove is
+//!     supported via the rewriter's container-end splice path.
 //!   * Gradation / image fill mutation — the IR's `Fill` doesn't
 //!     reflect these as typed fields, so the rewriter can't safely
 //!     overlay them. Solid-color fills are supported.

@@ -478,19 +478,21 @@ fn parse_one_para_pr<R: BufRead>(reader: &mut Reader<R>) -> Result<ParaShape, Ir
             .map_err(|e| xml_err("paraPr", e))?
         {
             Event::End(e) if local_name_bytes(e.name().as_ref()) == "paraPr" => break,
-            Event::Start(e) | Event::Empty(e) if local_name(&e) == "align" => {
+            Event::Empty(e) if local_name(&e) == "align" => {
+                // Self-closing — already consumed, just decode attrs.
                 if let Some(h) = string_attr(&e, "horizontal") {
                     shape.attribute = (shape.attribute & !0x07) | align_bits_from_hwpx(&h);
                 }
-                // Consume children of `<hh:align>` in case it was a
-                // non-empty element (rare).
-                if matches!(
-                    reader.read_event_into(&mut Vec::new())
-                        .map_err(|e| xml_err("align", e))?,
-                    Event::End(_)
-                ) {
-                    // Normal close, already consumed.
+            }
+            Event::Start(e) if local_name(&e) == "align" => {
+                // Non-empty `<hh:align>...</hh:align>` (rare). Decode
+                // attrs on the Start, then consume children up to the
+                // matching End so the surrounding paraPr loop doesn't
+                // interpret them as siblings.
+                if let Some(h) = string_attr(&e, "horizontal") {
+                    shape.attribute = (shape.attribute & !0x07) | align_bits_from_hwpx(&h);
                 }
+                skip_until_close(reader, e.name().as_ref())?;
             }
             Event::Start(e) => {
                 skip_until_close(reader, e.name().as_ref())?;

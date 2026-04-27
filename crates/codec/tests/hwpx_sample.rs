@@ -388,6 +388,66 @@ fn turning_bold_off_flows_through_writer() {
     );
 }
 
+/// Mutation flow: pushing a new ParaShape onto the IR vec must
+/// surface as a fresh `<hh:paraPr>` block before the End tag of
+/// `<hh:paraProperties>`.
+#[test]
+fn pushing_new_para_shape_flows_through_writer() {
+    let Some(mut doc) = load_sample() else {
+        return;
+    };
+    let original_count = doc.doc_info.para_shapes.len();
+    let mut new_shape = hwp_transpiler_core::ir::ParaShape::default();
+    new_shape.attribute = 3; // CENTER
+    doc.doc_info.para_shapes.push(new_shape);
+
+    let bytes = HwpxWriter::default().write(&doc).expect("write");
+    let reloaded = HwpxReader.read(&bytes).expect("reload");
+
+    assert_eq!(
+        reloaded.doc_info.para_shapes.len(),
+        original_count + 1,
+        "added paraShape did not appear"
+    );
+    assert_eq!(
+        reloaded.doc_info.para_shapes[original_count].align(),
+        3,
+        "added paraShape align lost"
+    );
+}
+
+/// Mutation flow: pushing a new CharShape must surface fully (parent
+/// attrs + multi-script arrays + bold flag).
+#[test]
+fn pushing_new_char_shape_flows_through_writer() {
+    let Some(mut doc) = load_sample() else {
+        return;
+    };
+    let original_count = doc.doc_info.char_shapes.len();
+    let mut cs = hwp_transpiler_core::ir::CharShape::default();
+    cs.base_size = 1700;
+    cs.color = 0x0000_00FF; // red
+    cs.attr = 0x0000_0002; // bold
+    cs.font_ids = [4, 4, 0, 0, 0, 0, 0];
+    cs.ratios = [100, 100, 100, 100, 100, 100, 100];
+    cs.rel_sizes = [100, 100, 100, 100, 100, 100, 100];
+    doc.doc_info.char_shapes.push(cs);
+
+    let bytes = HwpxWriter::default().write(&doc).expect("write");
+    let reloaded = HwpxReader.read(&bytes).expect("reload");
+
+    assert_eq!(
+        reloaded.doc_info.char_shapes.len(),
+        original_count + 1,
+        "added charShape did not appear"
+    );
+    let new_idx = original_count;
+    assert_eq!(reloaded.doc_info.char_shapes[new_idx].base_size, 1700);
+    assert_eq!(reloaded.doc_info.char_shapes[new_idx].color, 0x0000_00FF);
+    assert!(reloaded.doc_info.char_shapes[new_idx].bold());
+    assert_eq!(reloaded.doc_info.char_shapes[new_idx].font_ids[0], 4);
+}
+
 /// Mutation flow: editing `FontFace.name` on the IR before write must
 /// surface in the re-parsed document.
 #[test]

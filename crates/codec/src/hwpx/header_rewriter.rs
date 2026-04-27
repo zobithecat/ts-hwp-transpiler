@@ -42,15 +42,45 @@
 //!     the IR's solid colour fill (gradation / image fills are left
 //!     alone).
 //!
-//! Not yet handled — full add / remove of whole shapes, gradation /
-//! image fill mutation. The unmutated path round-trips these
-//! correctly because the rewriter never touches their bytes.
+//! Add / remove of whole `<hh:paraPr>` / `<hh:charPr>` shapes is
+//! supported via two complementary paths:
+//!
+//!   * **Removal**: an original `<hh:paraPr id=N>` / `<hh:charPr id=N>`
+//!     whose `id` is past the IR vec's length is treated as
+//!     IR-deleted; we swallow the entire span (Start through End)
+//!     by entering a depth-tracked skip state.
+//!   * **Addition**: as we walk the original we collect the ids that
+//!     appeared. On `</hh:paraProperties>` / `</hh:charProperties>`
+//!     End we emit a fresh full block for every IR-side id that
+//!     wasn't seen, spliced before the container's End tag. New
+//!     paraPrs ride a minimal `<hh:align>` child; new charPrs emit
+//!     every child the parser expects (fontRef / ratio / relSz /
+//!     spacing / offset / bold-italic-strikeout-underline) so a
+//!     re-parse populates the same IR state.
+//!
+//! Not yet handled — fontface add / remove (per-script slot
+//! partitioning needs separate accounting), gradation / image fill
+//! mutation (the IR doesn't reflect them as typed fields). The
+//! unmutated path round-trips these correctly because the rewriter
+//! never touches their bytes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use hwp_transpiler_core::ir::{CharShape, Fill, IrDocument, IrError};
+use hwp_transpiler_core::ir::{CharShape, Fill, IrDocument, IrError, ParaShape};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
+
+/// Active span-skip — set when we encounter `<hh:paraPr id=N>` /
+/// `<hh:charPr id=N>` whose id is past the IR's vec length (the user
+/// removed it from IR). We swallow the entire span up to and
+/// including the matching End tag.
+struct SkipState {
+    /// Local element name being skipped (`"paraPr"` or `"charPr"`).
+    elem_name: String,
+    /// Same-name nesting depth — defensive, paraPr / charPr don't
+    /// actually nest in HWPX but a malformed input could.
+    depth: usize,
+}
 
 pub fn rewrite_header_xml(original: &[u8], doc: &IrDocument) -> Result<Vec<u8>, IrError> {
     let mut reader = Reader::from_reader(original);
@@ -74,6 +104,18 @@ pub fn rewrite_header_xml(original: &[u8], doc: &IrDocument) -> Result<Vec<u8>, 
     let mut seen_strikeout = false;
     let mut seen_underline = false;
 
+    // Add / remove of whole shapes. `container` is set when inside
+    // `<hh:paraProperties>` or `<hh:charProperties>` so we can collect
+    // the ids that appeared and emit any missing IR-side ids before
+    // the container's End tag. `skip` swallows a paraPr / charPr span
+    // whose id is past the IR's vec length (the IR side dropped it).
+    // `container` is set when we're inside `<hh:paraProperties>` or
+    // `<hh:charProperties>`; the End-tag handler distinguishes which
+    // by element name. We never nest these containers in HWPX so a
+    // single Option suffices.
+    let mut container: Option<HashSet<u32>> = None;
+    let mut skip: Option<SkipState> = None;
+
     let mut buf = Vec::new();
 
     loop {
@@ -83,15 +125,83 @@ pub fn rewrite_header_xml(original: &[u8], doc: &IrDocument) -> Result<Vec<u8>, 
             .map_err(|e| IrError::Invalid(format!("hwpx header rewrite: {e}")))?;
         let event_end = reader.buffer_position() as usize;
 
+        // Skip mode: swallow every event until we hit the matching
+        // End tag at depth 0. The whole span is dropped from output
+        // because we set `cursor = event_end` on entry and again on
+        // exit, so nothing in between flushes.
+        if let Some(s) = skip.as_mut() {
+            match evt {
+                Event::Start(ref e) if local_name(e) == s.elem_name => {
+                    s.depth += 1;
+                }
+                Event::End(ref e)
+                    if local_name_from_bytes(e.name().as_ref()) == s.elem_name =>
+                {
+                    s.depth -= 1;
+                    if s.depth == 0 {
+                        cursor = event_end;
+                        skip = None;
+                    }
+                }
+                Event::Eof => {
+                    return Err(IrError::Invalid(
+                        "hwpx header rewrite: EOF while skipping span".into(),
+                    ));
+                }
+                _ => {}
+            }
+            buf.clear();
+            continue;
+        }
+
         match evt {
             Event::Start(ref e) => {
                 let name = local_name(e);
                 match name {
+                    "paraProperties" => {
+                        container = Some(HashSet::new());
+                    }
+                    "charProperties" => {
+                        container = Some(HashSet::new());
+                    }
                     "paraPr" => {
-                        para_pr_id = u32_attr(e, "id");
+                        let id = u32_attr(e, "id");
+                        if let (Some(id), Some(c)) = (id, container.as_mut()) {
+                            c.insert(id);
+                        }
+                        // IR-side removed this id → swallow the span.
+                        if let Some(id) = id {
+                            if (id as usize) >= doc.doc_info.para_shapes.len() {
+                                out.extend_from_slice(&original[cursor..event_start]);
+                                cursor = event_end;
+                                skip = Some(SkipState {
+                                    elem_name: "paraPr".into(),
+                                    depth: 1,
+                                });
+                                buf.clear();
+                                continue;
+                            }
+                        }
+                        para_pr_id = id;
                     }
                     "charPr" => {
-                        char_pr_id = u32_attr(e, "id");
+                        let id = u32_attr(e, "id");
+                        if let (Some(id), Some(c)) = (id, container.as_mut()) {
+                            c.insert(id);
+                        }
+                        if let Some(id) = id {
+                            if (id as usize) >= doc.doc_info.char_shapes.len() {
+                                out.extend_from_slice(&original[cursor..event_start]);
+                                cursor = event_end;
+                                skip = Some(SkipState {
+                                    elem_name: "charPr".into(),
+                                    depth: 1,
+                                });
+                                buf.clear();
+                                continue;
+                            }
+                        }
+                        char_pr_id = id;
                         seen_bold = false;
                         seen_italic = false;
                         seen_strikeout = false;
@@ -185,8 +295,16 @@ pub fn rewrite_header_xml(original: &[u8], doc: &IrDocument) -> Result<Vec<u8>, 
                         // Empty charPr (no children). Still overlay
                         // its parent attrs from IR.
                         let id = u32_attr(e, "id");
+                        if let (Some(id), Some(c)) = (id, container.as_mut()) {
+                            c.insert(id);
+                        }
                         if let Some(id) = id {
-                            if let Some(shape) =
+                            if (id as usize) >= doc.doc_info.char_shapes.len() {
+                                skip_event_bytes(
+                                    original, &mut out, &mut cursor,
+                                    event_start, event_end,
+                                );
+                            } else if let Some(shape) =
                                 doc.doc_info.char_shapes.get(id as usize)
                             {
                                 let overrides = charpr_attr_overrides(shape);
@@ -196,6 +314,25 @@ pub fn rewrite_header_xml(original: &[u8], doc: &IrDocument) -> Result<Vec<u8>, 
                                     e, true, &overrides,
                                 )?;
                             }
+                        }
+                    }
+                    "paraPr" => {
+                        // Empty paraPr (no children). Same id-check
+                        // pattern as the Start variant — skip when
+                        // the IR removed it.
+                        let id = u32_attr(e, "id");
+                        if let (Some(id), Some(c)) = (id, container.as_mut()) {
+                            c.insert(id);
+                        }
+                        if let Some(id) = id {
+                            if (id as usize) >= doc.doc_info.para_shapes.len() {
+                                skip_event_bytes(
+                                    original, &mut out, &mut cursor,
+                                    event_start, event_end,
+                                );
+                            }
+                            // Otherwise leave the empty event verbatim
+                            // — there's no align child to overlay.
                         }
                     }
                     "font" => {
@@ -300,6 +437,51 @@ pub fn rewrite_header_xml(original: &[u8], doc: &IrDocument) -> Result<Vec<u8>, 
                 let name_bytes = end_name.as_ref();
                 let name = local_name_from_bytes(name_bytes);
                 match name {
+                    "paraProperties" => {
+                        // Splice any IR-side paraShapes whose id wasn't
+                        // emitted yet (i.e. user pushed new shapes onto
+                        // the IR vec) before the container's End tag.
+                        if let Some(c) = container.as_ref() {
+                            let mut insertion = Vec::new();
+                            for (idx, shape) in
+                                doc.doc_info.para_shapes.iter().enumerate()
+                            {
+                                let id = idx as u32;
+                                if !c.contains(&id) {
+                                    emit_new_para_pr(id, shape, &mut insertion);
+                                }
+                            }
+                            if !insertion.is_empty() {
+                                insert_before_event(
+                                    original, &mut out, &mut cursor,
+                                    event_start, event_end,
+                                    &insertion,
+                                );
+                            }
+                        }
+                        container = None;
+                    }
+                    "charProperties" => {
+                        if let Some(c) = container.as_ref() {
+                            let mut insertion = Vec::new();
+                            for (idx, shape) in
+                                doc.doc_info.char_shapes.iter().enumerate()
+                            {
+                                let id = idx as u32;
+                                if !c.contains(&id) {
+                                    emit_new_char_pr(id, shape, &mut insertion);
+                                }
+                            }
+                            if !insertion.is_empty() {
+                                insert_before_event(
+                                    original, &mut out, &mut cursor,
+                                    event_start, event_end,
+                                    &insertion,
+                                );
+                            }
+                        }
+                        container = None;
+                    }
                     "paraPr" => para_pr_id = None,
                     "charPr" => {
                         // Insert any presence-driven children the IR
@@ -563,6 +745,92 @@ fn insert_before_event(
     out.extend_from_slice(insertion);
     out.extend_from_slice(&original[event_start..event_end]);
     *cursor = event_end;
+}
+
+/// Emit a from-scratch `<hh:paraPr>` block for an IR-side paraShape
+/// the original document didn't carry. Minimum valid shape: a single
+/// `<hh:align horizontal="…">` child. Other paraPr children
+/// (lineSpacing, margins, borders) aren't represented in our IR yet
+/// — viewers will fall back to defaults.
+fn emit_new_para_pr(id: u32, shape: &ParaShape, out: &mut Vec<u8>) {
+    out.extend_from_slice(b"<hh:paraPr id=\"");
+    out.extend_from_slice(id.to_string().as_bytes());
+    out.extend_from_slice(b"\"><hh:align horizontal=\"");
+    out.extend_from_slice(align_to_hwpx(shape.align()).as_bytes());
+    out.extend_from_slice(b"\" vertical=\"BASELINE\"/></hh:paraPr>");
+}
+
+/// Emit a from-scratch `<hh:charPr>` block. Includes every child the
+/// reader expects (fontRef / ratio / relSz / spacing / offset /
+/// bold / italic / strikeout / underline) so a re-parse populates the
+/// same IR state. `borderFillIDRef` is included only when the IR
+/// carries an Option<u16>.
+fn emit_new_char_pr(id: u32, shape: &CharShape, out: &mut Vec<u8>) {
+    out.extend_from_slice(b"<hh:charPr id=\"");
+    out.extend_from_slice(id.to_string().as_bytes());
+    out.extend_from_slice(b"\" height=\"");
+    out.extend_from_slice(shape.base_size.to_string().as_bytes());
+    out.extend_from_slice(b"\" textColor=\"");
+    out.extend_from_slice(color_to_hex(shape.color).as_bytes());
+    out.extend_from_slice(b"\" shadeColor=\"");
+    out.extend_from_slice(color_to_hex(shape.shade_color).as_bytes());
+    out.extend_from_slice(b"\"");
+    if let Some(bf) = shape.border_fill_id {
+        out.extend_from_slice(b" borderFillIDRef=\"");
+        out.extend_from_slice(bf.to_string().as_bytes());
+        out.push(b'"');
+    }
+    out.push(b'>');
+
+    emit_script_array(b"fontRef", &shape.font_ids, out);
+    emit_script_array(b"ratio", &shape.ratios, out);
+    emit_script_array(b"relSz", &shape.rel_sizes, out);
+    emit_script_array(b"spacing", &shape.char_spacings, out);
+    emit_script_array(b"offset", &shape.char_offsets, out);
+
+    if shape.bold() {
+        out.extend_from_slice(b"<hh:bold/>");
+    }
+    if shape.italic() {
+        out.extend_from_slice(b"<hh:italic/>");
+    }
+    let strike_shape = if shape.strike() { "SOLID" } else { "NONE" };
+    let strike_color = color_to_hex(shape.strike_color.unwrap_or(0));
+    out.extend_from_slice(b"<hh:strikeout shape=\"");
+    out.extend_from_slice(strike_shape.as_bytes());
+    out.extend_from_slice(b"\" color=\"");
+    out.extend_from_slice(strike_color.as_bytes());
+    out.extend_from_slice(b"\"/>");
+
+    let underline_shape = if shape.underline_kind() != 0 { "SOLID" } else { "NONE" };
+    out.extend_from_slice(b"<hh:underline shape=\"");
+    out.extend_from_slice(underline_shape.as_bytes());
+    out.extend_from_slice(b"\" color=\"");
+    out.extend_from_slice(color_to_hex(shape.underline_color).as_bytes());
+    out.extend_from_slice(b"\"/>");
+
+    out.extend_from_slice(b"</hh:charPr>");
+}
+
+/// Trait-free helper: write `<hh:NAME hangul=… latin=… …/>` for the
+/// 7-script attribute children. Generic over any element whose value
+/// type Display-prints as the attr value (covers u16 / u8 / i8).
+fn emit_script_array<T: std::fmt::Display>(
+    elem: &[u8],
+    values: &[T; 7],
+    out: &mut Vec<u8>,
+) {
+    out.push(b'<');
+    out.extend_from_slice(b"hh:");
+    out.extend_from_slice(elem);
+    for (slot, value) in SCRIPT_SLOTS.iter().zip(values.iter()) {
+        out.push(b' ');
+        out.extend_from_slice(slot.as_bytes());
+        out.extend_from_slice(b"=\"");
+        out.extend_from_slice(value.to_string().as_bytes());
+        out.push(b'"');
+    }
+    out.extend_from_slice(b"/>");
 }
 
 /// Build the bytes to splice before `</hh:charPr>` for any presence-
@@ -1053,8 +1321,11 @@ mod tests {
     }
 
     #[test]
-    fn missing_ir_shape_leaves_event_verbatim() {
-        // paraPr id=5 but IR only has 1 paraShape → no overlay.
+    fn out_of_range_para_pr_is_dropped_and_ir_id_inserted() {
+        // paraPr id=5 in original, IR has only 1 paraShape (id=0).
+        // New semantic: drop the out-of-range span (user removed it
+        // from IR by truncate) and insert a fresh paraPr id=0
+        // (user added it since the original lacked id=0).
         let xml = br##"<hh:head xmlns:hh="h">
             <hh:paraProperties>
               <hh:paraPr id="5">
@@ -1062,12 +1333,96 @@ mod tests {
               </hh:paraPr>
             </hh:paraProperties>
           </hh:head>"##;
-        let doc = doc_with_para_shapes(vec![ps_with_align(2)]);
+        let doc = doc_with_para_shapes(vec![ps_with_align(2)]); // RIGHT
         let out = rewrite_header_xml(xml, &doc).expect("rewrite");
         let s = std::str::from_utf8(&out).unwrap();
-        // The byte range outside paraPr id=5's IR slot is left alone.
-        assert!(s.contains(r#"horizontal="LEFT""#),
-            "out-of-range IR should not touch: {s}");
+        assert!(!s.contains(r#"id="5""#), "id=5 dropped: {s}");
+        assert!(!s.contains(r#"horizontal="LEFT""#), "old LEFT dropped: {s}");
+        assert!(
+            s.contains(r#"<hh:paraPr id="0"><hh:align horizontal="RIGHT""#),
+            "id=0 inserted with IR's align: {s}"
+        );
+    }
+
+    #[test]
+    fn out_of_range_para_pr_with_no_ir_drops_silently() {
+        // No IR para shapes at all + an out-of-range paraPr → just
+        // drops the span without inserting anything.
+        let xml = br##"<hh:head xmlns:hh="h">
+            <hh:paraProperties>
+              <hh:paraPr id="2">
+                <hh:align horizontal="LEFT"/>
+              </hh:paraPr>
+            </hh:paraProperties>
+          </hh:head>"##;
+        let doc = doc_with_para_shapes(vec![]);
+        let out = rewrite_header_xml(xml, &doc).expect("rewrite");
+        let s = std::str::from_utf8(&out).unwrap();
+        assert!(!s.contains(r#"id="2""#), "paraPr id=2 dropped: {s}");
+        assert!(!s.contains("horizontal=\"LEFT\""), "align child gone: {s}");
+        assert!(s.contains("<hh:paraProperties>"), "container kept: {s}");
+        assert!(s.contains("</hh:paraProperties>"), "container kept: {s}");
+    }
+
+    #[test]
+    fn ir_added_para_shape_inserted_before_container_end() {
+        // Original has paraPr id=0. IR has 2 paraShapes (one push).
+        // Expect id=0 overlaid with IR's align; id=1 inserted as a
+        // brand-new block just before `</hh:paraProperties>`.
+        let xml = br##"<hh:head xmlns:hh="h">
+            <hh:paraProperties>
+              <hh:paraPr id="0">
+                <hh:align horizontal="LEFT"/>
+              </hh:paraPr>
+            </hh:paraProperties>
+          </hh:head>"##;
+        let doc = doc_with_para_shapes(vec![
+            ps_with_align(2), // RIGHT
+            ps_with_align(3), // CENTER
+        ]);
+        let out = rewrite_header_xml(xml, &doc).expect("rewrite");
+        let s = std::str::from_utf8(&out).unwrap();
+        assert!(
+            s.contains(r#"<hh:paraPr id="0">"#),
+            "original paraPr 0 kept: {s}"
+        );
+        assert!(s.contains(r#"horizontal="RIGHT""#), "id=0 overlaid: {s}");
+        assert!(
+            s.contains(r#"<hh:paraPr id="1"><hh:align horizontal="CENTER""#),
+            "id=1 inserted: {s}"
+        );
+    }
+
+    #[test]
+    fn ir_added_char_shape_inserted_before_container_end() {
+        let xml = br##"<hh:head xmlns:hh="h">
+            <hh:charProperties>
+              <hh:charPr id="0" height="1000" textColor="#000000">
+                <hh:fontRef hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0"/>
+              </hh:charPr>
+            </hh:charProperties>
+          </hh:head>"##;
+        let mut doc = IrDocument::default();
+        let mut cs0 = CharShape::default();
+        cs0.base_size = 1000;
+        let mut cs1 = CharShape::default();
+        cs1.base_size = 1500;
+        cs1.color = 0x0000_00FF; // R=FF
+        cs1.attr = 0x0000_0002; // bold
+        doc.doc_info.char_shapes = vec![cs0, cs1];
+        let out = rewrite_header_xml(xml, &doc).expect("rewrite");
+        let s = std::str::from_utf8(&out).unwrap();
+        assert!(
+            s.contains(r##"<hh:charPr id="1" height="1500" textColor="#FF0000""##),
+            "new charPr id=1 inserted: {s}"
+        );
+        assert!(
+            s.contains("<hh:bold/>"),
+            "new charPr emits bold from IR: {s}"
+        );
+        let id1_pos = s.find(r#"id="1""#).unwrap();
+        let end_pos = s.find("</hh:charProperties>").unwrap();
+        assert!(id1_pos < end_pos, "insert before container End: {s}");
     }
 
     #[test]
