@@ -2,17 +2,26 @@
 //!
 //! Strategy — same "verbatim cache for parts not yet typed" shape as
 //! the HWP5 writer: sections round-trip through a fresh XML emit
-//! (since the reader decoded them into typed IR), while every other
-//! archive part rides along from `doc.unknown_streams`. This lets us
-//! ship a working writer without regenerating header.xml / content.hpf
-//! / settings.xml from scratch.
+//! (since the reader decoded them into typed IR); the original
+//! `Contents/header.xml` flows through a *surgical rewriter* that
+//! overlays only the attributes the IR exposes (paraPr align, charPr
+//! parent attrs, font face names, borderFill solid colours, strike /
+//! underline shape attrs); every other archive part rides along
+//! verbatim from `doc.unknown_streams`. This lets a DocInfo-side
+//! mutation flow into the written file without re-emitting from
+//! scratch (which would lose the unparsed sections — styles,
+//! numberings, lineSpacing, kerning flags, Panose typeInfo).
 //!
 //! Missing compared to a full writer:
-//!   * Changes to DocInfo-level records (fonts, char_shapes,
-//!     border_fills) aren't serialised back to `Contents/header.xml`
-//!     — if you mutate them in IR the written file still carries the
-//!     pre-mutation styles. Safe as long as you only edit paragraphs
-//!     / tables.
+//!   * Bold / italic toggling on individual char shapes — the HWPX
+//!     `<hh:bold/>` / `<hh:italic/>` are presence-only and would
+//!     require structural insert / remove inside `<hh:charPr>`. The
+//!     unmutated round-trip path works (those bytes flow verbatim).
+//!   * Multi-script CharShape arrays (`<hh:fontRef>`, `<hh:ratio>`,
+//!     …) are not overlaid. Mutating them in IR will not flow into
+//!     the written file.
+//!   * Adding / removing whole shapes (new charPr, new paraPr) is
+//!     structural and not supported.
 //!   * Pictures / equations in paragraph controls don't emit back
 //!     into the XML; they still exist in the IR and would need their
 //!     own serialisers to reach the output.
@@ -22,6 +31,7 @@
 
 use hwp_transpiler_core::ir::{IrDocument, IrError, Writer};
 
+use super::header_rewriter::rewrite_header_xml;
 use super::section_writer::write_section_xml;
 use super::zip_writer::HwpxArchiveWriter;
 
@@ -70,6 +80,16 @@ impl Writer for HwpxWriter {
                 continue;
             }
             if name.starts_with("BinData/") {
+                continue;
+            }
+            if name == "Contents/header.xml" {
+                // Overlay IR-side DocInfo mutations on top of the
+                // original header.xml bytes. Falls back to the
+                // verbatim original if the rewriter chokes on the
+                // input — better to ship an unmutated header than a
+                // corrupted one.
+                let rewritten = rewrite_header_xml(bytes, doc).unwrap_or_else(|_| bytes.clone());
+                zip.add_part(name, &rewritten)?;
                 continue;
             }
             zip.add_part(name, bytes)?;

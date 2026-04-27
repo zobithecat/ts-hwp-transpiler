@@ -7,6 +7,7 @@
 //!   * [`HwpxWriter`] — still a stub; HWPX write needs a verbatim
 //!     container strategy separate from the typed reader.
 
+pub mod header_rewriter;
 pub mod header_xml;
 pub mod reader;
 pub mod section_writer;

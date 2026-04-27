@@ -138,3 +138,170 @@ fn real_hwpx_round_trips_through_writer() {
         "first non-empty paragraph text drifted"
     );
 }
+
+/// Unmutated round-trip: the surgical header rewriter must preserve
+/// the parsed DocInfo shapes semantically. If we re-emit the four
+/// known sections and re-parse them, the IR shapes should match the
+/// original IR exactly.
+#[test]
+fn real_hwpx_unmutated_round_trip_preserves_doc_info_shapes() {
+    let Some(doc) = load_sample() else {
+        return;
+    };
+    let bytes = HwpxWriter::default().write(&doc).expect("write");
+    let reloaded = HwpxReader.read(&bytes).expect("reload");
+
+    assert_eq!(
+        doc.doc_info.font_faces.hangul.len(),
+        reloaded.doc_info.font_faces.hangul.len(),
+        "fontface count drifted"
+    );
+    for (orig, back) in doc
+        .doc_info
+        .font_faces
+        .hangul
+        .iter()
+        .zip(reloaded.doc_info.font_faces.hangul.iter())
+    {
+        assert_eq!(orig.name, back.name, "fontface name drifted");
+    }
+    assert_eq!(
+        doc.doc_info.para_shapes.len(),
+        reloaded.doc_info.para_shapes.len(),
+        "paraShape count drifted"
+    );
+    for (i, (orig, back)) in doc
+        .doc_info
+        .para_shapes
+        .iter()
+        .zip(reloaded.doc_info.para_shapes.iter())
+        .enumerate()
+    {
+        assert_eq!(
+            orig.align(),
+            back.align(),
+            "paraShape[{i}] align drifted"
+        );
+    }
+    assert_eq!(
+        doc.doc_info.char_shapes.len(),
+        reloaded.doc_info.char_shapes.len(),
+        "charShape count drifted"
+    );
+    for (i, (orig, back)) in doc
+        .doc_info
+        .char_shapes
+        .iter()
+        .zip(reloaded.doc_info.char_shapes.iter())
+        .enumerate()
+    {
+        assert_eq!(
+            orig.base_size, back.base_size,
+            "charShape[{i}] base_size drifted"
+        );
+        assert_eq!(orig.color, back.color, "charShape[{i}] color drifted");
+        assert_eq!(orig.bold(), back.bold(), "charShape[{i}] bold drifted");
+        assert_eq!(orig.italic(), back.italic(), "charShape[{i}] italic drifted");
+        assert_eq!(orig.strike(), back.strike(), "charShape[{i}] strike drifted");
+    }
+    assert_eq!(
+        doc.doc_info.border_fills.len(),
+        reloaded.doc_info.border_fills.len(),
+        "borderFill count drifted"
+    );
+    for (i, (orig, back)) in doc
+        .doc_info
+        .border_fills
+        .iter()
+        .zip(reloaded.doc_info.border_fills.iter())
+        .enumerate()
+    {
+        assert_eq!(
+            orig.fill.back_color(),
+            back.fill.back_color(),
+            "borderFill[{i}] colour drifted"
+        );
+    }
+}
+
+/// Mutation flow: editing `ParaShape.attribute` (align bits) on the
+/// IR before write must surface in the re-parsed document.
+#[test]
+fn mutating_para_shape_align_flows_through_writer() {
+    let Some(mut doc) = load_sample() else {
+        return;
+    };
+    // Find a paraShape that isn't already RIGHT (align bits == 2).
+    let target_idx = doc
+        .doc_info
+        .para_shapes
+        .iter()
+        .position(|p| p.align() != 2);
+    let Some(idx) = target_idx else {
+        eprintln!("skipping: every paraShape is already RIGHT");
+        return;
+    };
+    let original_align = doc.doc_info.para_shapes[idx].align();
+    // Force align bits → 2 (RIGHT).
+    let attr = &mut doc.doc_info.para_shapes[idx].attribute;
+    *attr = (*attr & !0x07) | 0x02;
+    assert_ne!(original_align, 2, "test pre-condition");
+
+    let bytes = HwpxWriter::default().write(&doc).expect("write");
+    let reloaded = HwpxReader.read(&bytes).expect("reload");
+
+    assert_eq!(
+        reloaded.doc_info.para_shapes[idx].align(),
+        2,
+        "paraShape[{idx}] align mutation lost on round-trip"
+    );
+}
+
+/// Mutation flow: editing `CharShape.color` on the IR before write
+/// must surface in the re-parsed document.
+#[test]
+fn mutating_char_shape_color_flows_through_writer() {
+    let Some(mut doc) = load_sample() else {
+        return;
+    };
+    if doc.doc_info.char_shapes.is_empty() {
+        return;
+    }
+    let idx = 0;
+    let new_color = 0x0034_5678; // arbitrary, distinct from typical defaults
+    doc.doc_info.char_shapes[idx].color = new_color;
+    doc.doc_info.char_shapes[idx].base_size = 1700;
+
+    let bytes = HwpxWriter::default().write(&doc).expect("write");
+    let reloaded = HwpxReader.read(&bytes).expect("reload");
+
+    assert_eq!(
+        reloaded.doc_info.char_shapes[idx].color, new_color,
+        "charShape color mutation lost"
+    );
+    assert_eq!(
+        reloaded.doc_info.char_shapes[idx].base_size, 1700,
+        "charShape base_size mutation lost"
+    );
+}
+
+/// Mutation flow: editing `FontFace.name` on the IR before write must
+/// surface in the re-parsed document.
+#[test]
+fn mutating_font_face_name_flows_through_writer() {
+    let Some(mut doc) = load_sample() else {
+        return;
+    };
+    if doc.doc_info.font_faces.hangul.is_empty() {
+        return;
+    }
+    doc.doc_info.font_faces.hangul[0].name = "RoundTripFont".into();
+
+    let bytes = HwpxWriter::default().write(&doc).expect("write");
+    let reloaded = HwpxReader.read(&bytes).expect("reload");
+
+    assert_eq!(
+        reloaded.doc_info.font_faces.hangul[0].name, "RoundTripFont",
+        "fontface name mutation lost"
+    );
+}
