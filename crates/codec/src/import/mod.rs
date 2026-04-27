@@ -6,5 +6,6 @@
 //! to complete the bidirectional round-trip the project's identity
 //! depends on.
 
+pub mod cell_sizes;
 pub mod markdown;
 pub mod markdown_llm;

@@ -211,6 +211,10 @@ impl LlmTableBuilder {
     }
     fn finish(mut self) -> TableControl {
         self.flush_pending();
+        // Distribute the default A4 text-region width evenly across
+        // columns so HWPX viewers don't collapse 0-width cells.
+        // Heights default to a single text-row.
+        super::cell_sizes::apply_defaults(&mut self.cells, self.cols);
         let row_cell_counts = vec![self.cols; self.rows as usize];
         TableControl {
             rows: self.rows,

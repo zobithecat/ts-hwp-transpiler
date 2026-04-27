@@ -249,8 +249,9 @@ impl TableBuilder {
         self.in_cell = false;
     }
 
-    fn finish(self) -> TableControl {
+    fn finish(mut self) -> TableControl {
         let rows = self.current_row;
+        super::cell_sizes::apply_defaults(&mut self.cells, self.cols);
         let row_cell_counts = vec![self.cols; rows as usize];
         TableControl {
             rows,
