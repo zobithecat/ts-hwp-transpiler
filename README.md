@@ -9,13 +9,14 @@
 시키되 구조 손실 없이 처리하고, 결과물을 일반 MD (LLM·에디터용) 또는
 고충실도 미리보기 (사람용) 두 형태로 모두 렌더링하는 것.
 
-> 상태: HWP5/HWPX 양쪽 reader/writer 동작 중, HWPX writer는
-> DocInfo-side mutation도 surgical rewriter로 round-trip. WASM은
-> handle-based 레지스트리로 큰 파일까지 처리하며 Vite 데모에서 라이브.
-> 의미 구조 기반 HTML preview + Markdown export 모두 실문서 fixture로
-> 검증됨. 원본 페이지의 픽셀 단위 fidelity 뷰는 `@rhwp/editor` iframe
-> 임베드에 위임 — 자체 구현 안 함. 현재 진행 상황은
-> `docs/memory/CURRENT.md` 참고.
+> 상태: HWP5/HWPX 양쪽 reader/writer 동작 중. HWPX writer는
+> DocInfo-side mutation도 surgical rewriter로 round-trip. **MD ↔
+> HWPX 양방향 종단 동작** — `md-to-hwpx` CLI + 데모 .hwpx 다운로드.
+> 그림은 `--inline-assets`(단일 자족 .md, base64 footer) /
+> `--split-assets`(`<stem>.md` + `<stem>.assets.md` 페어) 두 모드로
+> round-trip. WASM은 handle-based 레지스트리로 62MB+ 처리, Vite
+> 데모에서 라이브. 픽셀 fidelity 뷰는 `@rhwp/editor` iframe 임베드.
+> 진행 상황은 `docs/memory/CURRENT.md` 참고.
 
 ## 이 프로젝트가 이미 보여준 가치
 
@@ -151,6 +152,16 @@ cargo test --workspace
 # HWP → 마크다운
 cargo run -p hwp-transpiler-codec --bin hwp-to-md -- path/to/input.hwp
 # 기본은 ./path/to/input.md 로 출력; `-` 인자는 stdout
+
+# 마크다운 → HWPX (양방향)
+cargo run -p hwp-transpiler-codec --bin md-to-hwpx -- path/to/input.md
+# 기본은 ./path/to/input.hwpx; 인접한 input.assets.md 가 있으면 자동 페어링
+
+# 그림 포함 라운드트립 (LLM-friendly 분리 모드)
+cargo run -p hwp-transpiler-codec --bin hwp-to-md -- doc.hwpx --llm --split-assets
+# → doc.md (본문, LLM에 그대로 보낼 수 있음) + doc.assets.md (에셋 base64)
+cargo run -p hwp-transpiler-codec --bin md-to-hwpx -- doc.md
+# → doc.hwpx 로 그림까지 복원
 ```
 
 `crates/codec/tests/fixtures/` 에 neolord0/hwplib 의 작은 샘플
@@ -172,9 +183,12 @@ npm run build:wasm                # crates/wasm → ts/src/wasm/
 npm run dev                       # http://localhost:5173
 ```
 
-`.hwp` / `.hwpx` 파일을 드롭하면 왼쪽에 rhwp-studio 전체 에디터,
-오른쪽에 Markdown이 나옴. 오른쪽 옵션 토글로 LLM 구조화 모드 /
-도메인 힌트 / role·editable 태그 / 인라인 스타일을 즉석에서 전환.
+`.hwp` / `.hwpx` / `.md` 파일을 드롭하면 왼쪽에 rhwp 에디터(또는
+구조형 HTML 미리보기), 오른쪽에 Markdown이 나옴. 옵션 토글로 LLM
+구조화 모드 / 도메인 힌트 / role·editable 태그 / 인라인 스타일 / 그림
+처리(텍스트만·인라인·분리)를 즉석에서 전환. 분리 모드의 `.md` +
+`.assets.md` 페어를 한 번에 멀티 업로드하면 자동 페어링되어 HWPX로
+복원.
 
 ## 현재 동작하는 것
 
@@ -204,6 +218,16 @@ npm run dev                       # http://localhost:5173
   긴 셀 nested sub-bullet, 빈 셀 range 압축, 한컴 PUA 글머리표
   (`󰊱` 등) → 표준 `①..⑳` 정규화. 병합 셀은 `[r,c] span N×M:`
   annotation으로 무손실 보존.
+- **MD → HWP/HWPX 진짜 양방향** — `md-to-hwpx` CLI 와 데모의 `.hwpx
+  다운로드` 버튼이 종단까지 동작. GFM CommonMark + 표 + 인라인
+  emphasis와 LLM 레코드 노테이션(`SECTION[id=...]` /
+  `PARAGRAPH[id=...,level=N]` / `TABLE[...] / CELL[...] / FIGURE[...]`)
+  양쪽 파싱.
+- **그림 라운드트립** — `--inline-assets`(단일 자족 .md, base64 footer)
+  / `--split-assets`(`<stem>.md` + `<stem>.assets.md` 페어, LLM 컨텍스트
+  친화) 두 모드. `--asset-dpi=72|36` 으로 리샘플 dim 조절. PNG lossless
+  재인코딩이라 round-trip 시 픽셀 drift 없음. `md-to-hwpx`가 인접
+  `<stem>.assets.md` 를 자동 페어링.
 - **수식 → LaTeX** — HWP equation script를 토크나이즈해 LaTeX로 출력.
   MD/HTML export 양쪽에 wired.
 - **HTML preview (구조형)** — 위치 기반 stable IDs (`sec-`, `par-`,
@@ -219,18 +243,14 @@ HWPX (3 MB, 그림 다수) 기준으로 round-trip + export 모두 통과.
 
 ## 아직 없는 것
 
-- **MD → HWP/HWPX 진짜 양방향**의 마무리 — read/write IR은 동작하지만
-  새 문서를 from-scratch로 쓸 때 일부 미타입 레코드 (`ID_MAPPINGS`,
-  `NUMBERING`, `FACE_NAME emit`, `TRACK_CHANGE_*`, `LAYOUT_COMPATIBILITY`)
-  는 hwplib 템플릿 번들에 의존. typed encoders로 점진 대체 중.
-- **HWPX writer Phase 2** — `<hh:bold/>`/`<hh:italic/>` 토글
-  (presence-only structural insert), 멀티스크립트 CharShape 배열
-  (`<hh:fontRef>`, `<hh:ratio>` 등), paraPr/charPr 추가·제거, gradation
-  /image fill mutation. Unmutated round-trip은 verbatim으로 통과되므로
-  영향 없음.
-- **이미지 마크다운 사이드카 dump** — IR 측 그림은 파싱되어 있고
-  `MdOptions.assets_path` wiring 진행 중. CLI에서 `<doc>.assets/` dump
-  미완.
+- **비-헤딩 구조 스타일 round-trip** — `# 제목`(개요 N) 헤딩은 양방향
+  동작. 한국 법조문 양식의 "조"/"항"/"호" 같은 사용자 정의 스타일은
+  IR로는 읽지만 MD 측 emit에서 이름이 빠져 round-trip 시 본문 스타일로
+  떨어짐. PARAGRAPH 레코드에 `style_name=…` 확장이 자연스러운 다음 단계.
+- **HWPX writer gradation/image fill mutation** — solid color borderFill /
+  fill만 IR로 노출, gradation·이미지 fill은 verbatim 통과만 가능.
+- **lossy 이미지 인코딩 옵션** — round-trip 안전성 확보 위해 의도적으로
+  미지원. 파일 크기는 `--asset-dpi=36`으로 절반 가능.
 - **각주·변경 이력 표면화** — verbatim 보존은 되지만 export 측에서
   의미 단위로 surface 안 됨.
 
