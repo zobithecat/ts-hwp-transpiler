@@ -364,19 +364,23 @@ mdDlBtn.addEventListener("click", () => {
   );
 });
 
-/// MD → IR → HWPX round-trip via the wasm import path. Imports the
-/// currently-rendered Markdown into a fresh IR (with the bundled
-/// HWPX skeleton), saves through HwpxWriter, and downloads. The
-/// import handle is disposed right after to keep the wasm registry
-/// from accumulating throwaway docs across repeated clicks.
+/// Save the resident IR as `.hwpx`. Two upload paths converge here:
+///   * `.hwp` / `.hwpx` upload → `loadHwp` populates ourIr with the
+///     original header / bin_data / unknown_streams. Saving keeps
+///     images and original DocInfo verbatim.
+///   * `.md` upload → `importMarkdown` populates ourIr from the MD
+///     text plus `bundle_default_skeleton`. Saving uses our
+///     synthesised header.
+///
+/// Going through MD again here would round-trip-and-lose: a HWPX
+/// load's images live in `bin_data` (not in the Markdown text), so
+/// re-importing the MD strips them. The dedicated round-trip
+/// behaviour can be exposed later as a separate button if needed.
 hwpxDlBtn.addEventListener("click", () => {
-  const text = markdownEl.textContent ?? "";
-  if (!text) return;
-  let importedHandle: number | null = null;
+  if (ourIr === null) return;
   try {
     const started = performance.now();
-    importedHandle = importMarkdown(text);
-    const bytes = saveHwpx(importedHandle);
+    const bytes = saveHwpx(ourIr);
     const ms = Math.round(performance.now() - started);
     downloadBlob(
       // wasm-bindgen types `Uint8Array.buffer` as `ArrayBufferLike`,
@@ -386,14 +390,10 @@ hwpxDlBtn.addEventListener("click", () => {
       `${currentStem}.hwpx`,
     );
     setStatus(
-      `HWPX ${bytes.length.toLocaleString()} bytes / ${ms}ms (MD → IR → HWPX)`,
+      `HWPX ${bytes.length.toLocaleString()} bytes / ${ms}ms`,
     );
   } catch (err) {
-    setStatus(`.hwpx 변환 실패: ${String(err)}`, true);
-  } finally {
-    if (importedHandle !== null) {
-      disposeDoc(importedHandle);
-    }
+    setStatus(`.hwpx 저장 실패: ${String(err)}`, true);
   }
 });
 
