@@ -129,8 +129,12 @@ fn emit_run_with_range(
         None => para.text.clone(),
     };
 
-    emit_text_with_linebreaks(&slice_text, out);
-
+    // Real HWPX puts inline controls (`<hp:pic>` / `<hp:tbl>`) *before*
+    // the run's `<hp:t>`. The IR's text carries U+FFFC object-
+    // replacement markers as positional placeholders for those
+    // controls — they must NOT round-trip into the output, otherwise
+    // Hancom viewers render the literal "obj" glyph and the picture
+    // ends up double-stamped or visually broken.
     if control_limit > 0 {
         let take = control_limit.min(para.controls.len());
         for ctrl in para.controls.iter().take(take) {
@@ -144,12 +148,12 @@ fn emit_run_with_range(
                 _ => {}
             }
         }
-    } else if para.controls.is_empty() {
-        // no-op — no controls at all
     }
-    // When `control_limit == 0` but there *are* controls on the
-    // paragraph, we expect the caller to have attached them to a
-    // later run.
+
+    let visible_text: String = slice_text.chars().filter(|c| *c != '\u{FFFC}').collect();
+    if !visible_text.is_empty() {
+        emit_text_with_linebreaks(&visible_text, out);
+    }
 
     out.push_str("</hp:run>");
 }
