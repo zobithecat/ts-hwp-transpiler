@@ -19,6 +19,7 @@ import init, {
   disposeDoc,
   exportHtml,
   exportMarkdown,
+  exportMarkdownAssets,
   importMarkdown,
   loadHwp,
   saveHwpx,
@@ -47,6 +48,24 @@ const llmModeEl = $<HTMLInputElement>("llm-mode");
 const emitRolesEl = $<HTMLInputElement>("emit-roles");
 const domainHintsEl = $<HTMLInputElement>("domain-hints");
 const emitStylesEl = $<HTMLInputElement>("emit-styles");
+const assetModeEl = $<HTMLSelectElement>("asset-mode");
+const assetDpiEl = $<HTMLSelectElement>("asset-dpi");
+
+/// 0 = None, 1 = Inline, 2 = Split — matches the wasm-side enum.
+function assetModeInt(): number {
+  switch (assetModeEl.value) {
+    case "inline":
+      return 1;
+    case "split":
+      return 2;
+    default:
+      return 0;
+  }
+}
+
+function assetDpiInt(): number {
+  return parseInt(assetDpiEl.value, 10) || 72;
+}
 
 // Handle into the wasm-side document registry. We flip options
 // against this handle rather than re-parsing bytes; dispose it
@@ -100,6 +119,8 @@ function renderMarkdown(handle: number): { bytes: number; ms: number } {
     emitRolesEl.checked,
     domainHintsEl.checked,
     emitStylesEl.checked,
+    assetModeInt(),
+    assetDpiInt(),
   );
   markdownEl.textContent = md;
   copyBtn.disabled = md.length === 0;
@@ -317,18 +338,55 @@ function stemOf(name: string): string {
 }
 
 fileInput.addEventListener("change", () => {
-  const f = fileInput.files?.[0];
-  if (f) void handleFile(f);
+  const files = Array.from(fileInput.files ?? []);
+  void handleFiles(files);
 });
 
 document.body.addEventListener("dragover", (e) => e.preventDefault());
 document.body.addEventListener("drop", (e) => {
   e.preventDefault();
-  const f = e.dataTransfer?.files?.[0];
-  if (f) void handleFile(f);
+  const files = Array.from(e.dataTransfer?.files ?? []);
+  void handleFiles(files);
 });
 
-for (const el of [llmModeEl, emitRolesEl, domainHintsEl, emitStylesEl]) {
+/// Pair-aware dispatcher. When the user picks (or drops) multiple
+/// files, treat a `.md` body alongside an `.assets.md` companion as
+/// a paired split-asset MD bundle — concatenate them and route
+/// through `handleMarkdownFile`. Anything else falls back to the
+/// single-file path.
+async function handleFiles(files: File[]): Promise<void> {
+  if (files.length === 0) return;
+  if (files.length === 1) {
+    void handleFile(files[0]);
+    return;
+  }
+  const body = files.find(
+    (f) =>
+      isMarkdownFile(f.name) && !f.name.toLowerCase().endsWith(".assets.md"),
+  );
+  const assets = files.find((f) =>
+    f.name.toLowerCase().endsWith(".assets.md"),
+  );
+  if (body && assets) {
+    const main = await body.text();
+    const companion = await assets.text();
+    const merged = `${main}\n\n${companion}`;
+    const synthetic = new File([merged], body.name, { type: "text/markdown" });
+    void handleFile(synthetic);
+    return;
+  }
+  // No recognised pair — fall through to first file.
+  void handleFile(files[0]);
+}
+
+for (const el of [
+  llmModeEl,
+  emitRolesEl,
+  domainHintsEl,
+  emitStylesEl,
+  assetModeEl,
+  assetDpiEl,
+]) {
   el.addEventListener("change", () => {
     if (!ourIr) return;
     const m = renderMarkdown(ourIr);
@@ -362,6 +420,30 @@ mdDlBtn.addEventListener("click", () => {
     new Blob([text], { type: "text/markdown;charset=utf-8" }),
     `${currentStem}.md`,
   );
+  // Split mode also yields a `<stem>.assets.md` companion. The
+  // visible textarea shows main only; pull the companion direct
+  // from wasm and drop it as a second download.
+  if (ourIr !== null && assetModeInt() === 2) {
+    try {
+      const assets = exportMarkdownAssets(
+        ourIr,
+        llmModeEl.checked,
+        emitRolesEl.checked,
+        emitRolesEl.checked,
+        domainHintsEl.checked,
+        emitStylesEl.checked,
+        assetDpiInt(),
+      );
+      if (assets.length > 0) {
+        downloadBlob(
+          new Blob([assets], { type: "text/markdown;charset=utf-8" }),
+          `${currentStem}.assets.md`,
+        );
+      }
+    } catch (err) {
+      setStatus(`.assets.md 추출 실패: ${String(err)}`, true);
+    }
+  }
 });
 
 /// Save the resident IR as `.hwpx`. Two upload paths converge here:

@@ -21,8 +21,8 @@
     <main>
       <section class="controls">
         <label class="file-picker">
-          <input type="file" id="file" accept=".hwp,.hwpx,.md,.markdown" />
-          <span>📂 .hwp / .hwpx / .md 선택 · 드래그</span>
+          <input type="file" id="file" accept=".hwp,.hwpx,.md,.markdown" multiple />
+          <span>📂 .hwp / .hwpx / .md 선택 · 드래그 (여러 파일 가능)</span>
         </label>
 
         <fieldset class="options">
@@ -43,6 +43,18 @@
             (<code>**bold**</code> · <code>*italic*</code> · <code>~~strike~~</code>) —
             human 경로 전용</label
           >
+          <label class="asset-mode">
+            그림 처리:
+            <select id="asset-mode">
+              <option value="none" selected>텍스트만 (이미지 제외)</option>
+              <option value="inline">인라인 base64 (단일 .md)</option>
+              <option value="split">분리 (.md + .assets.md)</option>
+            </select>
+            <select id="asset-dpi">
+              <option value="72" selected>72 DPI</option>
+              <option value="36">36 DPI (LLM-context 절약)</option>
+            </select>
+          </label>
         </fieldset>
 
         <div id="status">wasm 로드 중…</div>

@@ -128,6 +128,12 @@ pub fn save_hwpx(handle: u32) -> Result<Vec<u8>, JsValue> {
 /// `assetsPath` is *not* taken — the browser doesn't have a sidecar
 /// directory; image `![](…)` links should be rewritten by the caller
 /// if they want to embed assets as Blob URLs.
+///
+/// `asset_mode` is an integer enum: `0 = None`, `1 = Inline`,
+/// `2 = Split`. `Split` returns only the main MD here — call
+/// `exportMarkdownAssets` to retrieve the companion string.
+/// `asset_dpi` is the resampling DPI when an asset mode is active;
+/// `0` falls back to the codec default (72).
 #[wasm_bindgen(js_name = exportMarkdown)]
 pub fn export_markdown(
     handle: u32,
@@ -136,8 +142,65 @@ pub fn export_markdown(
     emit_editable: bool,
     emit_domain_hints: bool,
     emit_styles: bool,
+    asset_mode: u32,
+    asset_dpi: u32,
 ) -> Result<String, JsValue> {
-    let opts = MdOptions {
+    let opts = build_md_opts(
+        llm,
+        emit_roles,
+        emit_editable,
+        emit_domain_hints,
+        emit_styles,
+        asset_mode,
+        asset_dpi,
+    );
+    with_doc(handle, |doc| markdown::to_markdown_with(doc, &opts))
+}
+
+/// Companion text for `AssetMode::Split`. Returns an empty string
+/// when split mode wasn't selected or the doc has no embedded
+/// pictures.
+#[wasm_bindgen(js_name = exportMarkdownAssets)]
+pub fn export_markdown_assets(
+    handle: u32,
+    llm: bool,
+    emit_roles: bool,
+    emit_editable: bool,
+    emit_domain_hints: bool,
+    emit_styles: bool,
+    asset_dpi: u32,
+) -> Result<String, JsValue> {
+    let opts = build_md_opts(
+        llm,
+        emit_roles,
+        emit_editable,
+        emit_domain_hints,
+        emit_styles,
+        2, // Split
+        asset_dpi,
+    );
+    with_doc(handle, |doc| {
+        markdown::to_markdown_export(doc, &opts)
+            .assets
+            .unwrap_or_default()
+    })
+}
+
+fn build_md_opts(
+    llm: bool,
+    emit_roles: bool,
+    emit_editable: bool,
+    emit_domain_hints: bool,
+    emit_styles: bool,
+    asset_mode: u32,
+    asset_dpi: u32,
+) -> MdOptions {
+    let mode = match asset_mode {
+        1 => markdown::AssetMode::Inline,
+        2 => markdown::AssetMode::Split,
+        _ => markdown::AssetMode::None,
+    };
+    MdOptions {
         assets_path: None,
         llm: llm.then(|| LlmOptions {
             emit_roles,
@@ -148,13 +211,9 @@ pub fn export_markdown(
         emit_roles: emit_roles && !llm,
         emit_editable: emit_editable && !llm,
         emit_styles: emit_styles && !llm,
-        // Asset-embedded MD lands on a separate JS entrypoint
-        // (`exportMarkdownWithAssets`) so existing callers stay
-        // unchanged.
-        asset_mode: markdown::AssetMode::None,
-        asset_dpi: None,
-    };
-    with_doc(handle, |doc| markdown::to_markdown_with(doc, &opts))
+        asset_mode: mode,
+        asset_dpi: if asset_dpi == 0 { None } else { Some(asset_dpi) },
+    }
 }
 
 /// Render to the browser-preview HTML fragment.
