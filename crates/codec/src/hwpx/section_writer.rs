@@ -258,11 +258,19 @@ fn emit_picture(pic: &PictureControl, out: &mut String) {
     let w = pic.width_hwpu.max(1);
     let h = pic.height_hwpu.max(1);
     let bin_ref = format!("image{}", pic.bin_id);
+    // Each `<hp:pic>` needs a globally-unique `id` — Hancom-authored
+    // docs use large random integers (the GSO instance id) and some
+    // viewers cross-reference them when laying out multiple pictures
+    // on a page. Derive a deterministic non-zero id from `bin_id`
+    // (offset to keep small ids out of the `0` collision space and
+    // out of the run-charPr / paraPr IDRef numeric range).
+    let pic_id: u32 = 1_000_000 + pic.bin_id as u32;
+    let instid: u32 = 2_000_000 + pic.bin_id as u32;
     out.push_str(&format!(
         concat!(
-            r#"<hp:pic id="0" zOrder="0" numberingType="PICTURE" "#,
+            r#"<hp:pic id="{pic_id}" zOrder="0" numberingType="PICTURE" "#,
             r#"textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" "#,
-            r#"dropcapstyle="None" href="" groupLevel="0" instid="0" "#,
+            r#"dropcapstyle="None" href="" groupLevel="0" instid="{instid}" "#,
             r#"reverse="0">"#,
             r#"<hp:offset x="0" y="0"/>"#,
             r#"<hp:orgSz width="{w}" height="{h}"/>"#,
@@ -295,6 +303,8 @@ fn emit_picture(pic: &PictureControl, out: &mut String) {
         w = w,
         h = h,
         bin = bin_ref,
+        pic_id = pic_id,
+        instid = instid,
     ));
 }
 

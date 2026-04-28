@@ -110,9 +110,11 @@ impl Writer for HwpxWriter {
 
 /// Walk `doc.bin_data` and ensure every entry appears as an
 /// `<opf:item ... isEmbeded="1"/>` inside the package manifest.
-/// Items already present are kept as-is; missing ones get spliced in
-/// just before `</opf:manifest>` close. The header / section items
-/// shipped by the bundled skeleton are untouched.
+/// Items already present are kept as-is; missing ones get spliced
+/// **just before the `<opf:item id="section…" />` line** so the
+/// manifest ordering matches Hancom-authored layouts (header,
+/// images…, sections, settings). Falls back to splicing before
+/// `</opf:manifest>` when no section item is found.
 fn inject_bin_data_into_manifest(content_hpf: &[u8], doc: &IrDocument) -> Vec<u8> {
     if doc.bin_data.is_empty() {
         return content_hpf.to_vec();
@@ -125,6 +127,14 @@ fn inject_bin_data_into_manifest(content_hpf: &[u8], doc: &IrDocument) -> Vec<u8
     let Some(close_pos) = text.find(close) else {
         return content_hpf.to_vec();
     };
+    // Pick the splice anchor: prefer just-before the first
+    // `id="section…"` item if one exists; else fall back to the
+    // closing tag.
+    let manifest_body = &text[..close_pos];
+    let anchor_pos = manifest_body
+        .find(r#"id="section"#)
+        .and_then(|i| manifest_body[..i].rfind("<opf:item"))
+        .unwrap_or(close_pos);
     let manifest_view = &text[..close_pos];
     let mut additions = String::new();
     for entry in &doc.bin_data {
@@ -133,7 +143,6 @@ fn inject_bin_data_into_manifest(content_hpf: &[u8], doc: &IrDocument) -> Vec<u8
         }
         let id_attr = format!("href=\"BinData/{}\"", entry.id);
         if manifest_view.contains(&id_attr) {
-            // Already in manifest — nothing to do.
             continue;
         }
         let stem = entry
@@ -141,11 +150,11 @@ fn inject_bin_data_into_manifest(content_hpf: &[u8], doc: &IrDocument) -> Vec<u8
             .split_once('.')
             .map(|(s, _)| s)
             .unwrap_or(&entry.id);
-        let mime = entry.mime.clone().unwrap_or_else(|| {
-            // Pick a sensible default from the extension so viewers
-            // don't have to sniff bytes.
-            mime_from_id(&entry.id).to_string()
-        });
+        // Hancom-authored docs use the abbreviated `image/jpg`
+        // form (not the standard `image/jpeg`). Picture round-
+        // trip seems to depend on viewers seeing the exact form
+        // they expect, so mirror it.
+        let mime = mime_for_manifest(&entry.id);
         additions.push_str(&format!(
             r#"<opf:item id="{stem}" href="BinData/{name}" media-type="{mime}" isEmbeded="1"/>"#,
             stem = stem,
@@ -157,17 +166,20 @@ fn inject_bin_data_into_manifest(content_hpf: &[u8], doc: &IrDocument) -> Vec<u8
         return content_hpf.to_vec();
     }
     let mut out = String::with_capacity(text.len() + additions.len());
-    out.push_str(&text[..close_pos]);
+    out.push_str(&text[..anchor_pos]);
     out.push_str(&additions);
-    out.push_str(&text[close_pos..]);
+    out.push_str(&text[anchor_pos..]);
     out.into_bytes()
 }
 
-fn mime_from_id(id: &str) -> &'static str {
+/// Hancom-flavoured mime lookup. `.jpg` / `.jpeg` collapse to
+/// `image/jpg` (matching Hancom-authored manifests), other
+/// extensions use the standard mime.
+fn mime_for_manifest(id: &str) -> &'static str {
     let ext = id.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
     match ext.as_deref() {
         Some("png") => "image/png",
-        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("jpg") | Some("jpeg") => "image/jpg",
         Some("gif") => "image/gif",
         Some("bmp") => "image/bmp",
         Some("webp") => "image/webp",
