@@ -88,6 +88,17 @@ pub fn to_llm_markdown(doc: &IrDocument, opts: &MdOptions) -> String {
         out.pop();
     }
     out.push('\n');
+    if opts.asset_mode == super::markdown::AssetMode::Inline {
+        let footer = super::asset_footer::render_assets_block(doc, opts);
+        if !footer.is_empty() {
+            out.push('\n');
+            out.push_str(&footer);
+            while out.ends_with('\n') {
+                out.pop();
+            }
+            out.push('\n');
+        }
+    }
     out
 }
 

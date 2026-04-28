@@ -115,6 +115,10 @@ fn main() -> ExitCode {
         // where embedding Markdown formatting would confuse the
         // grammar. Flag silently drops on the LLM branch.
         emit_styles: args.emit_styles && !args.llm,
+        // Asset mode wiring lands in a follow-up commit; default
+        // here keeps the existing CLI behaviour byte-for-byte.
+        asset_mode: markdown::AssetMode::None,
+        asset_dpi: None,
     };
     let md = markdown::to_markdown_with(&doc, &md_opts);
 

@@ -4,6 +4,7 @@
 //! `assets::dump_assets` is the sidecar binary-entry dumper used by the
 //! CLI to make `![](…)` links in the emitted Markdown resolve on disk.
 
+pub mod asset_footer;
 pub mod assets;
 pub mod markdown;
 pub mod markdown_llm;

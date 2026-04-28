@@ -62,6 +62,35 @@ pub struct MdOptions {
     /// cell text still uses the plain path (nested formatting inside
     /// pipe cells is fragile in most Markdown renderers).
     pub emit_styles: bool,
+    /// How embedded picture bytes flow into the Markdown output.
+    /// `None` (default) keeps existing behaviour: pictures emit only
+    /// their reference / placeholder text. `Inline` appends an
+    /// asset table at the bottom of the same MD file. `Split` puts
+    /// the asset table into a companion `<stem>.assets.md` returned
+    /// alongside the main MD via `to_markdown_export`.
+    pub asset_mode: AssetMode,
+    /// Target DPI when an asset_mode resampling step runs. 72 →
+    /// canonical screen DPI; 36 halves the pixel dims for LLM-
+    /// context budgets. Ignored when `asset_mode = None`.
+    pub asset_dpi: Option<u32>,
+}
+
+/// Where embedded picture bytes go in MD output.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AssetMode {
+    /// No asset emit. Pictures still appear as `FIGURE` records (LLM)
+    /// or `![](placeholder)` (human path) but the binary bytes don't
+    /// ride along. Default for back-compat with the existing CLI.
+    #[default]
+    None,
+    /// Append `<!-- hwp-transpiler: assets -->` + `ASSET[…]` /
+    /// `DATA:` lines at the bottom of the main MD. Single file,
+    /// self-contained.
+    Inline,
+    /// Emit the asset table into a separate companion file
+    /// (`<stem>.assets.md`). Main MD stays clean for LLM-context
+    /// workflows; round-trip needs both files paired.
+    Split,
 }
 
 /// Capability flags for the LLM-friendly Markdown layer. Kept minimal on
@@ -88,6 +117,56 @@ pub struct LlmOptions {
 
 pub fn to_markdown(doc: &IrDocument) -> String {
     to_markdown_with(doc, &MdOptions::default())
+}
+
+/// Two-string return shape used by `to_markdown_export` so split-
+/// asset mode can hand the caller both the main MD and the
+/// `<stem>.assets.md` companion in one call. `assets` is `None`
+/// when `MdOptions::asset_mode` isn't `Split`.
+#[derive(Debug, Clone)]
+pub struct ExportedMarkdown {
+    pub main: String,
+    pub assets: Option<String>,
+}
+
+/// Full export entry point that handles every `AssetMode`. Use this
+/// over `to_markdown_with` when the caller needs to access the
+/// companion file emitted by `AssetMode::Split`. For `Inline` and
+/// `None` modes, `assets` is `None` and `main` carries the same text
+/// `to_markdown_with` would.
+pub fn to_markdown_export(doc: &IrDocument, opts: &MdOptions) -> ExportedMarkdown {
+    let mut main = to_markdown_with(doc, opts);
+    let assets = match opts.asset_mode {
+        AssetMode::None | AssetMode::Inline => {
+            // Inline mode already had the footer baked in by
+            // `to_markdown_with`; nothing to split out.
+            None
+        }
+        AssetMode::Split => {
+            let body = super::asset_footer::render_assets_block(doc, opts);
+            if body.is_empty() {
+                None
+            } else {
+                let mut companion = String::new();
+                companion.push_str("<!-- hwp-transpiler: format=assets -->\n\n");
+                companion.push_str(&body);
+                while companion.ends_with('\n') {
+                    companion.pop();
+                }
+                companion.push('\n');
+                Some(companion)
+            }
+        }
+    };
+    // For Split, the asset footer should NOT also be inline in main.
+    // `to_markdown_with` (and the LLM emitter) only inline when
+    // mode == Inline, so main is already clean for Split.
+    if opts.asset_mode == AssetMode::Split {
+        // Defensive: nothing to strip in current implementation,
+        // but document the contract.
+        let _ = &mut main;
+    }
+    ExportedMarkdown { main, assets }
 }
 
 /// Stamped at the top of every human-mode export so the importer
@@ -120,6 +199,17 @@ pub fn to_markdown_with(doc: &IrDocument, opts: &MdOptions) -> String {
     }
     if !out.is_empty() {
         out.push('\n');
+    }
+    if opts.asset_mode == AssetMode::Inline {
+        let footer = super::asset_footer::render_assets_block(doc, opts);
+        if !footer.is_empty() {
+            out.push('\n');
+            out.push_str(&footer);
+            while out.ends_with('\n') {
+                out.pop();
+            }
+            out.push('\n');
+        }
     }
     out
 }

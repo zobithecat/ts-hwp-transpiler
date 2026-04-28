@@ -148,6 +148,11 @@ pub fn export_markdown(
         emit_roles: emit_roles && !llm,
         emit_editable: emit_editable && !llm,
         emit_styles: emit_styles && !llm,
+        // Asset-embedded MD lands on a separate JS entrypoint
+        // (`exportMarkdownWithAssets`) so existing callers stay
+        // unchanged.
+        asset_mode: markdown::AssetMode::None,
+        asset_dpi: None,
     };
     with_doc(handle, |doc| markdown::to_markdown_with(doc, &opts))
 }

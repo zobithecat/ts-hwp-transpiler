@@ -30,9 +30,11 @@
 use std::collections::HashMap;
 
 use hwp_transpiler_core::ir::{
-    CharShapeRun, Control, ControlKind, IrDocument, IrError, Paragraph, ParagraphHeader, Section,
-    TableCell, TableControl,
+    BinaryEntry, CharShapeRun, Control, ControlKind, IrDocument, IrError, Paragraph,
+    ParagraphHeader, PictureControl, Section, TableCell, TableControl,
 };
+
+use crate::asset_pipeline::decode_data_uri_to_binary_entry;
 
 /// Returns true when `src` is recognisably the LLM-mode export
 /// format. Uses the sigil our exporter emits at the top of every
@@ -59,10 +61,56 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
     let mut sections: Vec<Section> = Vec::new();
     let mut current = Section::default();
     let mut state = State::Idle;
+    // True once we've crossed `<!-- hwp-transpiler: assets -->`. From
+    // that point on, body-level records (FIGURE / TABLE / PARAGRAPH)
+    // stop landing into the section and ASSET / DATA pairs flow into
+    // `doc.bin_data` instead.
+    let mut in_assets = false;
+    let mut pending_asset: Option<PendingAsset> = None;
 
     for line in src.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
+            continue;
+        }
+
+        if trimmed == "<!-- hwp-transpiler: assets -->" {
+            // Flush any in-flight body state and switch to footer
+            // mode. Subsequent SECTION[ markers (defensive) are
+            // ignored — assets aren't sectioned.
+            flush_state(&mut state, &mut current);
+            sections.push(std::mem::take(&mut current));
+            state = State::Idle;
+            in_assets = true;
+            continue;
+        }
+
+        if in_assets {
+            if trimmed.starts_with("ASSET[") {
+                let attrs = parse_attrs(trimmed);
+                let bin_id = attrs.get_int("bin_id").map(|n| n.clamp(0, u16::MAX as i64) as u16);
+                let source_id = attrs
+                    .0
+                    .get("source_id")
+                    .cloned()
+                    .or_else(|| {
+                        // Fall back to a sensible default name when the exporter
+                        // didn't stamp one. HWPX convention.
+                        bin_id.map(|n| format!("image{n}.png"))
+                    })
+                    .unwrap_or_default();
+                pending_asset = Some(PendingAsset { bin_id, source_id });
+                continue;
+            }
+            if let Some(uri) = trimmed.strip_prefix("DATA: ") {
+                if let Some(p) = pending_asset.take() {
+                    if let Some(entry) = decode_data_uri_to_binary_entry(uri.trim(), &p.source_id) {
+                        doc.bin_data.push(entry);
+                    }
+                }
+                continue;
+            }
+            // Other lines in footer (blank, comments) — ignore.
             continue;
         }
 
@@ -109,6 +157,31 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
             continue;
         }
 
+        if trimmed.starts_with("FIGURE[") {
+            flush_state(&mut state, &mut current);
+            let attrs = parse_attrs(trimmed);
+            let bin_id = attrs.get_int("bin_id").map(|n| n.clamp(0, u16::MAX as i64) as u16);
+            let width_mm = attrs.get_int("width_mm").unwrap_or(0).max(0) as u32;
+            let height_mm = attrs.get_int("height_mm").unwrap_or(0).max(0) as u32;
+            // mm → HWPUNIT (7200 / 25.4 = ~283.46). Multiply via
+            // f64 then round to keep the conversion symmetric with
+            // the export side's `hwpunit_to_mm`.
+            let width_hwpu = ((width_mm as f64) * 7200.0 / 25.4).round() as u32;
+            let height_hwpu = ((height_mm as f64) * 7200.0 / 25.4).round() as u32;
+            let mut wrapper = Paragraph::default();
+            wrapper.text = "\u{FFFC}".into();
+            wrapper.controls.push(Control {
+                kind: ControlKind::Picture(PictureControl {
+                    bin_id: bin_id.unwrap_or(0),
+                    width_hwpu,
+                    height_hwpu,
+                }),
+                caption_text: None,
+            });
+            current.paragraphs.push(wrapper);
+            continue;
+        }
+
         if trimmed.starts_with("CELL[") {
             let attrs = parse_attrs(trimmed);
             let row = attrs.get_int("row").unwrap_or(0) as u16;
@@ -146,7 +219,13 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
     }
 
     flush_state(&mut state, &mut current);
-    sections.push(current);
+    if !in_assets {
+        // The assets-footer transition already pushed the body
+        // section. A second push here would land an empty trailing
+        // section.
+        sections.push(current);
+    }
+    let _ = pending_asset; // drop in case ASSET[…] had no following DATA
 
     // Drop empty leading sections from the SECTION-flush boundary —
     // the loop pushes one Section per SECTION marker, so the first
@@ -172,6 +251,19 @@ enum State {
         explicit_level: Option<u8>,
     },
     InTable(LlmTableBuilder),
+}
+
+/// Held between an `ASSET[…]` line and its following `DATA: …`
+/// line so the data URI decode happens with the asset's id /
+/// bin_id metadata in hand.
+struct PendingAsset {
+    /// Reserved for future use — `BinaryEntry.id` is currently the
+    /// only field needed downstream, but keeping `bin_id` here means
+    /// any later cross-validation (PictureControl.bin_id matching
+    /// ASSET.bin_id) doesn't need a re-parse.
+    #[allow(dead_code)]
+    bin_id: Option<u16>,
+    source_id: String,
 }
 
 #[derive(Default)]
