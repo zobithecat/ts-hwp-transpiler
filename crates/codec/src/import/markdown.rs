@@ -26,9 +26,11 @@
 //! heading bits via `ParaShape::heading_level()`.
 
 use hwp_transpiler_core::ir::{
-    CharShapeRun, Control, ControlKind, IrDocument, IrError, Paragraph, ParagraphHeader, Section,
-    TableCell, TableControl,
+    CharShapeRun, Control, ControlKind, IrDocument, IrError, Paragraph, ParagraphHeader,
+    PictureControl, Section, TableCell, TableControl,
 };
+
+use crate::asset_pipeline::decode_data_uri_to_binary_entry;
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 /// Parse a UTF-8 Markdown string into an [`IrDocument`].
@@ -99,6 +101,13 @@ pub fn from_gfm_markdown(src: &str) -> Result<IrDocument, IrError> {
 
     let mut section = Section::default();
     let mut state = ParseState::Idle;
+    // Counter for synthesised picture bin_ids — starts at 1 so the
+    // resulting `BinData/image1.png` naming matches HWPX convention.
+    let mut next_bin_id: u16 = 1;
+    // True between Start(Image) and End(Image). pulldown-cmark
+    // emits the alt text as inline Text events inside the image
+    // span; we don't want those to land in the body buffer.
+    let mut in_image_alt = false;
 
     for event in Parser::new_ext(src, Options::ENABLE_TABLES) {
         match event {
@@ -119,6 +128,43 @@ pub fn from_gfm_markdown(src: &str) -> Result<IrDocument, IrError> {
             Event::Start(Tag::Table(alignments)) => {
                 flush(&mut state, &mut section);
                 state = ParseState::Table(TableBuilder::new(alignments.len() as u16));
+            }
+            Event::Start(Tag::Image { dest_url, .. }) => {
+                // Pictures live in their own wrapper paragraph
+                // (`text = "\u{FFFC}"` + `ControlKind::Picture`),
+                // matching the convention HWP/HWPX writers expect.
+                // When the URL is a `data:` URI we decode the bytes
+                // and register a `BinaryEntry` so the writer can
+                // re-emit the asset under `BinData/image{N}.…`.
+                flush(&mut state, &mut section);
+                in_image_alt = true;
+                let bin_id = next_bin_id;
+                next_bin_id = next_bin_id.saturating_add(1);
+                let mut wrapper = Paragraph::default();
+                wrapper.text = "\u{FFFC}".into();
+                wrapper.controls.push(Control {
+                    kind: ControlKind::Picture(PictureControl {
+                        bin_id,
+                        // Dimensions aren't carried in CommonMark's
+                        // Image syntax; leave at 0 so the writer's
+                        // cell-size defaults take over downstream.
+                        width_hwpu: 0,
+                        height_hwpu: 0,
+                    }),
+                    caption_text: None,
+                });
+                section.paragraphs.push(wrapper);
+                if dest_url.starts_with("data:") {
+                    let source_id = format!("image{bin_id}.png");
+                    if let Some(entry) =
+                        decode_data_uri_to_binary_entry(&dest_url, &source_id)
+                    {
+                        doc.bin_data.push(entry);
+                    }
+                }
+            }
+            Event::End(TagEnd::Image) => {
+                in_image_alt = false;
             }
             Event::Start(Tag::TableHead) | Event::Start(Tag::TableRow) => {
                 if let ParseState::Table(t) = &mut state {
@@ -154,11 +200,19 @@ pub fn from_gfm_markdown(src: &str) -> Result<IrDocument, IrError> {
                     section.paragraphs.push(wrapper);
                 }
             }
-            Event::Text(t) | Event::Code(t) => match &mut state {
-                ParseState::Collecting { text, .. } => text.push_str(&t),
-                ParseState::Table(b) if b.in_cell => b.cell_text.push_str(&t),
-                _ => {}
-            },
+            Event::Text(t) | Event::Code(t) => {
+                if in_image_alt {
+                    // Drop alt text inside an image span — the
+                    // image was already emitted as a wrapper
+                    // paragraph; no body buffer to land it in.
+                    continue;
+                }
+                match &mut state {
+                    ParseState::Collecting { text, .. } => text.push_str(&t),
+                    ParseState::Table(b) if b.in_cell => b.cell_text.push_str(&t),
+                    _ => {}
+                }
+            }
             Event::SoftBreak => match &mut state {
                 ParseState::Collecting { text, .. } => text.push(' '),
                 ParseState::Table(b) if b.in_cell => b.cell_text.push(' '),

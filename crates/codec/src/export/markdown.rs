@@ -284,14 +284,36 @@ fn emit_equation(eq: &EquationControl, out: &mut String) {
     out.push_str("$$\n\n");
 }
 
-/// Build the `![](prefix/BIN<id>.<ext>){width=Xmm; height=Ymm}` line for
-/// a picture. Returns `None` when `assets_path` is unset — callers then
-/// emit only the placeholder.
+/// Build the `![](…)` line for a picture. Three paths:
+///   * `asset_mode == Inline` → `![](data:image/png;base64,…)` so the
+///     resulting MD is self-contained. The base64 payload is the
+///     resampled asset from `asset_pipeline`.
+///   * `assets_path` set (legacy CLI sidecar) →
+///     `![](<prefix>/<filename>){width=Xmm; height=Ymm}`.
+///   * Otherwise → `None`; callers emit only the `{{그림 N.}}`
+///     placeholder.
 fn picture_image_line(
     doc: &IrDocument,
     pic: &PictureControl,
     opts: &MdOptions,
 ) -> Option<String> {
+    if opts.asset_mode == AssetMode::Inline {
+        let entry = doc
+            .bin_data
+            .iter()
+            .find(|e| matches_bin_entry(&e.id, pic.bin_id))?;
+        let encoded = crate::asset_pipeline::encode_for_md(
+            std::slice::from_ref(entry),
+            &crate::asset_pipeline::EncodeOpts { dpi: opts.asset_dpi },
+        );
+        let asset = encoded.into_iter().next()?;
+        let w = hwpunit_to_mm(pic.width_hwpu);
+        let h = hwpunit_to_mm(pic.height_hwpu);
+        return Some(format!(
+            "![]({uri}){{width={w}mm; height={h}mm}}",
+            uri = asset.data_uri,
+        ));
+    }
     let prefix = opts.assets_path.as_deref()?;
     // Use the matching BinaryEntry's id as the sidecar filename.
     // Covers both naming conventions the assets dumper actually

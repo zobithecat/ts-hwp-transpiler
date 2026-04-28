@@ -5,8 +5,11 @@
 //! via `from_llm_markdown` and confirms the picture + the binary
 //! bytes both made the round trip.
 
-use hwp_transpiler_codec::export::markdown::{AssetMode, LlmOptions, MdOptions};
+use hwp_transpiler_codec::export::markdown::{
+    to_markdown_with, AssetMode, LlmOptions, MdOptions,
+};
 use hwp_transpiler_codec::export::markdown_llm::to_llm_markdown;
+use hwp_transpiler_codec::import::markdown::from_markdown;
 use hwp_transpiler_codec::import::markdown_llm::from_llm_markdown;
 use hwp_transpiler_core::ir::{
     BinaryEntry, Control, ControlKind, IrDocument, Paragraph, PictureControl, Section,
@@ -111,6 +114,35 @@ fn inline_skips_when_no_pictures_present() {
         !md.contains("<!-- hwp-transpiler: assets -->"),
         "no footer when bin_data empty: {md}"
     );
+}
+
+#[test]
+fn gfm_inline_image_round_trips_via_data_uri() {
+    let doc = doc_with_one_picture();
+    let opts = MdOptions {
+        asset_mode: AssetMode::Inline,
+        asset_dpi: Some(72),
+        ..MdOptions::default()
+    };
+    let md = to_markdown_with(&doc, &opts);
+    assert!(
+        md.contains("![](data:image/png;base64,"),
+        "human-mode inline emits data URI: {md}"
+    );
+    let reloaded = from_markdown(&md).expect("import");
+    let pic = reloaded
+        .sections
+        .iter()
+        .flat_map(|s| &s.paragraphs)
+        .find_map(|p| {
+            p.controls.iter().find_map(|c| match &c.kind {
+                ControlKind::Picture(pic) => Some(pic),
+                _ => None,
+            })
+        })
+        .expect("PictureControl restored on GFM import");
+    assert!(pic.bin_id > 0, "synthesised bin_id assigned");
+    assert_eq!(reloaded.bin_data.len(), 1, "data URI decoded into bin_data");
 }
 
 #[test]

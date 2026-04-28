@@ -30,8 +30,8 @@
 use std::collections::HashMap;
 
 use hwp_transpiler_core::ir::{
-    BinaryEntry, CharShapeRun, Control, ControlKind, IrDocument, IrError, Paragraph,
-    ParagraphHeader, PictureControl, Section, TableCell, TableControl,
+    CharShapeRun, Control, ControlKind, IrDocument, IrError, Paragraph, ParagraphHeader,
+    PictureControl, Section, TableCell, TableControl,
 };
 
 use crate::asset_pipeline::decode_data_uri_to_binary_entry;
