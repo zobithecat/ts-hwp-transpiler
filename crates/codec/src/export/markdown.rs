@@ -861,7 +861,7 @@ fn cell_text_lines(cell: &TableCell) -> Vec<String> {
         .collect()
 }
 
-fn heading_level(doc: &IrDocument, para: &Paragraph) -> Option<u8> {
+pub(super) fn heading_level(doc: &IrDocument, para: &Paragraph) -> Option<u8> {
     let style = doc.doc_info.styles.get(para.header.style_id as usize)?;
     for prefix in ["개요 ", "Outline "] {
         for name in [&style.name, &style.english_name] {

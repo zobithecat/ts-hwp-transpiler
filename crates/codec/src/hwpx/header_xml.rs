@@ -23,7 +23,7 @@
 use std::io::BufRead;
 
 use hwp_transpiler_core::ir::{
-    BorderFill, CharShape, Fill, FontFace, FontFaces, IrError, ParaShape,
+    BorderFill, CharShape, Fill, FontFace, FontFaces, IrError, ParaShape, Style,
 };
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
@@ -34,6 +34,11 @@ pub struct HeaderExtract {
     pub border_fills: Vec<BorderFill>,
     pub char_shapes: Vec<CharShape>,
     pub para_shapes: Vec<ParaShape>,
+    /// `<hh:styles>` container — populated so `Style::name`-keyed
+    /// heading detection (the human-Markdown exporter and the LLM
+    /// `level=N` stamp) can recognise headings on the round-trip
+    /// back from a real HWPX.
+    pub styles: Vec<Style>,
 }
 
 pub fn parse_header_xml(xml: &[u8]) -> Result<HeaderExtract, IrError> {
@@ -53,6 +58,7 @@ pub fn parse_header_xml(xml: &[u8]) -> Result<HeaderExtract, IrError> {
                 "borderFills" => parse_border_fills(&mut reader, &mut out.border_fills)?,
                 "charProperties" => parse_char_properties(&mut reader, &mut out.char_shapes)?,
                 "paraProperties" => parse_para_properties(&mut reader, &mut out.para_shapes)?,
+                "styles" => parse_styles(&mut reader, &mut out.styles)?,
                 _ => {}
             },
             Event::Eof => break,
@@ -505,6 +511,65 @@ fn parse_one_para_pr<R: BufRead>(reader: &mut Reader<R>) -> Result<ParaShape, Ir
         buf.clear();
     }
     Ok(shape)
+}
+
+// ─── Styles ─────────────────────────────────────────────────────────
+
+fn parse_styles<R: BufRead>(
+    reader: &mut Reader<R>,
+    styles: &mut Vec<Style>,
+) -> Result<(), IrError> {
+    let mut buf = Vec::new();
+    loop {
+        match reader
+            .read_event_into(&mut buf)
+            .map_err(|e| xml_err("styles", e))?
+        {
+            Event::End(e) if local_name_bytes(e.name().as_ref()) == "styles" => break,
+            Event::Empty(e) if local_name(&e) == "style" => {
+                push_style(&e, styles);
+            }
+            Event::Start(e) if local_name(&e) == "style" => {
+                push_style(&e, styles);
+                skip_until_close(reader, e.name().as_ref())?;
+            }
+            Event::Eof => {
+                return Err(IrError::Invalid("EOF in styles".into()));
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(())
+}
+
+fn push_style(e: &BytesStart<'_>, styles: &mut Vec<Style>) {
+    let id = u32_attr(e, "id").unwrap_or(0) as usize;
+    let style_type = string_attr(e, "type").unwrap_or_default();
+    let properties: u8 = match style_type.as_str() {
+        "CHAR" => 1,
+        _ => 0, // PARA / unspecified → paragraph style
+    };
+    let name = string_attr(e, "name").unwrap_or_default();
+    let english_name = string_attr(e, "engName").unwrap_or_default();
+    let para_shape_id = u32_attr(e, "paraPrIDRef").unwrap_or(0) as u16;
+    let char_shape_id = u32_attr(e, "charPrIDRef").unwrap_or(0) as u16;
+    let next_style_id = u32_attr(e, "nextStyleIDRef").unwrap_or(0) as u8;
+    let lang_id = string_attr(e, "langID")
+        .and_then(|s| s.parse::<i16>().ok())
+        .unwrap_or(0);
+    while styles.len() <= id {
+        styles.push(Style::default());
+    }
+    styles[id] = Style {
+        name,
+        english_name,
+        properties,
+        next_style_id,
+        lang_id,
+        para_shape_id,
+        char_shape_id,
+    };
 }
 
 fn align_bits_from_hwpx(horizontal: &str) -> u32 {

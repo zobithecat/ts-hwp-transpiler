@@ -30,8 +30,8 @@
 use std::collections::HashMap;
 
 use hwp_transpiler_core::ir::{
-    Control, ControlKind, IrDocument, IrError, Paragraph, ParagraphHeader, ParaShape, Section,
-    Style, TableCell, TableControl,
+    CharShapeRun, Control, ControlKind, IrDocument, IrError, Paragraph, ParagraphHeader, Section,
+    TableCell, TableControl,
 };
 
 /// Returns true when `src` is recognisably the LLM-mode export
@@ -50,14 +50,11 @@ pub fn looks_like_llm_format(src: &str) -> bool {
 /// of `from_markdown`).
 pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
     let mut doc = IrDocument::default();
-    // Minimal DocInfo so the resulting IR can flow into the HWPX
-    // writer's surgical rewriter without dangling style refs.
-    doc.doc_info.para_shapes = vec![ParaShape::default()];
-    doc.doc_info.styles = vec![Style {
-        name: "본문".into(),
-        english_name: "Body".into(),
-        ..Style::default()
-    }];
+    // Same 7-slot heading/styles/charShape table the GFM importer
+    // builds, so heading round-trip is consistent across both MD
+    // import paths and the HWPX writer's surgical rewriter has the
+    // shapes to splice into the bundled skeleton.
+    super::style_synth::populate_heading_doc_info(&mut doc);
 
     let mut sections: Vec<Section> = Vec::new();
     let mut current = Section::default();
@@ -80,7 +77,15 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
 
         if trimmed.starts_with("PARAGRAPH[") {
             flush_state(&mut state, &mut current);
-            state = State::ExpectingParagraphText;
+            // Heading level can be supplied two ways:
+            //   * Explicit `level=N` attribute on the PARAGRAPH
+            //     record — preferred, requires exporter cooperation.
+            //   * Markdown-style `# `…`###### ` text prefix on the
+            //     following TEXT line — fallback for already-emitted
+            //     docs that don't carry the attr.
+            let attrs = parse_attrs(trimmed);
+            let level = attrs.get_int("level").map(|n| n.clamp(0, 6) as u8);
+            state = State::ExpectingParagraphText { explicit_level: level };
             continue;
         }
 
@@ -119,11 +124,9 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
 
         if let Some(text) = strip_text_prefix(trimmed) {
             match &mut state {
-                State::ExpectingParagraphText => {
-                    let mut p = Paragraph::default();
-                    p.text = text.to_string();
-                    p.header = ParagraphHeader::default();
-                    current.paragraphs.push(p);
+                State::ExpectingParagraphText { explicit_level } => {
+                    let (level, body) = resolve_heading(*explicit_level, text);
+                    current.paragraphs.push(make_paragraph(level, body));
                     state = State::Idle;
                 }
                 State::InTable(builder) => {
@@ -133,9 +136,7 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
                     // Bare TEXT without a preceding PARAGRAPH marker
                     // — treat as a body paragraph so prose isn't
                     // dropped on the floor.
-                    let mut p = Paragraph::default();
-                    p.text = text.to_string();
-                    current.paragraphs.push(p);
+                    current.paragraphs.push(make_paragraph(0, text.to_string()));
                 }
             }
             continue;
@@ -164,7 +165,12 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
 
 enum State {
     Idle,
-    ExpectingParagraphText,
+    /// `explicit_level` is `Some(N)` when the PARAGRAPH record
+    /// carried `level=N`. The TEXT branch falls back to a `# `-
+    /// prefix scan when this is `None`.
+    ExpectingParagraphText {
+        explicit_level: Option<u8>,
+    },
     InTable(LlmTableBuilder),
 }
 
@@ -203,6 +209,11 @@ impl LlmTableBuilder {
             row_span: p.row_span,
             col_span: p.col_span,
             para_count: 1,
+            // Bundled skeleton's borderFill id=1 carries solid 0.12 mm
+            // black borders on all four sides — references it so cell
+            // outlines are visible in HWPX viewers (id=0 is the
+            // no-border default).
+            border_fill_id: 1,
             paragraphs: vec![para],
             ..TableCell::default()
         });
@@ -228,7 +239,7 @@ impl LlmTableBuilder {
 
 fn flush_state(state: &mut State, section: &mut Section) {
     match std::mem::replace(state, State::Idle) {
-        State::Idle | State::ExpectingParagraphText => {}
+        State::Idle | State::ExpectingParagraphText { .. } => {}
         State::InTable(builder) => {
             // Mid-table flush at section boundary — emit what we
             // have so cells aren't lost.
@@ -270,6 +281,66 @@ impl AttrMap {
     fn get_int(&self, key: &str) -> Option<i64> {
         self.0.get(key).and_then(|v| v.parse::<i64>().ok())
     }
+}
+
+/// Build a body paragraph (`level=0`) or a heading paragraph
+/// (`level=1..=6`). Heading paragraphs reference the matching
+/// `style_id` / `para_shape_id` / `char_shape_id` so HWPX viewers
+/// render with the heading style/font from the synthesised
+/// DocInfo table.
+fn make_paragraph(level: u8, text: String) -> Paragraph {
+    let mut p = Paragraph::default();
+    p.text = text;
+    p.header = ParagraphHeader {
+        style_id: level,
+        para_shape_id: level as u16,
+        ..ParagraphHeader::default()
+    };
+    if level > 0 {
+        p.char_shape_runs.push(CharShapeRun {
+            start: 0,
+            char_shape_id: level as u32,
+        });
+    }
+    p
+}
+
+/// Decide the heading level for a TEXT line. Explicit `level=N`
+/// from the PARAGRAPH record wins; otherwise check for a Markdown
+/// `# ` … `###### ` prefix on the text and strip it. Returns the
+/// `(level, body)` pair after any prefix removal.
+fn resolve_heading(explicit: Option<u8>, text: &str) -> (u8, String) {
+    if let Some(level) = explicit {
+        if level > 0 {
+            return (level, text.to_string());
+        }
+    }
+    if let Some((level, rest)) = strip_atx_heading_prefix(text) {
+        return (level, rest.to_string());
+    }
+    (explicit.unwrap_or(0), text.to_string())
+}
+
+/// `"## Foo"` → `Some((2, "Foo"))`. Returns `None` when the line
+/// isn't an ATX heading.
+fn strip_atx_heading_prefix(text: &str) -> Option<(u8, &str)> {
+    let mut hash_count = 0u8;
+    for c in text.chars() {
+        if c == '#' {
+            hash_count += 1;
+            if hash_count > 6 {
+                return None;
+            }
+        } else {
+            break;
+        }
+    }
+    if hash_count == 0 {
+        return None;
+    }
+    let after_hashes = &text[hash_count as usize..];
+    let body = after_hashes.strip_prefix(' ')?;
+    Some((hash_count, body))
 }
 
 /// Strip `TEXT: ` or `TEXT[…]: ` prefix; returns `None` for non-TEXT

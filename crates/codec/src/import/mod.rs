@@ -9,3 +9,4 @@
 pub mod cell_sizes;
 pub mod markdown;
 pub mod markdown_llm;
+pub mod style_synth;

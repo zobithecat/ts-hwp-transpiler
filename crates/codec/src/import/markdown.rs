@@ -26,8 +26,8 @@
 //! heading bits via `ParaShape::heading_level()`.
 
 use hwp_transpiler_core::ir::{
-    CharShape, CharShapeRun, Control, ControlKind, IrDocument, IrError, Paragraph,
-    ParagraphHeader, ParaShape, Section, Style, TableCell, TableControl,
+    CharShapeRun, Control, ControlKind, IrDocument, IrError, Paragraph, ParagraphHeader, Section,
+    TableCell, TableControl,
 };
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
@@ -95,9 +95,7 @@ fn detect_format(src: &str) -> FormatHint {
 /// they exercised.
 pub fn from_gfm_markdown(src: &str) -> Result<IrDocument, IrError> {
     let mut doc = IrDocument::default();
-    doc.doc_info.para_shapes = synthesise_heading_para_shapes();
-    doc.doc_info.char_shapes = synthesise_heading_char_shapes();
-    doc.doc_info.styles = synthesise_heading_styles();
+    super::style_synth::populate_heading_doc_info(&mut doc);
 
     let mut section = Section::default();
     let mut state = ParseState::Idle;
@@ -241,6 +239,9 @@ impl TableBuilder {
             col_span: 1,
             row_span: 1,
             para_count: 1,
+            // See LLM importer: id=1 in the bundled skeleton has
+            // visible solid borders on all four sides.
+            border_fill_id: 1,
             paragraphs: vec![para],
             ..TableCell::default()
         };
@@ -301,72 +302,6 @@ fn heading_level_to_u8(level: HeadingLevel) -> u8 {
         HeadingLevel::H5 => 5,
         HeadingLevel::H6 => 6,
     }
-}
-
-/// `[Body, 개요 1, 개요 2, …, 개요 6]` so the human-Markdown exporter's
-/// `heading_level` lookup (`Style::name` starts with `"개요 "`) reads
-/// the heading back, and HWP-side viewers render heading paragraphs
-/// with their named style metadata. Each heading style points at the
-/// matching `paraShape` *and* `charShape` index so the synthesised
-/// font-size / bold defaults from `synthesise_heading_char_shapes`
-/// reach the rendered output.
-fn synthesise_heading_styles() -> Vec<Style> {
-    let mut styles = vec![Style {
-        name: "본문".to_string(),
-        english_name: "Body".to_string(),
-        properties: 0,
-        next_style_id: 0,
-        lang_id: 0,
-        para_shape_id: 0,
-        char_shape_id: 0,
-    }];
-    for level in 1u8..=6 {
-        styles.push(Style {
-            name: format!("개요 {level}"),
-            english_name: format!("Outline {level}"),
-            properties: 0,
-            next_style_id: 0,
-            lang_id: 0,
-            para_shape_id: level as u16,
-            char_shape_id: level as u16,
-        });
-    }
-    styles
-}
-
-/// `[body 10pt, h1 20pt-bold, …, h6 11pt-bold]` so HWPX viewers
-/// render headings visibly distinct from body text without us having
-/// to round-trip ParaShape's heading-level bits (which HWPX has no
-/// attribute for). Sizes are in 1/100 pt, matching `CharShape::base_size`.
-fn synthesise_heading_char_shapes() -> Vec<CharShape> {
-    let mut shapes = vec![{
-        let mut cs = CharShape::default();
-        cs.base_size = 1000; // 10 pt
-        cs
-    }];
-    // Heading sizes drop in step from H1 → H6; H1 doubles body.
-    let sizes = [2000, 1700, 1500, 1300, 1200, 1100];
-    for size in sizes {
-        let mut cs = CharShape::default();
-        cs.base_size = size;
-        // Bold bit (CharShape::attr layout matches HWP5: bit 1).
-        cs.attr = 0x0000_0002;
-        shapes.push(cs);
-    }
-    shapes
-}
-
-/// Build `[default, h1, h2, h3, h4, h5, h6]` so paragraph headers can
-/// reference index 0 for body / 1..=6 for headings, matching
-/// `ParaShape::heading_level()`'s encoding (level in bits 24..=26).
-fn synthesise_heading_para_shapes() -> Vec<ParaShape> {
-    let mut shapes = vec![ParaShape::default()];
-    for level in 1u8..=6 {
-        let mut p = ParaShape::default();
-        p.attribute = (level as u32) << 24;
-        shapes.push(p);
-    }
-    shapes
 }
 
 #[cfg(test)]

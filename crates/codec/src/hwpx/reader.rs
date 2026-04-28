@@ -33,6 +33,7 @@ impl Reader for HwpxReader {
                 doc.doc_info.border_fills = hdr.border_fills;
                 doc.doc_info.char_shapes = hdr.char_shapes;
                 doc.doc_info.para_shapes = hdr.para_shapes;
+                doc.doc_info.styles = hdr.styles;
             }
         }
 

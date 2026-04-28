@@ -110,7 +110,16 @@ fn emit_paragraph(
         )
     });
     if has_text {
-        line(out, &format!("PARAGRAPH[id=par-{path}]"));
+        // Stamp the heading level on the PARAGRAPH record so the LLM
+        // importer can re-classify on the symmetric direction. The
+        // shared `super::markdown::heading_level` lookup keys off
+        // `Style::name` ("개요 N" / "Outline N"), the same convention
+        // the human-Markdown exporter uses.
+        let header = match super::markdown::heading_level(doc, para) {
+            Some(n) => format!("PARAGRAPH[id=par-{path},level={n}]"),
+            None => format!("PARAGRAPH[id=par-{path}]"),
+        };
+        line(out, &header);
         line(out, &format!("TEXT: {text}"));
         out.push('\n');
     } else if !has_structural {

@@ -83,6 +83,11 @@ fn parse_paragraph<R: BufRead>(
     // Wire paraPrIDRef into `para.header.para_shape_id` so the
     // render path can look up ParaShape.align() for text-align CSS.
     para.header.para_shape_id = u32_attr(start, "paraPrIDRef").unwrap_or(0) as u16;
+    // Wire styleIDRef into `para.header.style_id` so the human /
+    // LLM Markdown exporters' `heading_level` lookup (which keys
+    // off `Style::name`) can re-classify headings on round-trip.
+    // ParagraphHeader::style_id is a u8 — clamp anything past that.
+    para.header.style_id = u32_attr(start, "styleIDRef").unwrap_or(0).min(255) as u8;
     let mut buf = Vec::new();
 
     loop {
