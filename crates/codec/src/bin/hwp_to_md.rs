@@ -60,6 +60,17 @@ Options:
                        each CharShapeRun's referenced CharShape.
                        Runs whose shape has no formatting emit as
                        plain text. Ignored with --llm.
+  --inline-assets      Embed picture bytes (resampled, base64) at
+                       the bottom of the main MD under a
+                       `<!-- hwp-transpiler: assets -->` footer.
+                       Single self-contained file; large.
+  --split-assets       Write picture bytes to a sibling
+                       `<stem>.assets.md` companion. Body MD stays
+                       clean for LLM context budgets; round-trip
+                       needs both files paired.
+  --asset-dpi=N        Target DPI for the resampled embed. Default
+                       72 (canonical screen DPI). 36 halves the
+                       pixel dims for tighter LLM contexts.
   -h, --help           Print this help and exit.
 ";
 
@@ -115,12 +126,11 @@ fn main() -> ExitCode {
         // where embedding Markdown formatting would confuse the
         // grammar. Flag silently drops on the LLM branch.
         emit_styles: args.emit_styles && !args.llm,
-        // Asset mode wiring lands in a follow-up commit; default
-        // here keeps the existing CLI behaviour byte-for-byte.
-        asset_mode: markdown::AssetMode::None,
-        asset_dpi: None,
+        asset_mode: args.asset_mode,
+        asset_dpi: args.asset_dpi,
     };
-    let md = markdown::to_markdown_with(&doc, &md_opts);
+    let exported = markdown::to_markdown_export(&doc, &md_opts);
+    let md = exported.main;
 
     if let Some(dir) = &plan.assets_dir {
         match assets::dump_assets(&doc, dir) {
@@ -163,7 +173,41 @@ fn main() -> ExitCode {
         }
     }
 
+    // Split-asset companion: a sibling `<stem>.assets.md` next to the
+    // main MD when `--split-assets` is set and the doc actually has
+    // pictures. Stdout output mode skips this — there's no place to
+    // anchor the companion against.
+    if let (Some(assets_text), OutputTarget::File(main_path)) =
+        (exported.assets.as_ref(), &plan.output)
+    {
+        let companion = companion_assets_path(main_path);
+        if let Err(e) = std::fs::write(&companion, assets_text.as_bytes()) {
+            eprintln!("write {}: {e}", companion.display());
+            return ExitCode::from(1);
+        }
+        eprintln!(
+            "wrote {} bytes → {}",
+            assets_text.len(),
+            companion.display()
+        );
+    } else if exported.assets.is_some() {
+        eprintln!(
+            "note: --split-assets requires file output; companion was not written"
+        );
+    }
+
     ExitCode::SUCCESS
+}
+
+/// `foo.md` → `foo.assets.md`. Pure path manipulation; doesn't
+/// touch the filesystem.
+fn companion_assets_path(main: &std::path::Path) -> PathBuf {
+    let parent = main.parent().unwrap_or_else(|| std::path::Path::new(""));
+    let stem = main
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("output");
+    parent.join(format!("{stem}.assets.md"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,6 +227,17 @@ struct CliArgs {
     emit_editable: bool,
     emit_domain_hints: bool,
     emit_styles: bool,
+    /// Embedded-asset emit policy. `None` keeps the legacy sidecar /
+    /// no-asset behaviour. `Inline` puts a `<!-- hwp-transpiler:
+    /// assets -->` footer inline at the bottom of the main MD with
+    /// the picture bytes encoded as `data:image/png;base64,…`.
+    /// `Split` writes the assets table into a `<stem>.assets.md`
+    /// companion next to the main MD so an LLM workflow can hand
+    /// over only the body file.
+    asset_mode: markdown::AssetMode,
+    /// Target DPI for the resampled embed. 72 = canonical screen
+    /// DPI; 36 halves the pixel dims for LLM-context budgets.
+    asset_dpi: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -218,6 +273,8 @@ fn parse_args(raw: &[String]) -> Result<Option<CliArgs>, String> {
     let mut emit_editable = false;
     let mut emit_domain_hints = false;
     let mut emit_styles = false;
+    let mut asset_mode = markdown::AssetMode::None;
+    let mut asset_dpi: Option<u32> = None;
 
     let mut i = 0;
     while i < raw.len() {
@@ -238,6 +295,34 @@ fn parse_args(raw: &[String]) -> Result<Option<CliArgs>, String> {
             }
             "--emit-styles" => {
                 emit_styles = true;
+            }
+            "--inline-assets" => {
+                if asset_mode == markdown::AssetMode::Split {
+                    return Err(
+                        "--inline-assets and --split-assets are mutually exclusive".into(),
+                    );
+                }
+                asset_mode = markdown::AssetMode::Inline;
+                asset_dpi.get_or_insert(72);
+            }
+            "--split-assets" => {
+                if asset_mode == markdown::AssetMode::Inline {
+                    return Err(
+                        "--inline-assets and --split-assets are mutually exclusive".into(),
+                    );
+                }
+                asset_mode = markdown::AssetMode::Split;
+                asset_dpi.get_or_insert(72);
+            }
+            s if s.starts_with("--asset-dpi=") => {
+                let val = &s["--asset-dpi=".len()..];
+                let n: u32 = val
+                    .parse()
+                    .map_err(|_| format!("--asset-dpi requires a positive integer, got {val:?}"))?;
+                if n == 0 {
+                    return Err("--asset-dpi must be > 0".into());
+                }
+                asset_dpi = Some(n);
             }
             "--no-assets" => {
                 if matches!(assets, AssetsMode::Explicit(_)) {
@@ -313,6 +398,8 @@ fn parse_args(raw: &[String]) -> Result<Option<CliArgs>, String> {
         emit_editable,
         emit_domain_hints,
         emit_styles,
+        asset_mode,
+        asset_dpi,
     }))
 }
 

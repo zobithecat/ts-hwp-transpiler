@@ -33,6 +33,11 @@ usage: md-to-hwpx <input.md> [output.hwpx | -]
 Reads UTF-8 Markdown, writes a minimum-viable HWPX. Output defaults
 to <input-stem>.hwpx next to the input. Pass `-` to stream the HWPX
 bytes (binary) to stdout.
+
+Asset auto-pairing: if a sibling `<stem>.assets.md` lives next to
+the input (i.e. it was produced by `hwp-to-md --split-assets`), it's
+read and concatenated automatically so embedded pictures round-trip
+into the HWPX without extra flags.
 ";
 
 fn main() -> ExitCode {
@@ -49,12 +54,28 @@ fn main() -> ExitCode {
     let input_path = PathBuf::from(&args[0]);
     let output_target = args.get(1).cloned();
 
-    let src = match std::fs::read_to_string(&input_path) {
+    let main_src = match std::fs::read_to_string(&input_path) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("read {}: {e}", input_path.display());
             return ExitCode::from(2);
         }
+    };
+
+    // Look for a sibling `<stem>.assets.md` companion (split-asset
+    // mode emit) and append it to the main MD before parsing. The
+    // LLM importer's `<!-- hwp-transpiler: assets -->` footer
+    // detection treats the appended block exactly like an inline
+    // footer — a single parser path covers both modes.
+    let src = match load_companion_assets(&input_path) {
+        Some(assets) => {
+            eprintln!(
+                "found {} bytes of companion assets",
+                assets.len()
+            );
+            format!("{main_src}\n\n{assets}")
+        }
+        None => main_src,
     };
 
     let mut doc = match from_markdown(&src) {
@@ -99,4 +120,16 @@ fn main() -> ExitCode {
     }
 
     ExitCode::SUCCESS
+}
+
+/// Resolve `<stem>.md` → `<stem>.assets.md` and read it back when
+/// present. Silently returns `None` if the file is absent — the
+/// importer falls back to assets-less behaviour. Quiet on read
+/// errors too: a sibling that exists but won't decode shouldn't
+/// kill the conversion of the main file.
+fn load_companion_assets(main: &std::path::Path) -> Option<String> {
+    let parent = main.parent().unwrap_or_else(|| std::path::Path::new(""));
+    let stem = main.file_stem().and_then(|s| s.to_str())?;
+    let companion = parent.join(format!("{stem}.assets.md"));
+    std::fs::read_to_string(companion).ok()
 }
