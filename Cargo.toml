@@ -46,6 +46,10 @@ hwp = "*"
 # Pure Rust, MSRV-friendly.
 pulldown-cmark = "0.12"
 
+# Standard base64 codec for the MD asset pipeline (data: URIs in
+# split-asset .md pairs and inline-asset round-trips).
+base64 = "0.22"
+
 [profile.release]
 opt-level = "z"
 lto = true

@@ -8,6 +8,7 @@
 //! each stream migrates out of `unknown_streams` into the typed IR and the
 //! round-trip invariant must stay green.
 
+pub mod asset_pipeline;
 pub mod export;
 pub mod hwp;
 pub mod hwpx;

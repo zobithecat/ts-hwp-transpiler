@@ -13,6 +13,11 @@ quick-xml = { workspace = true }
 pulldown-cmark = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
+# Asset pipeline: decode arbitrary picture bytes, resize for MD
+# embedding, re-encode (lossless WebP) before base64-wrapping into
+# the data URI.
+image = { workspace = true }
+base64 = { workspace = true }
 
 [[bin]]
 name = "hwp-roundtrip"
