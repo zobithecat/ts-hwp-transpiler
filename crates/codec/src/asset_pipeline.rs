@@ -124,6 +124,12 @@ fn encode_one(entry: &BinaryEntry, opts: &EncodeOpts) -> Option<EncodedAsset> {
         .ok()?;
     let base = STANDARD.encode(&buf);
     let bin_id = bin_id_from_entry_id(&entry.id);
+    // The encoded payload is PNG regardless of the source format,
+    // so the BinData filename has to match — `image1.jpg` carrying
+    // PNG bytes makes HWPX viewers try to JPEG-decode and silently
+    // skip the picture. Re-stem the id to keep the numeric / hex
+    // segment but force the extension.
+    let normalised_id = renormalise_id_to_png(&entry.id);
     Some(EncodedAsset {
         asset_id: format!(
             "asset-{}",
@@ -131,7 +137,7 @@ fn encode_one(entry: &BinaryEntry, opts: &EncodeOpts) -> Option<EncodedAsset> {
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| entry.id.clone())
         ),
-        source_id: entry.id.clone(),
+        source_id: normalised_id,
         bin_id,
         mime: "image/png".into(),
         width: Some(out_w),
@@ -163,6 +169,18 @@ pub fn decode_data_uri_to_binary_entry(uri: &str, source_id: &str) -> Option<Bin
         },
         bytes,
     })
+}
+
+/// `image1.jpg` → `image1.png` / `BIN0001.bmp` → `BIN0001.png`.
+/// Keeps the stem (so `bin_id_from_entry_id` still resolves) and
+/// swaps the extension to `.png` because that's what
+/// `encode_for_md` always emits. Falls back to appending `.png`
+/// when the source has no recognisable extension.
+fn renormalise_id_to_png(id: &str) -> String {
+    match id.rsplit_once('.') {
+        Some((stem, _ext)) => format!("{stem}.png"),
+        None => format!("{id}.png"),
+    }
 }
 
 /// HWP5 OLE names are `BIN0001.png` (hex per Hancom convention);
