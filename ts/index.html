@@ -10,57 +10,43 @@
     <header>
       <h1>ts-hwp-transpiler</h1>
       <p>
-        HWP/HWPX → Markdown 브라우저 변환 데모. 에디터/미리보기는
+        HWP/HWPX ↔ Markdown 양방향 변환 데모. 미리보기는 자체 구조형 HTML +
         <a href="https://www.npmjs.com/package/@rhwp/editor" target="_blank"
           >@rhwp/editor</a
         >
-        iframe 임베드, Markdown 변환은 이 프로젝트의 <code>exportMarkdown</code>.
+        iframe, 변환은 이 프로젝트의 <code>exportMarkdown</code> /
+        <code>importMarkdown</code> / <code>saveHwpx</code>.
       </p>
     </header>
 
     <main>
-      <section class="controls">
-        <label class="file-picker">
-          <input type="file" id="file" accept=".hwp,.hwpx,.md,.markdown" multiple />
-          <span>📂 .hwp / .hwpx / .md 선택 · 드래그 (여러 파일 가능)</span>
-        </label>
-
-        <fieldset class="options">
-          <legend>Markdown 옵션</legend>
-          <label
-            ><input type="checkbox" id="llm-mode" /> LLM 구조화 모드 (stable id ·
-            레코드 형식)</label
-          >
-          <label
-            ><input type="checkbox" id="emit-roles" /> role · editable 태그</label
-          >
-          <label
-            ><input type="checkbox" id="domain-hints" /> 도메인 힌트 (institution_info /
-            budget / …)</label
-          >
-          <label
-            ><input type="checkbox" id="emit-styles" checked /> 인라인 스타일
-            (<code>**bold**</code> · <code>*italic*</code> · <code>~~strike~~</code>) —
-            human 경로 전용</label
-          >
-          <label class="asset-mode">
-            그림 처리:
-            <select id="asset-mode">
-              <option value="none" selected>텍스트만 (이미지 제외)</option>
-              <option value="inline">인라인 base64 (단일 .md)</option>
-              <option value="split">분리 (.md + .assets.md)</option>
-            </select>
-            <select id="asset-dpi">
-              <option value="72" selected>72 DPI</option>
-              <option value="36">36 DPI (LLM-context 절약)</option>
-            </select>
+      <!-- Top control row: file chip + status. Always visible so the
+           user knows what's currently loaded regardless of which pane
+           they're looking at. -->
+      <section class="topbar">
+        <div id="file-chip" class="file-chip empty">
+          <label class="file-picker">
+            <input
+              type="file"
+              id="file"
+              accept=".hwp,.hwpx,.md,.markdown"
+              multiple
+            />
+            <span class="file-picker-cta">📂 .hwp · .hwpx · .md 선택 · 드래그</span>
           </label>
-        </fieldset>
-
-        <div id="status">wasm 로드 중…</div>
+          <span class="file-chip-hint">
+            (.md 와 .md.assets 페어를 같이 골라도 됩니다)
+          </span>
+        </div>
+        <div id="status" class="status">wasm 로드 중…</div>
       </section>
 
       <section class="split">
+        <!-- LEFT: preview area. Three tabs — our structured HTML
+             render, the rhwp editor iframe, and a read-only view of
+             whatever Markdown we currently hold. The Markdown tab
+             tracks the right-pane export options live so the user
+             can see what they'll download. -->
         <article class="pane preview-pane" data-tab="html">
           <header class="pane-header">
             <nav class="tabs" role="tablist">
@@ -70,7 +56,7 @@
                 role="tab"
                 data-target="html"
               >
-                HTML 미리보기 <span class="tag">exportHtml</span>
+                HTML <span class="tag">exportHtml</span>
               </button>
               <button
                 type="button"
@@ -80,14 +66,16 @@
               >
                 에디터 <span class="tag">@rhwp/editor</span>
               </button>
+              <button
+                type="button"
+                class="tab"
+                role="tab"
+                data-target="markdown"
+              >
+                Markdown <span class="tag">exportMarkdown</span>
+              </button>
             </nav>
-            <span id="preview-meta"></span>
-            <button id="html-download" type="button" disabled>
-              HTML 다운로드
-            </button>
-            <button id="pdf-download" type="button" disabled>
-              PDF 다운로드
-            </button>
+            <span id="preview-meta" class="preview-meta"></span>
           </header>
           <div id="preview" class="preview-host editor-host" hidden>
             <p class="hint">에디터 탭을 클릭하면 rhwp 편집기가 로드됩니다.</p>
@@ -95,24 +83,101 @@
           <div id="md-preview" class="preview-host md-preview-host">
             <p class="hint">파일을 선택하면 여기에 HTML 미리보기가 나타납니다.</p>
           </div>
+          <pre id="markdown" class="md-host" hidden></pre>
         </article>
 
-        <article class="pane">
-          <header class="pane-header">
-            <h2>Markdown <span class="tag">ts-hwp-transpiler</span></h2>
-            <div class="header-actions">
+        <!-- RIGHT: stack of output cards. Each card owns its own
+             options + actions so the user can tell at a glance which
+             toggle affects which output. -->
+        <aside class="output-stack">
+          <!-- Markdown 출력 카드 -->
+          <article class="card">
+            <header class="card-header">
+              <h2>Markdown 출력</h2>
+              <p class="card-sub">
+                현재 IR을 .md로 내보냅니다. LLM 노테이션 + 그림 처리 옵션이
+                여기에 적용됩니다.
+              </p>
+            </header>
+            <fieldset class="card-options">
+              <label
+                ><input type="checkbox" id="llm-mode" /> LLM 구조화 모드 (stable
+                id · 레코드 형식)</label
+              >
+              <label
+                ><input type="checkbox" id="emit-roles" /> role · editable
+                태그</label
+              >
+              <label
+                ><input type="checkbox" id="domain-hints" /> 도메인 힌트
+                (institution_info / budget / …)</label
+              >
+              <label
+                ><input type="checkbox" id="emit-styles" checked /> 인라인 스타일
+                (<code>**bold**</code> · <code>*italic*</code> ·
+                <code>~~strike~~</code>)</label
+              >
+              <div class="row">
+                <label>
+                  그림 처리:
+                  <select id="asset-mode">
+                    <option value="none" selected>텍스트만</option>
+                    <option value="inline">인라인 base64 (단일 .md)</option>
+                    <option value="split">분리 (.md + .assets.md)</option>
+                  </select>
+                </label>
+                <label>
+                  DPI:
+                  <select id="asset-dpi">
+                    <option value="72" selected>72</option>
+                    <option value="36">36 (LLM-context 절약)</option>
+                  </select>
+                </label>
+              </div>
+            </fieldset>
+            <div class="card-actions">
               <button id="md-download" type="button" disabled>
                 .md 다운로드
               </button>
-              <button id="hwpx-download" type="button" disabled
-                title="현재 Markdown을 IR로 가져와 .hwpx로 저장 (round-trip 데모)">
-                .hwpx 다운로드
-              </button>
               <button id="copy-md" type="button" disabled>복사</button>
             </div>
-          </header>
-          <pre id="markdown" class="md-host"></pre>
-        </article>
+          </article>
+
+          <!-- HWPX 저장 카드 (passthrough) -->
+          <article class="card">
+            <header class="card-header">
+              <h2>HWPX 저장</h2>
+              <p class="card-sub">
+                현재 IR을 그대로 .hwpx로 저장합니다 (passthrough — 그림과 원본
+                메타가 보존됩니다). MD 라운드트립이 필요하면 .md 다운로드 →
+                업로드 사이클을 사용하세요.
+              </p>
+            </header>
+            <div class="card-actions">
+              <button id="hwpx-download" type="button" disabled>
+                .hwpx 다운로드
+              </button>
+            </div>
+          </article>
+
+          <!-- HTML / PDF 카드 -->
+          <article class="card">
+            <header class="card-header">
+              <h2>HTML / PDF</h2>
+              <p class="card-sub">
+                구조형 HTML 미리보기를 정적 파일 또는 인쇄용 PDF로 내보냅니다.
+              </p>
+            </header>
+            <div class="card-actions">
+              <button id="html-download" type="button" disabled>
+                HTML 다운로드
+              </button>
+              <button id="pdf-download" type="button" disabled>
+                PDF 다운로드
+              </button>
+            </div>
+          </article>
+        </aside>
       </section>
     </main>
 

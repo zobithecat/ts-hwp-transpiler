@@ -4,8 +4,12 @@
   --muted: #6b6b70;
   --pane-bg: #ffffff;
   --accent: #0a84ff;
+  --accent-soft: #e6f0ff;
   --border: #e0e0e4;
-  --font-ui: -apple-system, "Segoe UI", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+  --card-bg: #ffffff;
+  --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --font-ui: -apple-system, "Segoe UI", "Apple SD Gothic Neo", "Noto Sans KR",
+    sans-serif;
   --font-mono: "SF Mono", Menlo, Consolas, "D2Coding", monospace;
 }
 
@@ -37,80 +41,165 @@ header p {
   font-size: 0.9rem;
 }
 
+header p code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  background: #f0f0f4;
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+header p a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+header p a:hover {
+  text-decoration: underline;
+}
+
 main {
   padding: 1rem 1.5rem;
   display: grid;
   grid-template-rows: auto 1fr;
   gap: 1rem;
-  height: calc(100vh - 74px);
+  height: calc(100vh - 90px);
 }
 
-.controls {
+/* ── Topbar: file chip + status ──────────────────────────────── */
+
+.topbar {
   display: flex;
-  flex-wrap: wrap;
+  align-items: center;
   gap: 1rem;
-  align-items: flex-start;
-  padding: 1rem;
+  padding: 0.6rem 0.9rem;
   background: var(--pane-bg);
   border: 1px solid var(--border);
   border-radius: 8px;
+  box-shadow: var(--card-shadow);
 }
 
-.file-picker {
+.file-chip {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex: 1;
+  min-width: 0;
+}
+
+.file-chip .file-picker {
   display: inline-flex;
   align-items: center;
-  gap: 0.5rem;
-  padding: 0.5rem 0.75rem;
+  gap: 0.4rem;
+  padding: 0.45rem 0.75rem;
   background: var(--accent);
   color: white;
   border-radius: 6px;
   cursor: pointer;
-  font-size: 0.9rem;
+  font-size: 0.85rem;
+  white-space: nowrap;
 }
 
-.file-picker input[type="file"] {
+.file-chip .file-picker input[type="file"] {
   display: none;
 }
 
-.options {
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 0.5rem 0.75rem;
-  margin: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-}
-
-.options legend {
-  padding: 0 0.25rem;
+.file-chip-hint {
+  color: var(--muted);
   font-size: 0.8rem;
-  color: var(--muted);
 }
 
-.options label {
-  font-size: 0.85rem;
-  display: flex;
-  align-items: center;
-  gap: 0.35rem;
-  cursor: pointer;
+.file-chip.loaded .file-chip-hint {
+  display: none;
 }
 
-#status {
-  margin-left: auto;
-  align-self: center;
+/* When a file is loaded, the chip shows a tag (HWP/HWPX/MD), the
+   filename, and a small reset button. The CTA shrinks to "재선택". */
+.file-chip.loaded .file-picker-cta::before {
+  content: "📂 ";
+}
+.file-chip.loaded .file-picker-cta {
+  font-size: 0.78rem;
+}
+
+.file-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+}
+
+.file-tag.hwp,
+.file-tag.hwpx {
+  background: #fff4e0;
+  color: #ad6c00;
+  border: 1px solid #f3d8a8;
+}
+
+.file-tag.md {
+  background: #e6f0ff;
+  color: #0a4ea3;
+  border: 1px solid #b2cdf2;
+}
+
+.file-tag.pair {
+  background: #e8f5e9;
+  color: #1f6f3a;
+  border: 1px solid #b2dfb6;
+}
+
+.file-name {
+  font-family: var(--font-mono);
   font-size: 0.85rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 30vw;
+}
+
+.file-meta {
   color: var(--muted);
+  font-size: 0.75rem;
   font-family: var(--font-mono);
 }
 
-#status.error {
+.file-reset {
+  margin-left: auto;
+  padding: 0.25rem 0.5rem;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.file-reset:hover {
+  background: #fafafa;
+  color: var(--fg);
+}
+
+.status {
+  margin-left: auto;
+  font-size: 0.8rem;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+.status.error {
   color: #d93025;
 }
 
+/* ── Split layout: preview pane + output stack ─────────────── */
+
 .split {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1.4fr 1fr;
   gap: 1rem;
   min-height: 0;
 }
@@ -123,6 +212,7 @@ main {
   border-radius: 8px;
   overflow: hidden;
   min-height: 0;
+  box-shadow: var(--card-shadow);
 }
 
 .pane-header {
@@ -132,44 +222,14 @@ main {
   padding: 0.5rem 0.75rem;
   border-bottom: 1px solid var(--border);
   background: #fafafa;
+  gap: 0.5rem;
 }
 
-.pane-header h2 {
-  margin: 0;
-  font-size: 0.9rem;
-  font-weight: 600;
-}
-
-.pane-header #preview-meta,
-.pane-header button {
+.preview-meta {
   font-size: 0.75rem;
   color: var(--muted);
   font-family: var(--font-mono);
-}
-
-.pane-header button {
-  padding: 0.25rem 0.6rem;
-  border: 1px solid var(--border);
-  background: white;
-  border-radius: 4px;
-  cursor: pointer;
-}
-
-.pane-header button:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-.header-actions {
-  display: flex;
-  gap: 0.3rem;
-  align-items: center;
-}
-
-#pdf-download,
-#md-download {
-  font-size: 0.75rem;
-  font-family: var(--font-mono);
+  margin-left: auto;
 }
 
 .preview-host,
@@ -193,9 +253,6 @@ main {
   background: #fcfcfd;
 }
 
-/* Editor pane hosts a full iframe from @rhwp/editor. Zero padding,
-   zero margin, iframe fills the pane. Static placeholder (`.hint`)
-   still shows during boot before createEditor() runs. */
 .editor-host {
   padding: 0;
 }
@@ -207,10 +264,7 @@ main {
   border: 0;
 }
 
-/* Two-tab switcher inside the left pane. The iframe pane and the
-   marked-rendered pane are both children of the same <article>; tab
-   clicks toggle `hidden` on the inactive one and the `is-active`
-   class on the clicked button. No framework — the DOM is small. */
+/* Tabs inside the preview pane */
 .tabs {
   display: flex;
   gap: 0.25rem;
@@ -242,16 +296,22 @@ main {
   box-shadow: 0 0 0 1px var(--accent);
 }
 
-/* Reset the 중첩 .tag styling so it sits cleanly inside a tab button
-   regardless of the button's active state. */
 .tabs .tab .tag {
   margin-left: 0;
 }
 
-/* Marked renders our MD into standard HTML; style just enough to
-   make headings/tables/lists legible in preview. Intentionally
-   minimal — the goal is "does the MD look reasonable?", not "beat
-   a full-fat markdown stylesheet". */
+.pane-header .tag {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 1px 6px;
+  font-size: 0.65rem;
+  font-weight: 500;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-family: var(--font-mono);
+}
+
 .md-preview-host {
   font-size: 0.9rem;
   line-height: 1.55;
@@ -305,19 +365,75 @@ main {
   color: var(--muted);
 }
 
-.pane-header .tag {
-  display: inline-block;
-  margin-left: 0.4rem;
-  padding: 1px 6px;
-  font-size: 0.65rem;
-  font-weight: 500;
-  color: var(--muted);
-  border: 1px solid var(--border);
-  border-radius: 3px;
-  font-family: var(--font-mono);
+/* ── Output card stack on the right ──────────────────────────── */
+
+.output-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  overflow-y: auto;
+  min-height: 0;
 }
 
-header p code {
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.85rem 1rem;
+  box-shadow: var(--card-shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.card-header h2 {
+  margin: 0 0 0.2rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.card-sub {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.card-options {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin: 0;
+  padding: 0.55rem 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.card-options label {
+  font-size: 0.83rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  cursor: pointer;
+}
+
+.card-options .row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  align-items: center;
+}
+
+.card-options select {
+  padding: 0.2rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 0.8rem;
+  font-family: inherit;
+  background: white;
+}
+
+.card-options code {
   font-family: var(--font-mono);
   font-size: 0.85em;
   background: #f0f0f4;
@@ -325,11 +441,53 @@ header p code {
   border-radius: 3px;
 }
 
-header p a {
-  color: var(--accent);
-  text-decoration: none;
+.card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
 }
 
-header p a:hover {
-  text-decoration: underline;
+.card-actions button {
+  padding: 0.4rem 0.8rem;
+  border: 1px solid var(--border);
+  background: white;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-family: var(--font-mono);
+  color: var(--fg);
+}
+
+.card-actions button:hover:not(:disabled) {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.card-actions button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Primary action highlight — first button in each card. */
+.card-actions button:first-child:not(:disabled) {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+
+.card-actions button:first-child:hover:not(:disabled) {
+  background: #006edc;
+  color: white;
+}
+
+/* ── Responsive: collapse to single column on narrow viewports ── */
+
+@media (max-width: 900px) {
+  .split {
+    grid-template-columns: 1fr;
+  }
+  .file-name {
+    max-width: 60vw;
+  }
 }

@@ -29,7 +29,7 @@ import init, {
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T =>
   document.getElementById(id) as T;
 
-const fileInput = $<HTMLInputElement>("file");
+const fileChipEl = $("file-chip");
 const statusEl = $("status");
 const previewEl = $("preview");
 const mdPreviewEl = $("md-preview");
@@ -83,7 +83,7 @@ let currentStem = "document";
 // the default tab so users see our structured render first; the
 // rhwp editor iframe only boots when the user explicitly switches
 // to it.
-type LeftTab = "editor" | "html";
+type LeftTab = "editor" | "html" | "markdown";
 let activeTab: LeftTab = "html";
 
 // rhwp-editor handle — created lazily on the first editor-tab
@@ -105,6 +105,96 @@ let lastBufferLoadedInEditor = false;
 function setStatus(text: string, isError = false): void {
   statusEl.textContent = text;
   statusEl.classList.toggle("error", isError);
+}
+
+/// What kind of source the loaded IR came from. Drives the colored
+/// badge in the file chip so the user can tell at a glance whether
+/// the right-pane outputs are roundtrip-back-to-binary or
+/// from-scratch-via-MD scenarios.
+type SourceKind = "hwp" | "hwpx" | "md" | "md+assets";
+
+interface LoadedFile {
+  kind: SourceKind;
+  name: string;
+  size: number;
+}
+
+function renderFileChip(loaded: LoadedFile | null): void {
+  if (loaded === null) {
+    fileChipEl.classList.remove("loaded");
+    fileChipEl.innerHTML = `
+      <label class="file-picker">
+        <input type="file" id="file" accept=".hwp,.hwpx,.md,.markdown" multiple />
+        <span class="file-picker-cta">📂 .hwp · .hwpx · .md 선택 · 드래그</span>
+      </label>
+      <span class="file-chip-hint">
+        (.md 와 .md.assets 페어를 같이 골라도 됩니다)
+      </span>
+    `;
+    rebindFileInput();
+    return;
+  }
+  fileChipEl.classList.add("loaded");
+  const tagClass = loaded.kind.split("+")[0]; // hwp / hwpx / md
+  const tagLabel = loaded.kind.toUpperCase();
+  const sizeKb = (loaded.size / 1024).toFixed(1);
+  fileChipEl.innerHTML = `
+    <label class="file-picker">
+      <input type="file" id="file" accept=".hwp,.hwpx,.md,.markdown" multiple />
+      <span class="file-picker-cta">재선택</span>
+    </label>
+    <span class="file-tag ${tagClass}">${tagLabel}</span>
+    <span class="file-name" title="${escapeAttr(loaded.name)}">${escapeText(
+    loaded.name,
+  )}</span>
+    <span class="file-meta">${sizeKb} KB</span>
+    <button type="button" class="file-reset" id="file-reset">✕ 닫기</button>
+  `;
+  rebindFileInput();
+  $<HTMLButtonElement>("file-reset").addEventListener("click", resetLoaded);
+}
+
+/// HTML escapers for the chip rendering.
+function escapeText(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+function escapeAttr(s: string): string {
+  return escapeText(s).replace(/"/g, "&quot;");
+}
+
+/// Replacing the file-chip's innerHTML throws away the previous
+/// `<input>` element along with its bound listeners. Re-grab the
+/// new one and re-attach the change handler so the file picker
+/// stays live.
+function rebindFileInput(): void {
+  const fresh = $<HTMLInputElement>("file");
+  fresh.addEventListener("change", () => {
+    const files = Array.from(fresh.files ?? []);
+    void handleFiles(files);
+  });
+}
+
+function resetLoaded(): void {
+  if (ourIr !== null) {
+    disposeDoc(ourIr);
+    ourIr = null;
+  }
+  lastBuffer = null;
+  lastFileName = null;
+  lastBufferLoadedInEditor = false;
+  markdownEl.textContent = "";
+  copyBtn.disabled = true;
+  mdDlBtn.disabled = true;
+  hwpxDlBtn.disabled = true;
+  pdfBtn.disabled = true;
+  htmlBtn.disabled = true;
+  mdPreviewEl.innerHTML =
+    '<p class="hint">파일을 선택하면 여기에 HTML 미리보기가 나타납니다.</p>';
+  renderFileChip(null);
+  setStatus("ready");
 }
 
 function renderMarkdown(handle: number): { bytes: number; ms: number } {
@@ -163,16 +253,16 @@ function setTab(target: LeftTab): void {
   });
   previewEl.hidden = target !== "editor";
   mdPreviewEl.hidden = target !== "html";
-  // PDF download only makes sense off the structured HTML render —
-  // the rhwp iframe is cross-origin and can't be snapshotted from
-  // the parent frame.
-  pdfBtn.disabled = target !== "html" || ourIr === null;
-  htmlBtn.disabled = target !== "html" || ourIr === null;
+  markdownEl.hidden = target !== "markdown";
   if (target === "html") {
     renderStructuredHtml();
   } else if (target === "editor") {
     void ensureEditorLoaded();
   }
+  // PDF / HTML download buttons live in the right-pane output card
+  // now (no longer tab-bound). They're available whenever the IR
+  // is loaded — the underlying `exportHtml` doesn't care which tab
+  // is visible.
 }
 
 /// Boot the rhwp-editor iframe on demand, then hand it the most-
@@ -253,6 +343,11 @@ async function handleFile(file: File): Promise<void> {
     const m = renderMarkdown(ourIr);
     const ms = Math.round(performance.now() - started);
     setStatus(`loaded in ${ms}ms · MD ${m.bytes.toLocaleString()} bytes`);
+    renderFileChip({
+      kind: detectKind(file.name),
+      name: file.name,
+      size: bytes.length,
+    });
   } else {
     ourIr = null;
     markdownEl.textContent = "";
@@ -260,9 +355,10 @@ async function handleFile(file: File): Promise<void> {
     mdDlBtn.disabled = true;
     hwpxDlBtn.disabled = true;
     setStatus(`loadHwp 실패: ${String(irResult.reason)}`, true);
+    renderFileChip(null);
   }
-  pdfBtn.disabled = activeTab !== "html" || ourIr === null;
-  htmlBtn.disabled = activeTab !== "html" || ourIr === null;
+  pdfBtn.disabled = ourIr === null;
+  htmlBtn.disabled = ourIr === null;
 
   // If the user is already on the editor tab, deferred-load now so
   // they don't have to tab-click to retrigger; if they're still on
@@ -280,7 +376,10 @@ async function handleFile(file: File): Promise<void> {
 /// The rhwp-editor iframe stays empty for this path because we don't
 /// have HWP bytes to feed it; clicking the .hwpx download button
 /// produces those after the fact.
-async function handleMarkdownFile(file: File): Promise<void> {
+async function handleMarkdownFile(
+  file: File,
+  sourceOverride?: SourceKind,
+): Promise<void> {
   const text = await file.text();
   // Editor iframe has nothing to consume from a .md upload, so
   // clear any leftover buffer state from a previous HWP load.
@@ -317,15 +416,31 @@ async function handleMarkdownFile(file: File): Promise<void> {
   if (activeTab === "html") {
     renderStructuredHtml();
   }
-  pdfBtn.disabled = activeTab !== "html";
-  htmlBtn.disabled = activeTab !== "html";
+  pdfBtn.disabled = false;
+  htmlBtn.disabled = false;
   const ms = Math.round(performance.now() - started);
   setStatus(`loaded .md in ${ms}ms · ${text.length.toLocaleString()} chars`);
+  renderFileChip({
+    kind: sourceOverride ?? "md",
+    name: file.name,
+    size: text.length,
+  });
 }
 
 function isMarkdownFile(name: string): boolean {
   const lower = name.toLowerCase();
   return lower.endsWith(".md") || lower.endsWith(".markdown");
+}
+
+/// Filename → SourceKind. `.hwpx` wins over `.hwp` because the
+/// extension is more specific. `.md`/`.markdown` map to "md"; the
+/// "md+assets" badge is only set when the paired-upload path
+/// (`handleFiles`) explicitly overrides.
+function detectKind(name: string): SourceKind {
+  const lower = name.toLowerCase();
+  if (lower.endsWith(".hwpx")) return "hwpx";
+  if (lower.endsWith(".hwp")) return "hwp";
+  return "md";
 }
 
 /// Strip the directory path and trailing extension from a filename —
@@ -337,10 +452,11 @@ function stemOf(name: string): string {
   return dot > 0 ? base.slice(0, dot) : base;
 }
 
-fileInput.addEventListener("change", () => {
-  const files = Array.from(fileInput.files ?? []);
-  void handleFiles(files);
-});
+// Initial chip render binds the file <input> change handler. After
+// every renderFileChip(...), the input is fresh and rebound by
+// rebindFileInput(). Drag-and-drop on the body still routes through
+// the dispatcher.
+renderFileChip(null);
 
 document.body.addEventListener("dragover", (e) => e.preventDefault());
 document.body.addEventListener("drop", (e) => {
@@ -372,7 +488,10 @@ async function handleFiles(files: File[]): Promise<void> {
     const companion = await assets.text();
     const merged = `${main}\n\n${companion}`;
     const synthetic = new File([merged], body.name, { type: "text/markdown" });
-    void handleFile(synthetic);
+    // Side-step the auto-dispatch in `handleFile` so we can flag the
+    // chip with the "md+assets" badge — `handleMarkdownFile` accepts
+    // an explicit `SourceKind` override exactly for this case.
+    void handleMarkdownFile(synthetic, "md+assets");
     return;
   }
   // No recognised pair — fall through to first file.
@@ -484,7 +603,7 @@ hwpxDlBtn.addEventListener("click", () => {
 /// stands on its own when opened in a browser — fonts via CDN, A4
 /// page widths, table borders all baked in.
 htmlBtn.addEventListener("click", () => {
-  if (!ourIr || activeTab !== "html") return;
+  if (!ourIr) return;
   const body = exportHtml(ourIr, undefined, emitStylesEl.checked, true);
   const html = printableHtmlShell(currentStem, body);
   downloadBlob(
@@ -500,7 +619,7 @@ htmlBtn.addEventListener("click", () => {
 /// synchronously inside the click handler or the browser treats it
 /// as non-user-initiated and blocks it.
 pdfBtn.addEventListener("click", () => {
-  if (!ourIr || activeTab !== "html") return;
+  if (!ourIr) return;
   const popup = window.open("", "_blank", "width=900,height=1100");
   if (!popup) {
     setStatus("팝업이 차단되어 PDF 프린트를 열 수 없습니다.", true);
