@@ -27,7 +27,8 @@
 //! to the values we've observed in Hancom-written fixtures.
 
 use hwp_transpiler_core::ir::{
-    CharShapeRun, ControlKind, IrError, Paragraph, Section, TableCell, TableControl,
+    CharShapeRun, ControlKind, IrError, Paragraph, PictureControl, Section, TableCell,
+    TableControl,
 };
 
 /// Namespace declarations that go on the root `<hs:sec>`. Hancom
@@ -135,7 +136,8 @@ fn emit_run_with_range(
         for ctrl in para.controls.iter().take(take) {
             match &ctrl.kind {
                 ControlKind::Table(t) => emit_table(t, out),
-                // Pictures and other gsos round-trip through
+                ControlKind::Picture(p) => emit_picture(p, out),
+                // Equations / unknown gsos round-trip through
                 // unknown_streams for now; the writer doesn't know
                 // how to reconstruct their XML yet, so they drop
                 // silently. Documented gap.
@@ -241,6 +243,53 @@ fn emit_cell(cell: &TableCell, out: &mut String) {
     ));
 
     out.push_str("</hp:tc>");
+}
+
+/// Emit `<hp:pic>` for a `PictureControl`. The IR carries only the
+/// minimum (`bin_id`, `width_hwpu`, `height_hwpu`); we fill in the
+/// rest of the children with the defaults observed on Hancom-authored
+/// fixtures so the picture renders correctly in HWP / rhwp viewers
+/// instead of getting dropped or zero-sized.
+fn emit_picture(pic: &PictureControl, out: &mut String) {
+    let w = pic.width_hwpu.max(1);
+    let h = pic.height_hwpu.max(1);
+    let bin_ref = format!("image{}", pic.bin_id);
+    out.push_str(&format!(
+        concat!(
+            r#"<hp:pic id="0" zOrder="0" numberingType="PICTURE" "#,
+            r#"textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" "#,
+            r#"dropcapstyle="None" href="" groupLevel="0" instid="0" "#,
+            r#"reverse="0">"#,
+            r#"<hp:offset x="0" y="0"/>"#,
+            r#"<hp:orgSz width="{w}" height="{h}"/>"#,
+            r#"<hp:curSz width="{w}" height="{h}"/>"#,
+            r#"<hp:flip horizontal="0" vertical="0"/>"#,
+            r#"<hp:rotationInfo angle="0" centerX="0" centerY="0" rotateimage="1"/>"#,
+            r#"<hp:renderingInfo>"#,
+            r#"<hc:transMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/>"#,
+            r#"<hc:scaMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/>"#,
+            r#"<hc:rotMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/>"#,
+            r#"</hp:renderingInfo>"#,
+            r#"<hc:img binaryItemIDRef="{bin}" bright="0" contrast="0" effect="REAL_PIC" alpha="0"/>"#,
+            r#"<hp:imgRect>"#,
+            r#"<hc:pt0 x="0" y="0"/>"#,
+            r#"<hc:pt1 x="{w}" y="0"/>"#,
+            r#"<hc:pt2 x="{w}" y="{h}"/>"#,
+            r#"<hc:pt3 x="0" y="{h}"/>"#,
+            r#"</hp:imgRect>"#,
+            r#"<hp:imgClip left="0" right="0" top="0" bottom="0"/>"#,
+            r#"<hp:inMargin left="0" right="0" top="0" bottom="0"/>"#,
+            r#"<hp:sz width="{w}" widthRelTo="ABSOLUTE" height="{h}" heightRelTo="ABSOLUTE" protect="0"/>"#,
+            r#"<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" "#,
+            r#"allowOverlap="1" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" "#,
+            r#"vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/>"#,
+            r#"<hp:outMargin left="0" right="0" top="0" bottom="0"/>"#,
+            r#"</hp:pic>"#,
+        ),
+        w = w,
+        h = h,
+        bin = bin_ref,
+    ));
 }
 
 fn escape_xml(s: &str) -> String {

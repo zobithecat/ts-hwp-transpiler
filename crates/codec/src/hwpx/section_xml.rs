@@ -227,8 +227,29 @@ fn parse_picture<R: BufRead>(
             Event::End(e) if local_name_bytes(e.name().as_ref()) == "pic" => break,
             Event::Empty(e) => match local_name(&e) {
                 "curSz" => {
-                    pic.width_hwpu = u32_attr(&e, "width").unwrap_or(0);
-                    pic.height_hwpu = u32_attr(&e, "height").unwrap_or(0);
+                    let w = u32_attr(&e, "width").unwrap_or(0);
+                    let h = u32_attr(&e, "height").unwrap_or(0);
+                    // Many real HWPX docs ship `<hp:curSz width="0"
+                    // height="0"/>` and rely on `<hp:orgSz>` for the
+                    // actual render dim. Don't overwrite a non-zero
+                    // value already pulled from `<hp:orgSz>`.
+                    if w > 0 {
+                        pic.width_hwpu = w;
+                    }
+                    if h > 0 {
+                        pic.height_hwpu = h;
+                    }
+                }
+                "orgSz" => {
+                    // Original / intrinsic picture size, set first so
+                    // `<hp:curSz>` only overrides when it carries a
+                    // real value.
+                    if pic.width_hwpu == 0 {
+                        pic.width_hwpu = u32_attr(&e, "width").unwrap_or(0);
+                    }
+                    if pic.height_hwpu == 0 {
+                        pic.height_hwpu = u32_attr(&e, "height").unwrap_or(0);
+                    }
                 }
                 "img" => {
                     if let Some(id_ref) = string_attr(&e, "binaryItemIDRef") {
