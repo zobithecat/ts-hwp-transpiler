@@ -21,10 +21,64 @@ import init, {
   exportMarkdown,
   exportMarkdownAssets,
   importMarkdown,
+  inspectIr,
   loadHwp,
   saveHwpx,
   version,
 } from "./wasm/hwp_transpiler_wasm.js";
+
+/// Console-side debug prefix so the user can grep the dev console
+/// for the demo's own log lines.
+const TAG = "%c[hwp-demo]";
+const TAG_STYLE = "color:#0a84ff;font-weight:bold";
+
+function logIr(label: string, handle: number): void {
+  try {
+    const s = inspectIr(handle);
+    const summary = JSON.parse(s);
+    console.log(TAG, TAG_STYLE, label, summary);
+  } catch (err) {
+    console.warn(TAG, TAG_STYLE, label, "inspect failed:", err);
+  }
+}
+
+/// Inspect the bytes a `saveHwpx` produced — list the entry names
+/// inside the OCF / ZIP container without needing a full unzip
+/// library. Reads the central directory directly. Best-effort,
+/// silently bails on any malformed structure.
+function logHwpxEntries(label: string, bytes: Uint8Array): void {
+  try {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const entries: { name: string; size: number }[] = [];
+    // Scan for "PK\x01\x02" central directory headers.
+    for (let i = 0; i < view.byteLength - 4; i++) {
+      if (
+        view.getUint8(i) === 0x50 &&
+        view.getUint8(i + 1) === 0x4b &&
+        view.getUint8(i + 2) === 0x01 &&
+        view.getUint8(i + 3) === 0x02
+      ) {
+        const size = view.getUint32(i + 24, true);
+        const nameLen = view.getUint16(i + 28, true);
+        const nameStart = i + 46;
+        const name = new TextDecoder().decode(
+          bytes.subarray(nameStart, nameStart + nameLen),
+        );
+        entries.push({ name, size });
+        i = nameStart + nameLen - 1;
+      }
+    }
+    console.log(
+      TAG,
+      TAG_STYLE,
+      label,
+      `${bytes.length.toLocaleString()} bytes / ${entries.length} entries`,
+      entries,
+    );
+  } catch (err) {
+    console.warn(TAG, TAG_STYLE, label, "zip inspect failed:", err);
+  }
+}
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T =>
   document.getElementById(id) as T;
@@ -340,6 +394,7 @@ async function handleFile(file: File): Promise<void> {
 
   if (irResult.status === "fulfilled") {
     ourIr = irResult.value;
+    logIr(`loadHwp(${file.name})`, ourIr);
     const m = renderMarkdown(ourIr);
     const ms = Math.round(performance.now() - started);
     setStatus(`loaded in ${ms}ms · MD ${m.bytes.toLocaleString()} bytes`);
@@ -404,6 +459,7 @@ async function handleMarkdownFile(
   }
 
   ourIr = importedHandle;
+  logIr(`importMarkdown(${file.name})`, ourIr);
   // Show the *original* uploaded Markdown in the right pane so the
   // user sees what they fed in. Re-exporting through `exportMarkdown`
   // would round-trip-and-lose-fidelity, which is misleading at upload
@@ -581,8 +637,10 @@ hwpxDlBtn.addEventListener("click", () => {
   if (ourIr === null) return;
   try {
     const started = performance.now();
+    logIr(`saveHwpx(input)`, ourIr);
     const bytes = saveHwpx(ourIr);
     const ms = Math.round(performance.now() - started);
+    logHwpxEntries(`saveHwpx(output) ${currentStem}.hwpx`, bytes);
     downloadBlob(
       // wasm-bindgen types `Uint8Array.buffer` as `ArrayBufferLike`,
       // which TS won't widen to `BlobPart`. Cast through `BlobPart`

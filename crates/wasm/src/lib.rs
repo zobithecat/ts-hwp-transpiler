@@ -253,6 +253,60 @@ pub fn render_page(handle: u32, page: usize) -> Result<JsValue, JsValue> {
     serde_wasm_bindgen::to_value(&cmds).map_err(js_err)
 }
 
+/// Lightweight summary of the resident IR for browser-side console
+/// debugging. Returns a JSON string so the caller can `console.log`
+/// it without serde-wasm-bindgen overhead. Field shape:
+///   { sections: N, paragraphs: M, pictures: P, tables: T,
+///     bin_data: [{ id, mime, bytes }] }
+#[wasm_bindgen(js_name = inspectIr)]
+pub fn inspect_ir(handle: u32) -> Result<String, JsValue> {
+    use hwp_transpiler_core::ir::ControlKind;
+    with_doc(handle, |doc| {
+        let mut paragraphs = 0usize;
+        let mut pictures = 0usize;
+        let mut tables = 0usize;
+        for section in &doc.sections {
+            paragraphs += section.paragraphs.len();
+            for para in &section.paragraphs {
+                for ctrl in &para.controls {
+                    match &ctrl.kind {
+                        ControlKind::Picture(_) => pictures += 1,
+                        ControlKind::Table(_) => tables += 1,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let mut bin_summary = String::new();
+        bin_summary.push('[');
+        for (i, entry) in doc.bin_data.iter().enumerate() {
+            if i > 0 {
+                bin_summary.push(',');
+            }
+            let mime = entry.mime.as_deref().unwrap_or("");
+            bin_summary.push_str(&format!(
+                r#"{{"id":"{id}","mime":"{mime}","bytes":{n}}}"#,
+                id = json_escape(&entry.id),
+                mime = json_escape(mime),
+                n = entry.bytes.len(),
+            ));
+        }
+        bin_summary.push(']');
+        format!(
+            r#"{{"sections":{s},"paragraphs":{p},"pictures":{pic},"tables":{t},"bin_data":{b}}}"#,
+            s = doc.sections.len(),
+            p = paragraphs,
+            pic = pictures,
+            t = tables,
+            b = bin_summary,
+        )
+    })
+}
+
+fn json_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 #[wasm_bindgen(js_name = tokenizeFormula)]
 pub fn tokenize_formula(script: &str) -> Result<JsValue, JsValue> {
     let tokens = Lexer::new(script).tokenize();
