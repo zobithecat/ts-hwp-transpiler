@@ -53,7 +53,11 @@ pub struct EncodeOpts {
 
 impl Default for EncodeOpts {
     fn default() -> Self {
-        Self { dpi: Some(72) }
+        // Preserve original bytes by default — round-trip stays bit-
+        // identical, viewer-compatibility risks of re-encoding stay
+        // out of the picture. Callers that want to shrink the asset
+        // set explicit `dpi = Some(72)` or `Some(36)`.
+        Self { dpi: None }
     }
 }
 
@@ -99,6 +103,37 @@ fn encode_one(entry: &BinaryEntry, opts: &EncodeOpts) -> Option<EncodedAsset> {
     if entry.bytes.is_empty() {
         return None;
     }
+    let bin_id = bin_id_from_entry_id(&entry.id);
+
+    // dpi = None ⇒ verbatim path: pass the original bytes through
+    // and keep the original mime + id. Round-trip stays
+    // bit-identical, no decoder shenanigans, viewer renders the
+    // same encoded blob the source HWPX shipped.
+    if opts.dpi.is_none() {
+        let mime = entry
+            .mime
+            .clone()
+            .unwrap_or_else(|| guess_mime_from_id(&entry.id).to_string());
+        let base = STANDARD.encode(&entry.bytes);
+        return Some(EncodedAsset {
+            asset_id: format!(
+                "asset-{}",
+                bin_id
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| entry.id.clone())
+            ),
+            source_id: entry.id.clone(),
+            bin_id,
+            data_uri: format!("data:{mime};base64,{base}"),
+            mime,
+            width: None,
+            height: None,
+        });
+    }
+
+    // dpi = Some(N) ⇒ decode + resample + lossless PNG re-encode.
+    // Used when the caller wants to shrink the asset for an LLM
+    // context budget; loses byte identity in exchange for size.
     let reader = ImageReader::new(Cursor::new(&entry.bytes))
         .with_guessed_format()
         .ok()?;
@@ -109,7 +144,6 @@ fn encode_one(entry: &BinaryEntry, opts: &EncodeOpts) -> Option<EncodedAsset> {
         let target_w = ((src_w as f64) * factor).round().max(1.0) as u32;
         let target_h = ((src_h as f64) * factor).round().max(1.0) as u32;
         if target_w >= src_w && target_h >= src_h {
-            // Don't upsample. Source already smaller than target.
             img
         } else {
             img.resize(target_w, target_h, image::imageops::FilterType::Lanczos3)
@@ -123,12 +157,9 @@ fn encode_one(entry: &BinaryEntry, opts: &EncodeOpts) -> Option<EncodedAsset> {
         .write_to(&mut Cursor::new(&mut buf), ImageFormat::Png)
         .ok()?;
     let base = STANDARD.encode(&buf);
-    let bin_id = bin_id_from_entry_id(&entry.id);
-    // The encoded payload is PNG regardless of the source format,
-    // so the BinData filename has to match — `image1.jpg` carrying
-    // PNG bytes makes HWPX viewers try to JPEG-decode and silently
-    // skip the picture. Re-stem the id to keep the numeric / hex
-    // segment but force the extension.
+    // The encoded payload is PNG so the BinData filename has to
+    // match the bytes — keep the stem (so `bin_id_from_entry_id`
+    // still resolves) and force the extension.
     let normalised_id = renormalise_id_to_png(&entry.id);
     Some(EncodedAsset {
         asset_id: format!(
@@ -169,6 +200,22 @@ pub fn decode_data_uri_to_binary_entry(uri: &str, source_id: &str) -> Option<Bin
         },
         bytes,
     })
+}
+
+/// Best-effort MIME from `BinaryEntry.id`'s extension. Used when
+/// the entry's `mime` field is `None` (the verbatim-pass path).
+fn guess_mime_from_id(id: &str) -> &'static str {
+    let ext = id.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
+    match ext.as_deref() {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("bmp") => "image/bmp",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        Some("tif") | Some("tiff") => "image/tiff",
+        _ => "application/octet-stream",
+    }
 }
 
 /// `image1.jpg` → `image1.png` / `BIN0001.bmp` → `BIN0001.png`.
@@ -287,8 +334,28 @@ mod tests {
             mime: Some("image/png".into()),
             bytes: png,
         };
-        let encoded = encode_for_md(&[entry], &EncodeOpts::default());
+        let encoded = encode_for_md(&[entry], &EncodeOpts { dpi: Some(72) });
         assert_eq!(encoded[0].width, Some(20));
+    }
+
+    #[test]
+    fn default_opts_pass_bytes_verbatim() {
+        // dpi = None (the new default): keep the original bytes, mime
+        // and id untouched so the round-trip stays byte-identical.
+        let png = make_solid_png(50, 25, [10, 20, 30]);
+        let entry = BinaryEntry {
+            id: "image7.jpg".into(), // non-png ext to prove no rename
+            mime: Some("image/jpeg".into()),
+            bytes: png.clone(),
+        };
+        let encoded = encode_for_md(&[entry], &EncodeOpts::default());
+        let asset = &encoded[0];
+        assert_eq!(asset.source_id, "image7.jpg", "id preserved");
+        assert_eq!(asset.mime, "image/jpeg", "mime preserved");
+        assert!(asset.data_uri.starts_with("data:image/jpeg;base64,"));
+        // Verbatim path doesn't compute output dims.
+        assert_eq!(asset.width, None);
+        assert_eq!(asset.height, None);
     }
 
     #[test]
@@ -303,14 +370,35 @@ mod tests {
     }
 
     #[test]
-    fn malformed_image_skipped() {
+    fn malformed_image_skipped_on_resize_path() {
+        // Resize path (`dpi = Some(_)`) decodes via the `image`
+        // crate and skips entries it can't parse. The verbatim
+        // path takes a different policy — see
+        // `verbatim_passes_unparseable_bytes_through`.
         let entry = BinaryEntry {
             id: "bogus.png".into(),
             mime: Some("image/png".into()),
             bytes: b"not actually a png".to_vec(),
         };
-        let encoded = encode_for_md(&[entry], &EncodeOpts::default());
+        let encoded = encode_for_md(&[entry], &EncodeOpts { dpi: Some(72) });
         assert!(encoded.is_empty());
+    }
+
+    #[test]
+    fn verbatim_passes_unparseable_bytes_through() {
+        // dpi = None never decodes — unparseable bytes ride through
+        // and get wrapped in the data URI as-is. The use case is
+        // formats the `image` crate doesn't understand (SVG,
+        // legacy WMF) that the source HWPX shipped intact and the
+        // viewer might still render.
+        let entry = BinaryEntry {
+            id: "image8.svg".into(),
+            mime: Some("image/svg+xml".into()),
+            bytes: b"<svg/>".to_vec(),
+        };
+        let encoded = encode_for_md(&[entry], &EncodeOpts::default());
+        assert_eq!(encoded.len(), 1);
+        assert_eq!(encoded[0].mime, "image/svg+xml");
     }
 
     #[test]

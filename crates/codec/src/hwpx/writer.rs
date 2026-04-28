@@ -90,10 +90,90 @@ impl Writer for HwpxWriter {
                 zip.add_part(name, &rewritten)?;
                 continue;
             }
+            if name == "Contents/content.hpf" {
+                // Splice an `<opf:item>` per `BinaryEntry` into the
+                // package manifest. Hancom viewers resolve picture
+                // `binaryItemIDRef` references through this list
+                // rather than scanning `BinData/`, so a missing
+                // entry shows the picture as broken even when the
+                // bytes are present in the archive.
+                let rewritten = inject_bin_data_into_manifest(bytes, doc);
+                zip.add_part(name, &rewritten)?;
+                continue;
+            }
             zip.add_part(name, bytes)?;
         }
 
         zip.finish()
+    }
+}
+
+/// Walk `doc.bin_data` and ensure every entry appears as an
+/// `<opf:item ... isEmbeded="1"/>` inside the package manifest.
+/// Items already present are kept as-is; missing ones get spliced in
+/// just before `</opf:manifest>` close. The header / section items
+/// shipped by the bundled skeleton are untouched.
+fn inject_bin_data_into_manifest(content_hpf: &[u8], doc: &IrDocument) -> Vec<u8> {
+    if doc.bin_data.is_empty() {
+        return content_hpf.to_vec();
+    }
+    let text = match std::str::from_utf8(content_hpf) {
+        Ok(s) => s,
+        Err(_) => return content_hpf.to_vec(),
+    };
+    let close = "</opf:manifest>";
+    let Some(close_pos) = text.find(close) else {
+        return content_hpf.to_vec();
+    };
+    let manifest_view = &text[..close_pos];
+    let mut additions = String::new();
+    for entry in &doc.bin_data {
+        if entry.bytes.is_empty() {
+            continue;
+        }
+        let id_attr = format!("href=\"BinData/{}\"", entry.id);
+        if manifest_view.contains(&id_attr) {
+            // Already in manifest — nothing to do.
+            continue;
+        }
+        let stem = entry
+            .id
+            .split_once('.')
+            .map(|(s, _)| s)
+            .unwrap_or(&entry.id);
+        let mime = entry.mime.clone().unwrap_or_else(|| {
+            // Pick a sensible default from the extension so viewers
+            // don't have to sniff bytes.
+            mime_from_id(&entry.id).to_string()
+        });
+        additions.push_str(&format!(
+            r#"<opf:item id="{stem}" href="BinData/{name}" media-type="{mime}" isEmbeded="1"/>"#,
+            stem = stem,
+            name = entry.id,
+            mime = mime,
+        ));
+    }
+    if additions.is_empty() {
+        return content_hpf.to_vec();
+    }
+    let mut out = String::with_capacity(text.len() + additions.len());
+    out.push_str(&text[..close_pos]);
+    out.push_str(&additions);
+    out.push_str(&text[close_pos..]);
+    out.into_bytes()
+}
+
+fn mime_from_id(id: &str) -> &'static str {
+    let ext = id.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
+    match ext.as_deref() {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("bmp") => "image/bmp",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        Some("tif") | Some("tiff") => "image/tiff",
+        _ => "application/octet-stream",
     }
 }
 

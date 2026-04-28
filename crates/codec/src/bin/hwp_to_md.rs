@@ -303,7 +303,11 @@ fn parse_args(raw: &[String]) -> Result<Option<CliArgs>, String> {
                     );
                 }
                 asset_mode = markdown::AssetMode::Inline;
-                asset_dpi.get_or_insert(72);
+                // Leave asset_dpi at None so the verbatim-bytes path
+                // takes over by default — preserves source mime and
+                // keeps round-trip byte-identical. Pass an explicit
+                // `--asset-dpi=72` (or 36) to opt into the resize +
+                // PNG re-encode pipeline.
             }
             "--split-assets" => {
                 if asset_mode == markdown::AssetMode::Inline {
@@ -312,7 +316,11 @@ fn parse_args(raw: &[String]) -> Result<Option<CliArgs>, String> {
                     );
                 }
                 asset_mode = markdown::AssetMode::Split;
-                asset_dpi.get_or_insert(72);
+                // Leave asset_dpi at None so the verbatim-bytes path
+                // takes over by default — preserves source mime and
+                // keeps round-trip byte-identical. Pass an explicit
+                // `--asset-dpi=72` (or 36) to opt into the resize +
+                // PNG re-encode pipeline.
             }
             s if s.starts_with("--asset-dpi=") => {
                 let val = &s["--asset-dpi=".len()..];
