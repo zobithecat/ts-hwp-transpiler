@@ -860,16 +860,36 @@ fn emit_new_style(id: u32, style: &Style, out: &mut Vec<u8>) {
 }
 
 /// Emit a from-scratch `<hh:paraPr>` block for an IR-side paraShape
-/// the original document didn't carry. Minimum valid shape: a single
-/// `<hh:align horizontal="…">` child. Other paraPr children
-/// (lineSpacing, margins, borders) aren't represented in our IR yet
-/// — viewers will fall back to defaults.
+/// the original document didn't carry. Hancom-authored paraPrs ship
+/// a full child set (align, heading, breakSetting, margin, lineSpacing,
+/// border, autoSpacing); without those, mac HWP 2014 / rhwp default
+/// to broken layout (zero line height, missing word breaks, no
+/// margins) and tables ride along with the same broken metrics. The
+/// IR's ParaShape only carries `align` typed for now — the other
+/// values use Hancom's "single-spaced 10pt body text" defaults.
 fn emit_new_para_pr(id: u32, shape: &ParaShape, out: &mut Vec<u8>) {
     out.extend_from_slice(b"<hh:paraPr id=\"");
     out.extend_from_slice(id.to_string().as_bytes());
-    out.extend_from_slice(b"\"><hh:align horizontal=\"");
+    out.extend_from_slice(
+        concat!(
+            r#"" tabPrIDRef="0" condense="0" fontLineHeight="0" snapToGrid="1" "#,
+            r#"suppressLineNumbers="0" checked="0">"#,
+            r#"<hh:align horizontal=""#,
+        ).as_bytes(),
+    );
     out.extend_from_slice(align_to_hwpx(shape.align()).as_bytes());
-    out.extend_from_slice(b"\" vertical=\"BASELINE\"/></hh:paraPr>");
+    out.extend_from_slice(
+        concat!(
+            r#"" vertical="BASELINE"/>"#,
+            r#"<hh:heading type="NONE" idRef="0" level="0"/>"#,
+            r#"<hh:breakSetting breakLatinWord="KEEP_WORD" breakNonLatinWord="KEEP_WORD" widowOrphan="0" keepWithNext="0" keepLines="0" pageBreakBefore="0" lineWrap="BREAK"/>"#,
+            r#"<hh:margin intent="0" left="0" right="0" prev="0" next="0"/>"#,
+            r#"<hh:lineSpacing type="PERCENT" value="160" unit="HWPUNIT"/>"#,
+            r#"<hh:border borderFillIDRef="0" offsetLeft="0" offsetRight="0" offsetTop="0" offsetBottom="0" connect="0" ignoreMargin="0"/>"#,
+            r#"<hh:autoSpacing eAsianEng="0" eAsianNum="0"/>"#,
+            r#"</hh:paraPr>"#,
+        ).as_bytes(),
+    );
 }
 
 /// Emit a from-scratch `<hh:charPr>` block. Includes every child the
@@ -1454,10 +1474,12 @@ mod tests {
         let s = std::str::from_utf8(&out).unwrap();
         assert!(!s.contains(r#"id="5""#), "id=5 dropped: {s}");
         assert!(!s.contains(r#"horizontal="LEFT""#), "old LEFT dropped: {s}");
-        assert!(
-            s.contains(r#"<hh:paraPr id="0"><hh:align horizontal="RIGHT""#),
-            "id=0 inserted with IR's align: {s}"
-        );
+        // The fresh paraPr emitted for an IR-side shape now carries
+        // the full Hancom-style child set; assert on the parts that
+        // identify the right id+align without pinning the exact
+        // attribute order.
+        assert!(s.contains(r#"<hh:paraPr id="0""#), "id=0 inserted: {s}");
+        assert!(s.contains(r#"horizontal="RIGHT""#), "IR's align applied: {s}");
     }
 
     #[test]
@@ -1503,10 +1525,12 @@ mod tests {
             "original paraPr 0 kept: {s}"
         );
         assert!(s.contains(r#"horizontal="RIGHT""#), "id=0 overlaid: {s}");
-        assert!(
-            s.contains(r#"<hh:paraPr id="1"><hh:align horizontal="CENTER""#),
-            "id=1 inserted: {s}"
-        );
+        // id=1 is freshly emitted by the rewriter — assert id+align
+        // independently rather than pinning the exact tag order, since
+        // the fresh-paraPr template now carries the Hancom-typical
+        // attribute set (tabPrIDRef, lineSpacing, breakSetting, …).
+        assert!(s.contains(r#"<hh:paraPr id="1""#), "id=1 inserted: {s}");
+        assert!(s.contains(r#"horizontal="CENTER""#), "id=1 align applied: {s}");
     }
 
     #[test]
