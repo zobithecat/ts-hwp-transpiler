@@ -762,7 +762,18 @@ fn charpr_attr_overrides(shape: &CharShape) -> HashMap<String, String> {
     let mut o = HashMap::new();
     o.insert("height".to_string(), shape.base_size.to_string());
     o.insert("textColor".to_string(), color_to_hex(shape.color));
-    o.insert("shadeColor".to_string(), color_to_hex(shape.shade_color));
+    // HWPX uses the literal `"none"` sentinel for "no shading"; our
+    // IR collapses that to `shade_color = 0`, which would round-trip
+    // as `#000000` (literal black) and viewers paint every glyph
+    // background black. Treat 0 as the sentinel and emit `"none"`.
+    o.insert(
+        "shadeColor".to_string(),
+        if shape.shade_color == 0 {
+            "none".to_string()
+        } else {
+            color_to_hex(shape.shade_color)
+        },
+    );
     if let Some(id) = shape.border_fill_id {
         o.insert("borderFillIDRef".to_string(), id.to_string());
     }
@@ -874,7 +885,11 @@ fn emit_new_char_pr(id: u32, shape: &CharShape, out: &mut Vec<u8>) {
     out.extend_from_slice(b"\" textColor=\"");
     out.extend_from_slice(color_to_hex(shape.color).as_bytes());
     out.extend_from_slice(b"\" shadeColor=\"");
-    out.extend_from_slice(color_to_hex(shape.shade_color).as_bytes());
+    if shape.shade_color == 0 {
+        out.extend_from_slice(b"none");
+    } else {
+        out.extend_from_slice(color_to_hex(shape.shade_color).as_bytes());
+    }
     out.extend_from_slice(b"\"");
     if let Some(bf) = shape.border_fill_id {
         out.extend_from_slice(b" borderFillIDRef=\"");
