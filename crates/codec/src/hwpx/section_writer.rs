@@ -26,10 +26,21 @@
 //! accept them (`zOrder`, `numberingType`, `textWrap`, …) defaulted
 //! to the values we've observed in Hancom-written fixtures.
 
+use std::collections::HashMap;
+
 use hwp_transpiler_core::ir::{
-    CharShapeRun, ControlKind, IrError, Paragraph, PictureControl, Section, TableCell,
-    TableControl,
+    BinaryEntry, CharShapeRun, ControlKind, IrError, Paragraph, PictureControl, Section,
+    TableCell, TableControl,
 };
+
+/// Bin-id → manifest item stem lookup. Built once at write start
+/// from `doc.bin_data` so `<hc:img binaryItemIDRef="...">` can
+/// reference the same id the manifest registers (`BIN0001`,
+/// `image1`, …) regardless of source format. Without this every
+/// picture got `image{N}` regardless of the actual BinData filename
+/// — fine for HWPX-sourced docs (their files ARE `imageN.png`)
+/// but breaks HWP5-sourced ones (`BIN000N.png`).
+type BinLookup = HashMap<u16, String>;
 
 /// Namespace declarations that go on the root `<hs:sec>`. Hancom
 /// viewers accept a trimmed set (just `hp` / `hs` / `hc`) in
@@ -41,20 +52,49 @@ const NS_DECL: &str = concat!(
     r#"xmlns:hc="http://www.hancom.co.kr/hwpml/2011/core""#,
 );
 
-pub fn write_section_xml(section: &Section) -> Result<Vec<u8>, IrError> {
+pub fn write_section_xml(section: &Section, bin_data: &[BinaryEntry]) -> Result<Vec<u8>, IrError> {
+    let bin_lookup: BinLookup = bin_data
+        .iter()
+        .filter_map(|e| {
+            let stem = e.id.split_once('.').map(|(s, _)| s).unwrap_or(&e.id).to_string();
+            entry_bin_id(e).map(|id| (id, stem))
+        })
+        .collect();
+
     let mut out = String::new();
     out.push_str(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>"#);
     out.push_str(&format!("<hs:sec {NS_DECL}>"));
 
     for (i, para) in section.paragraphs.iter().enumerate() {
-        emit_paragraph(para, &mut out, i as u32);
+        emit_paragraph(para, &mut out, i as u32, &bin_lookup);
     }
 
     out.push_str("</hs:sec>");
     Ok(out.into_bytes())
 }
 
-fn emit_paragraph(para: &Paragraph, out: &mut String, id: u32) {
+/// Same parser as `asset_pipeline::bin_id_from_entry_id` and the
+/// writer's `entry_bin_id`. Kept local to avoid a cross-module
+/// dep here; the lookup needs the same numeric `bin_id` HWP5 /
+/// HWPX readers store on `PictureControl::bin_id`.
+fn entry_bin_id(entry: &BinaryEntry) -> Option<u16> {
+    let stem = entry
+        .id
+        .split_once('.')
+        .map(|(s, _)| s)
+        .unwrap_or(&entry.id);
+    if let Some(rest) = stem.strip_prefix("BIN") {
+        return u16::from_str_radix(rest, 16).ok();
+    }
+    let digits: String = stem
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse::<u16>().ok()
+}
+
+fn emit_paragraph(para: &Paragraph, out: &mut String, id: u32, bin_lookup: &BinLookup) {
     let para_pr = para.header.para_shape_id;
     let style = para.header.style_id;
     out.push_str(&format!(
@@ -69,9 +109,9 @@ fn emit_paragraph(para: &Paragraph, out: &mut String, id: u32) {
     if para.char_shape_runs.is_empty() {
         // No style info captured — emit one run with default style
         // and hang every control off it so nested tables survive.
-        emit_run_with_range(para, out, 0, None, para.controls.len());
+        emit_run_with_range(para, out, 0, None, para.controls.len(), bin_lookup);
     } else {
-        emit_paragraph_as_split_runs(para, out);
+        emit_paragraph_as_split_runs(para, out, bin_lookup);
     }
 
     // Bare-minimum `<hp:linesegarray>`. Without this, viewers see
@@ -91,7 +131,7 @@ fn emit_paragraph(para: &Paragraph, out: &mut String, id: u32) {
 /// contiguous stretch. The last run also emits any non-text controls
 /// (tables, pictures) from `para.controls` — HWPX keeps those inside
 /// the run that ends the paragraph, not as paragraph-level siblings.
-fn emit_paragraph_as_split_runs(para: &Paragraph, out: &mut String) {
+fn emit_paragraph_as_split_runs(para: &Paragraph, out: &mut String, bin_lookup: &BinLookup) {
     let text_u16: Vec<u16> = para.text.encode_utf16().collect();
     let total = text_u16.len() as u32;
     for (i, run) in para.char_shape_runs.iter().enumerate() {
@@ -107,6 +147,7 @@ fn emit_paragraph_as_split_runs(para: &Paragraph, out: &mut String) {
             run.char_shape_id,
             Some((run.start, end, &text_u16)),
             if is_last { para.controls.len() } else { 0 },
+            bin_lookup,
         );
     }
 }
@@ -123,6 +164,7 @@ fn emit_run_with_range(
     char_shape_id: u32,
     range: Option<(u32, u32, &[u16])>,
     control_limit: usize,
+    bin_lookup: &BinLookup,
 ) {
     out.push_str(&format!(r#"<hp:run charPrIDRef="{char_shape_id}">"#));
 
@@ -149,8 +191,8 @@ fn emit_run_with_range(
         let take = control_limit.min(para.controls.len());
         for ctrl in para.controls.iter().take(take) {
             match &ctrl.kind {
-                ControlKind::Table(t) => emit_table(t, out),
-                ControlKind::Picture(p) => emit_picture(p, out),
+                ControlKind::Table(t) => emit_table(t, out, bin_lookup),
+                ControlKind::Picture(p) => emit_picture(p, out, bin_lookup),
                 // Equations / unknown gsos round-trip through
                 // unknown_streams for now; the writer doesn't know
                 // how to reconstruct their XML yet, so they drop
@@ -186,7 +228,7 @@ fn emit_text_with_linebreaks(text: &str, out: &mut String) {
     }
 }
 
-fn emit_table(t: &TableControl, out: &mut String) {
+fn emit_table(t: &TableControl, out: &mut String, bin_lookup: &BinLookup) {
     out.push_str(&format!(
         concat!(
             r#"<hp:tbl id="0" zOrder="0" numberingType="TABLE" "#,
@@ -212,7 +254,7 @@ fn emit_table(t: &TableControl, out: &mut String) {
         }
         out.push_str("<hp:tr>");
         for cell in row_cells {
-            emit_cell(cell, out);
+            emit_cell(cell, out, bin_lookup);
         }
         out.push_str("</hp:tr>");
     }
@@ -220,7 +262,7 @@ fn emit_table(t: &TableControl, out: &mut String) {
     out.push_str("</hp:tbl>");
 }
 
-fn emit_cell(cell: &TableCell, out: &mut String) {
+fn emit_cell(cell: &TableCell, out: &mut String, bin_lookup: &BinLookup) {
     out.push_str(&format!(
         concat!(
             r#"<hp:tc name="" header="0" hasMargin="0" protect="0" "#,
@@ -236,7 +278,7 @@ fn emit_cell(cell: &TableCell, out: &mut String) {
         r#"<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="CENTER" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">"#,
     );
     for (i, p) in cell.paragraphs.iter().enumerate() {
-        emit_paragraph(p, out, i as u32);
+        emit_paragraph(p, out, i as u32, bin_lookup);
     }
     out.push_str("</hp:subList>");
 
@@ -264,10 +306,17 @@ fn emit_cell(cell: &TableCell, out: &mut String) {
 /// rest of the children with the defaults observed on Hancom-authored
 /// fixtures so the picture renders correctly in HWP / rhwp viewers
 /// instead of getting dropped or zero-sized.
-fn emit_picture(pic: &PictureControl, out: &mut String) {
+fn emit_picture(pic: &PictureControl, out: &mut String, bin_lookup: &BinLookup) {
     let w = pic.width_hwpu.max(1);
     let h = pic.height_hwpu.max(1);
-    let bin_ref = format!("image{}", pic.bin_id);
+    // Resolve the actual manifest stem (`image1`, `BIN0001`, …)
+    // for this picture's bin_id. Falls back to `image{N}` for HWPX-
+    // sourced docs whose BinData entries don't appear in the
+    // lookup yet (test fixtures with synthetic IRs).
+    let bin_ref = bin_lookup
+        .get(&pic.bin_id)
+        .cloned()
+        .unwrap_or_else(|| format!("image{}", pic.bin_id));
     // Each `<hp:pic>` needs a globally-unique `id` — Hancom-authored
     // docs use large random integers (the GSO instance id) and some
     // viewers cross-reference them when laying out multiple pictures
@@ -353,7 +402,7 @@ mod tests {
     #[test]
     fn empty_section_wraps_in_sec_element() {
         let s = Section::default();
-        let xml = write_section_xml(&s).expect("emit");
+        let xml = write_section_xml(&s, &[]).expect("emit");
         let s = std::str::from_utf8(&xml).expect("utf8");
         assert!(s.contains("<hs:sec "));
         assert!(s.contains("</hs:sec>"));
@@ -363,7 +412,7 @@ mod tests {
     fn paragraph_emits_hp_p_with_run_and_t() {
         let mut s = Section::default();
         s.paragraphs.push(para_with_text("Hello"));
-        let xml = write_section_xml(&s).expect("emit");
+        let xml = write_section_xml(&s, &[]).expect("emit");
         let s = std::str::from_utf8(&xml).unwrap();
         assert!(s.contains("<hp:p "));
         assert!(s.contains(r#"<hp:run charPrIDRef="0">"#));
@@ -375,7 +424,7 @@ mod tests {
         let mut s = Section::default();
         s.paragraphs
             .push(para_with_text(r#"A<b> & "quoted" O'Brien"#));
-        let xml = write_section_xml(&s).expect("emit");
+        let xml = write_section_xml(&s, &[]).expect("emit");
         let s = std::str::from_utf8(&xml).unwrap();
         assert!(s.contains("A&lt;b&gt; &amp; &quot;quoted&quot; O&#39;Brien"));
         assert!(!s.contains("<b>"));
@@ -385,7 +434,7 @@ mod tests {
     fn newlines_become_line_break_elements() {
         let mut s = Section::default();
         s.paragraphs.push(para_with_text("line1\nline2"));
-        let xml = write_section_xml(&s).expect("emit");
+        let xml = write_section_xml(&s, &[]).expect("emit");
         let s = std::str::from_utf8(&xml).unwrap();
         assert!(s.contains("<hp:t>line1</hp:t><hp:lineBreak/><hp:t>line2</hp:t>"));
     }
@@ -416,7 +465,7 @@ mod tests {
             }],
             ..Paragraph::default()
         });
-        let xml = write_section_xml(&s).expect("emit");
+        let xml = write_section_xml(&s, &[]).expect("emit");
         let s = std::str::from_utf8(&xml).unwrap();
         assert!(s.contains(r#"<hp:tbl id="0""#));
         assert!(s.contains(r#"rowCnt="1" colCnt="1""#));
@@ -453,7 +502,7 @@ mod tests {
             }],
             ..Paragraph::default()
         });
-        let xml = write_section_xml(&s).expect("emit");
+        let xml = write_section_xml(&s, &[]).expect("emit");
         let s = std::str::from_utf8(&xml).unwrap();
         assert!(s.contains(r#"colSpan="2" rowSpan="3""#));
     }
