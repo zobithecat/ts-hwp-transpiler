@@ -91,6 +91,11 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
     // Mutually exclusive with `pending_asset` — both branches read
     // the next DATA line from the same handler.
     let mut pending_section_idx: Option<usize> = None;
+    // Same handoff for `UNKNOWN_STREAM[name=…,…]` — the bytes that
+    // follow restore `doc.unknown_streams[name]` so non-section
+    // ZIP entries (META-INF/, settings.xml, version.xml, Preview/)
+    // round-trip verbatim.
+    let mut pending_stream_name: Option<String> = None;
 
     for line in src.lines() {
         let trimmed = line.trim();
@@ -136,6 +141,14 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
                     .and_then(|s| s.strip_prefix("section-"))
                     .and_then(|s| s.parse::<usize>().ok());
                 pending_asset = None;
+                pending_stream_name = None;
+                continue;
+            }
+            if trimmed.starts_with("UNKNOWN_STREAM[") {
+                let attrs = parse_attrs(trimmed);
+                pending_stream_name = attrs.0.get("name").cloned();
+                pending_asset = None;
+                pending_section_idx = None;
                 continue;
             }
             if let Some(uri) = trimmed.strip_prefix("DATA: ") {
@@ -144,14 +157,14 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
                         doc.bin_data.push(entry);
                     }
                 } else if let Some(idx) = pending_section_idx.take() {
-                    // `data:application/octet-stream;base64,…` → raw
-                    // bytes back into the matching section's
-                    // verbatim cache. Writer's existing
-                    // stream_bytes-first emit handles re-using them.
                     if let Some(bytes) = decode_octet_stream_data_uri(uri.trim()) {
                         if let Some(section) = sections.get_mut(idx) {
                             section.stream_bytes = Some(bytes);
                         }
+                    }
+                } else if let Some(name) = pending_stream_name.take() {
+                    if let Some(bytes) = decode_octet_stream_data_uri(uri.trim()) {
+                        doc.unknown_streams.insert(name, bytes);
                     }
                 }
                 continue;
@@ -293,6 +306,23 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
         sections.push(Section::default());
     }
     doc.sections = sections;
+
+    // Reparse the verbatim-restored Contents/header.xml so doc_info
+    // carries the full font/border/charShape/paraShape/style tables
+    // that the surgical writer keys off. Without this the importer's
+    // doc_info only holds the synthesised heading slots, and the
+    // header rewriter trims every charPr/paraPr beyond IR.len() — a
+    // 333KB header.xml ships at ~64KB on round-trip.
+    if let Some(header_bytes) = doc.unknown_streams.get("Contents/header.xml") {
+        if let Ok(hdr) = crate::hwpx::header_xml::parse_header_xml(header_bytes) {
+            doc.doc_info.font_faces = hdr.font_faces;
+            doc.doc_info.border_fills = hdr.border_fills;
+            doc.doc_info.char_shapes = hdr.char_shapes;
+            doc.doc_info.para_shapes = hdr.para_shapes;
+            doc.doc_info.styles = hdr.styles;
+        }
+    }
+
     Ok(doc)
 }
 

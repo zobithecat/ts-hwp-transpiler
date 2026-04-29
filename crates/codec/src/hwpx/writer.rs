@@ -27,7 +27,9 @@
 //!     `Contents/content.hpf` (which stays verbatim); viewers may
 //!     ignore the extras.
 
-use hwp_transpiler_core::ir::{IrDocument, IrError, Writer};
+use hwp_transpiler_core::ir::{
+    BinaryEntry, ControlKind, IrDocument, IrError, Paragraph, Writer,
+};
 
 use super::header_rewriter::rewrite_header_xml;
 use super::section_writer::write_section_xml;
@@ -64,7 +66,19 @@ impl Writer for HwpxWriter {
         // promotes those out of `unknown_streams` into `doc.bin_data`
         // so the HTML preview can resolve `binaryItemIDRef`; the
         // writer has to put them back.
-        for entry in &doc.bin_data {
+        //
+        // Order: zip-emit `bin_data` in the order each entry is FIRST
+        // referenced by a picture in the document (orphans last). Some
+        // viewers (rhwp, mac HWP 2014) bind picture → BinData by zip-
+        // entry sequence rather than via the manifest's
+        // `binaryItemIDRef` lookup. When the IR carried `[image2,
+        // image1]` (zip-encounter order from the original) but the
+        // first picture in section0 referenced `image1`, those viewers
+        // showed the images swapped. Reordering at write time keeps
+        // manifest-based viewers happy (they ignore order) while
+        // fixing positional viewers.
+        let ordered = bin_data_in_picture_order(doc);
+        for entry in ordered {
             if entry.bytes.is_empty() {
                 continue;
             }
@@ -116,41 +130,155 @@ impl Writer for HwpxWriter {
     }
 }
 
-/// Walk `doc.bin_data` and ensure every entry appears as an
-/// `<opf:item ... isEmbeded="1"/>` inside the package manifest.
-/// Items already present are kept as-is; missing ones get spliced
-/// **just before the `<opf:item id="section…" />` line** so the
-/// manifest ordering matches Hancom-authored layouts (header,
-/// images…, sections, settings). Falls back to splicing before
-/// `</opf:manifest>` when no section item is found.
-fn inject_bin_data_into_manifest(content_hpf: &[u8], doc: &IrDocument) -> Vec<u8> {
-    if doc.bin_data.is_empty() {
-        return content_hpf.to_vec();
+/// Sort `bin_data` so the first-referenced picture's bytes land in
+/// the zip first, second-referenced second, and so on. Entries that
+/// no picture references (or whose `bin_id` doesn't parse) come at
+/// the end, in their original Vec order.
+fn bin_data_in_picture_order(doc: &IrDocument) -> Vec<&BinaryEntry> {
+    let mut order: Vec<u16> = Vec::new();
+    let mut seen: std::collections::HashSet<u16> = std::collections::HashSet::new();
+    for section in &doc.sections {
+        for para in &section.paragraphs {
+            collect_picture_bin_ids(para, &mut order, &mut seen);
+        }
     }
-    let text = match std::str::from_utf8(content_hpf) {
-        Ok(s) => s,
-        Err(_) => return content_hpf.to_vec(),
-    };
-    let close = "</opf:manifest>";
-    let Some(close_pos) = text.find(close) else {
+    let mut taken = vec![false; doc.bin_data.len()];
+    let mut out: Vec<&BinaryEntry> = Vec::with_capacity(doc.bin_data.len());
+    for bin_id in order {
+        for (i, entry) in doc.bin_data.iter().enumerate() {
+            if !taken[i] && entry_bin_id(entry) == Some(bin_id) {
+                taken[i] = true;
+                out.push(entry);
+                break;
+            }
+        }
+    }
+    for (i, entry) in doc.bin_data.iter().enumerate() {
+        if !taken[i] {
+            out.push(entry);
+        }
+    }
+    out
+}
+
+/// Walk a paragraph's controls (and any nested table cells'
+/// paragraphs) collecting picture `bin_id`s in document order.
+fn collect_picture_bin_ids(
+    para: &Paragraph,
+    order: &mut Vec<u16>,
+    seen: &mut std::collections::HashSet<u16>,
+) {
+    for ctrl in &para.controls {
+        match &ctrl.kind {
+            ControlKind::Picture(pic) => {
+                if seen.insert(pic.bin_id) {
+                    order.push(pic.bin_id);
+                }
+            }
+            ControlKind::Table(tbl) => {
+                for cell in &tbl.cells {
+                    for sub in &cell.paragraphs {
+                        collect_picture_bin_ids(sub, order, seen);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Parse the numeric `bin_id` out of a `BinaryEntry::id` like
+/// `image1.png` → 1 or `BIN0001.png` → 1. Mirrors
+/// `asset_pipeline::bin_id_from_entry_id` but kept local to avoid a
+/// cross-module dep here.
+fn entry_bin_id(entry: &BinaryEntry) -> Option<u16> {
+    let stem = entry
+        .id
+        .split_once('.')
+        .map(|(s, _)| s)
+        .unwrap_or(&entry.id);
+    if let Some(rest) = stem.strip_prefix("BIN") {
+        return u16::from_str_radix(rest, 16).ok();
+    }
+    let digits: String = stem
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse::<u16>().ok()
+}
+
+/// Rewrite the package manifest's `BinData/*` section so it matches
+/// the actual archive contents and ordering:
+///
+/// 1. Strip every existing `<opf:item ... href="BinData/..." .../>`
+///    (dangling AND valid). Hancom-authored docs sometimes carry
+///    duplicate / stale BinData references — e.g. an `image1.jpg`
+///    `<opf:item>` survives even after the underlying file was
+///    replaced with `image1.png`. When two items share `id="image1"`
+///    and the first href doesn't resolve, rhwp / mac HWP 2014 latch
+///    onto the broken one and pictures show up swapped, on the wrong
+///    page, or not at all.
+/// 2. Re-emit one `<opf:item>` per real `doc.bin_data` entry, in
+///    picture-reference order (same order the writer feeds entries
+///    into the zip), spliced before the first
+///    `<opf:item id="section…" />`. Mirrors the Hancom layout
+///    (header → images → sections → settings) viewers expect.
+///
+/// Non-BinData items (header, sections, settings, …) flow through
+/// unchanged so we don't perturb anything we don't have to.
+fn inject_bin_data_into_manifest(content_hpf: &[u8], doc: &IrDocument) -> Vec<u8> {
+    let Ok(text) = std::str::from_utf8(content_hpf) else {
         return content_hpf.to_vec();
     };
-    // Pick the splice anchor: prefer just-before the first
-    // `id="section…"` item if one exists; else fall back to the
-    // closing tag.
-    let manifest_body = &text[..close_pos];
+
+    // Pass 1: strip every BinData item (dangling AND valid). We
+    // re-add the valid ones in a controlled order in pass 2 so the
+    // manifest sequence matches picture-reference order, regardless
+    // of however Hancom shipped the original.
+    let mut pruned = String::with_capacity(text.len());
+    let mut cursor = 0usize;
+    while let Some(rel_open) = text[cursor..].find("<opf:item") {
+        let abs_open = cursor + rel_open;
+        // Carry over everything before the tag.
+        pruned.push_str(&text[cursor..abs_open]);
+        // Find the tag's `/>` close. Manifest items are self-closing.
+        let after_open = &text[abs_open..];
+        let Some(rel_close) = after_open.find("/>") else {
+            // Malformed — bail out and keep the rest verbatim.
+            pruned.push_str(after_open);
+            cursor = text.len();
+            break;
+        };
+        let abs_close = abs_open + rel_close + 2;
+        let tag = &text[abs_open..abs_close];
+        let is_bindata = tag.contains(r#"href="BinData/"#);
+        if !is_bindata {
+            pruned.push_str(tag);
+        }
+        // is_bindata items are dropped — pass 2 emits a single, clean
+        // entry per real bin_data entry in picture-reference order.
+        cursor = abs_close;
+    }
+    pruned.push_str(&text[cursor..]);
+
+    // Pass 2: splice missing entries.
+    let close = "</opf:manifest>";
+    let Some(close_pos) = pruned.find(close) else {
+        return pruned.into_bytes();
+    };
+    let manifest_body = &pruned[..close_pos];
     let anchor_pos = manifest_body
         .find(r#"id="section"#)
         .and_then(|i| manifest_body[..i].rfind("<opf:item"))
         .unwrap_or(close_pos);
-    let manifest_view = &text[..close_pos];
+    // Emit one `<opf:item>` per real BinData entry, in
+    // picture-reference order so positional viewers map pic[N] →
+    // BinData[N] correctly. Pass 1 stripped every existing BinData
+    // tag, so we don't have to dedupe here.
     let mut additions = String::new();
-    for entry in &doc.bin_data {
+    for entry in bin_data_in_picture_order(doc) {
         if entry.bytes.is_empty() {
-            continue;
-        }
-        let id_attr = format!("href=\"BinData/{}\"", entry.id);
-        if manifest_view.contains(&id_attr) {
             continue;
         }
         let stem = entry
@@ -158,10 +286,6 @@ fn inject_bin_data_into_manifest(content_hpf: &[u8], doc: &IrDocument) -> Vec<u8
             .split_once('.')
             .map(|(s, _)| s)
             .unwrap_or(&entry.id);
-        // Hancom-authored docs use the abbreviated `image/jpg`
-        // form (not the standard `image/jpeg`). Picture round-
-        // trip seems to depend on viewers seeing the exact form
-        // they expect, so mirror it.
         let mime = mime_for_manifest(&entry.id);
         additions.push_str(&format!(
             r#"<opf:item id="{stem}" href="BinData/{name}" media-type="{mime}" isEmbeded="1"/>"#,
@@ -171,12 +295,12 @@ fn inject_bin_data_into_manifest(content_hpf: &[u8], doc: &IrDocument) -> Vec<u8
         ));
     }
     if additions.is_empty() {
-        return content_hpf.to_vec();
+        return pruned.into_bytes();
     }
-    let mut out = String::with_capacity(text.len() + additions.len());
-    out.push_str(&text[..anchor_pos]);
+    let mut out = String::with_capacity(pruned.len() + additions.len());
+    out.push_str(&pruned[..anchor_pos]);
     out.push_str(&additions);
-    out.push_str(&text[anchor_pos..]);
+    out.push_str(&pruned[anchor_pos..]);
     out.into_bytes()
 }
 
@@ -210,7 +334,7 @@ fn is_section_xml(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hwp_transpiler_core::ir::{Paragraph, Reader, Section};
+    use hwp_transpiler_core::ir::{Control, Paragraph, PictureControl, Reader, Section};
 
     fn doc_with_one_paragraph(text: &str) -> IrDocument {
         let mut doc = IrDocument::default();
@@ -257,5 +381,73 @@ mod tests {
         assert!(!is_section_xml("Contents/section.xml"));
         assert!(!is_section_xml("Contents/header.xml"));
         assert!(!is_section_xml("BinData/image1.png"));
+    }
+
+    fn pic_para(bin_id: u16) -> Paragraph {
+        Paragraph {
+            text: "\u{FFFC}".into(),
+            controls: vec![Control {
+                kind: ControlKind::Picture(PictureControl {
+                    bin_id,
+                    width_hwpu: 100,
+                    height_hwpu: 100,
+                }),
+                caption_text: None,
+            }],
+            ..Paragraph::default()
+        }
+    }
+
+    #[test]
+    fn bin_data_reordered_to_picture_appearance() {
+        // Section references image1 first then image2, but the IR's
+        // bin_data was loaded in zip-encounter order (image2 first).
+        // The reorder helper must put image1's bytes ahead of
+        // image2's so positional viewers (rhwp / mac HWP 2014) bind
+        // pic[0]→image1 instead of pic[0]→image2.
+        let mut doc = IrDocument::default();
+        doc.bin_data.push(BinaryEntry {
+            id: "image2.png".into(),
+            mime: Some("image/png".into()),
+            bytes: vec![2; 8],
+        });
+        doc.bin_data.push(BinaryEntry {
+            id: "image1.png".into(),
+            mime: Some("image/png".into()),
+            bytes: vec![1; 8],
+        });
+        let mut section = Section::default();
+        section.paragraphs.push(pic_para(1));
+        section.paragraphs.push(pic_para(2));
+        doc.sections.push(section);
+
+        let ordered = bin_data_in_picture_order(&doc);
+        let ids: Vec<&str> = ordered.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, vec!["image1.png", "image2.png"]);
+    }
+
+    #[test]
+    fn bin_data_orphans_appended_in_original_order() {
+        // Pictures only reference image1 — image2 has no picture, so
+        // it should land at the end of the zip, preserving the
+        // original Vec position relative to other orphans.
+        let mut doc = IrDocument::default();
+        doc.bin_data.push(BinaryEntry {
+            id: "image2.png".into(),
+            mime: Some("image/png".into()),
+            bytes: vec![2; 8],
+        });
+        doc.bin_data.push(BinaryEntry {
+            id: "image1.png".into(),
+            mime: Some("image/png".into()),
+            bytes: vec![1; 8],
+        });
+        let mut section = Section::default();
+        section.paragraphs.push(pic_para(1));
+        doc.sections.push(section);
+
+        let ordered = bin_data_in_picture_order(&doc);
+        let ids: Vec<&str> = ordered.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, vec!["image1.png", "image2.png"]);
     }
 }

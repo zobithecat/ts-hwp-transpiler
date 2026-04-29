@@ -49,7 +49,11 @@ pub fn render_assets_block(doc: &IrDocument, opts: &MdOptions) -> String {
         .sections
         .iter()
         .any(|s| s.stream_bytes.as_ref().map(|b| !b.is_empty()).unwrap_or(false));
-    if encoded.is_empty() && !has_section_bytes {
+    let has_unknown_streams = doc
+        .unknown_streams
+        .iter()
+        .any(|(_, b)| !b.is_empty());
+    if encoded.is_empty() && !has_section_bytes && !has_unknown_streams {
         return String::new();
     }
     let mut out = String::new();
@@ -94,6 +98,24 @@ pub fn render_assets_block(doc: &IrDocument, opts: &MdOptions) -> String {
         }
         out.push_str(&format!(
             "SECTION_BYTES[id=section-{idx},len={len}]\n",
+            len = bytes.len(),
+        ));
+        out.push_str("DATA: data:application/octet-stream;base64,");
+        out.push_str(&STANDARD.encode(bytes));
+        out.push_str("\n\n");
+    }
+    // Verbatim non-section / non-BinData / non-mimetype streams —
+    // META-INF/container.rdf, META-INF/manifest.xml, Preview/*,
+    // settings.xml, version.xml. Hancom viewers refuse to render
+    // pictures / line layout when these are missing, so the MD
+    // round-trip has to ride them along.
+    for (name, bytes) in doc.unknown_streams.iter() {
+        if bytes.is_empty() {
+            continue;
+        }
+        out.push_str(&format!(
+            "UNKNOWN_STREAM[name={name},len={len}]\n",
+            name = name,
             len = bytes.len(),
         ));
         out.push_str("DATA: data:application/octet-stream;base64,");
