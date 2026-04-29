@@ -22,7 +22,13 @@ fn body_paragraph_round_trips_through_writer_and_reader() {
 
     let doc = HwpxReader.read(&bytes).expect("re-read");
     assert_eq!(doc.sections.len(), 1);
-    let para = &doc.sections[0].paragraphs[0];
+    // `paragraphs[0]` is the synthetic secPr paragraph (no text);
+    // user content lands in subsequent paragraphs.
+    let para = doc.sections[0]
+        .paragraphs
+        .iter()
+        .find(|p| p.text == "Hello world")
+        .expect("body paragraph survived round-trip");
     assert_eq!(para.text, "Hello world");
 }
 
@@ -37,8 +43,11 @@ fn heading_paragraph_carries_para_shape_ref_through_writer() {
     // `<hh:styles>` container path, which is a follow-up TODO.
     let bytes = md_to_hwpx_bytes("# 제목");
     let doc = HwpxReader.read(&bytes).expect("re-read");
-    let para = &doc.sections[0].paragraphs[0];
-    assert_eq!(para.text, "제목");
+    let para = doc.sections[0]
+        .paragraphs
+        .iter()
+        .find(|p| p.text == "제목")
+        .expect("heading paragraph survived round-trip");
     let para_shape_id = para.header.para_shape_id as usize;
     assert!(
         para_shape_id >= 1 && para_shape_id <= 6,

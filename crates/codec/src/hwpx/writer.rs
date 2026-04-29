@@ -64,7 +64,7 @@ impl Writer for HwpxWriter {
                 // "tag not closed". Sniff the leading bytes; fall
                 // back to the typed XML emitter for non-XML payloads.
                 Some(cached) if looks_like_xml(cached) => cached.clone(),
-                _ => write_section_xml(section)?,
+                _ => write_section_xml(section, &doc.bin_data)?,
             };
             zip.add_part(&format!("Contents/section{i}.xml"), &bytes)?;
         }
@@ -427,7 +427,21 @@ mod tests {
         let mut r = super::super::reader::HwpxReader;
         let read = r.read(&bytes).expect("read");
         assert_eq!(read.sections.len(), 1);
-        assert_eq!(read.sections[0].paragraphs[0].text, "round trip");
+        // The typed emitter prepends a synthetic secPr paragraph at
+        // id=0, so the user's content paragraph isn't necessarily
+        // first. Scan for it instead of indexing.
+        assert!(
+            read.sections[0]
+                .paragraphs
+                .iter()
+                .any(|p| p.text == "round trip"),
+            "expected text 'round trip' in some paragraph, got: {:?}",
+            read.sections[0]
+                .paragraphs
+                .iter()
+                .map(|p| &p.text)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

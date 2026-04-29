@@ -65,13 +65,52 @@ pub fn write_section_xml(section: &Section, bin_data: &[BinaryEntry]) -> Result<
     out.push_str(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>"#);
     out.push_str(&format!("<hs:sec {NS_DECL}>"));
 
+    // Synthetic leading `<hp:p>` carrying `<hp:secPr>` (page size /
+    // margins / direction). Real HWPX folds secPr into the first
+    // content paragraph's first run; viewers — Hancom HWP 2014
+    // included — refuse to render anything when secPr is absent
+    // because they have no page geometry to lay text into.
+    // Emitting it as a dedicated zero-text paragraph keeps the
+    // typed emitter simple and matches what Hancom-authored docs
+    // produce when the document opens to a blank state.
+    out.push_str(SEC_PR_PARAGRAPH);
+
     for (i, para) in section.paragraphs.iter().enumerate() {
-        emit_paragraph(para, &mut out, i as u32, &bin_lookup);
+        // Offset paragraph ids by 1 so the synthetic leading
+        // paragraph keeps id=0 to itself.
+        emit_paragraph(para, &mut out, (i as u32) + 1, &bin_lookup);
     }
 
     out.push_str("</hs:sec>");
     Ok(out.into_bytes())
 }
+
+/// Default A4-portrait section properties paragraph. Page size and
+/// margins mirror Hancom-authored doc fixtures (A4 = 59528 × 84188
+/// HWPUNIT, ~25mm side margins). Wrapped in a zero-text `<hp:p>` /
+/// `<hp:run>` so it's a valid HWPX prolog without disturbing the
+/// content paragraphs that follow.
+const SEC_PR_PARAGRAPH: &str = concat!(
+    r#"<hp:p id="0" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">"#,
+    r#"<hp:run charPrIDRef="0">"#,
+    r#"<hp:secPr id="" textDirection="HORIZONTAL" spaceColumns="1134" tabStop="8000" tabStopVal="4000" tabStopUnit="HWPUNIT" outlineShapeIDRef="0" memoShapeIDRef="0" textVerticalWidthHead="0" masterPageCnt="0">"#,
+    r#"<hp:grid lineGrid="0" charGrid="0" wonggojiFormat="0"/>"#,
+    r#"<hp:startNum pageStartsOn="BOTH" page="0" pic="0" tbl="0" equation="0"/>"#,
+    r#"<hp:visibility hideFirstHeader="0" hideFirstFooter="0" hideFirstMasterPage="0" border="SHOW_ALL" fill="SHOW_ALL" hideFirstPageNum="0" hideFirstEmptyLine="0" showLineNumber="0"/>"#,
+    r#"<hp:lineNumberShape restartType="0" countBy="0" distance="0" startNumber="0"/>"#,
+    r#"<hp:pagePr landscape="WIDELY" width="59528" height="84188" gutterType="LEFT_ONLY">"#,
+    r#"<hp:margin header="850" footer="850" gutter="0" left="3000" right="3000" top="1417" bottom="1417"/>"#,
+    r#"</hp:pagePr>"#,
+    r##"<hp:footNotePr><hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar=")" supscript="0"/><hp:noteLine length="-1" type="SOLID" width="0.12 mm" color="#000000"/><hp:noteSpacing betweenNotes="850" belowLine="567" aboveLine="850"/><hp:numbering type="CONTINUOUS" newNum="1"/><hp:placement place="EACH_COLUMN" beneathText="0"/></hp:footNotePr>"##,
+    r##"<hp:endNotePr><hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar=")" supscript="0"/><hp:noteLine length="-1" type="SOLID" width="0.12 mm" color="#000000"/><hp:noteSpacing betweenNotes="0" belowLine="0" aboveLine="0"/><hp:numbering type="CONTINUOUS" newNum="1"/><hp:placement place="END_OF_DOCUMENT" beneathText="0"/></hp:endNotePr>"##,
+    r#"<hp:pageBorderFill type="BOTH" borderFillIDRef="0" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"/>"#,
+    r#"<hp:pageBorderFill type="EVEN" borderFillIDRef="0" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"/>"#,
+    r#"<hp:pageBorderFill type="ODD" borderFillIDRef="0" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"/>"#,
+    r#"</hp:secPr>"#,
+    r#"</hp:run>"#,
+    r#"<hp:linesegarray><hp:lineseg textpos="0" vertpos="0" vertsize="1000" textheight="1000" baseline="850" spacing="600" horzpos="0" horzsize="42520" flags="393216"/></hp:linesegarray>"#,
+    r#"</hp:p>"#,
+);
 
 /// Same parser as `asset_pipeline::bin_id_from_entry_id` and the
 /// writer's `entry_bin_id`. Kept local to avoid a cross-module
