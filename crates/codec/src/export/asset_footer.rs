@@ -17,6 +17,7 @@
 //! When `MdOptions::asset_mode == None`, the renderers don't call
 //! into here at all and the footer never appears.
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use hwp_transpiler_core::ir::IrDocument;
 
 use crate::asset_pipeline::{encode_for_md, EncodeOpts};
@@ -27,9 +28,16 @@ use super::markdown::MdOptions;
 /// asset registry begins. Mirrors the format-dispatch comment.
 pub const FORMAT_HEADER_ASSETS: &str = "<!-- hwp-transpiler: assets -->";
 
-/// Build the encoded-assets text block. Empty string when
-/// `doc.bin_data` has nothing decodable, which lets the caller emit
-/// it unconditionally without ending up with a stranded marker.
+/// Build the footer block: encoded picture assets plus
+/// per-section verbatim XML bytes (base64). Empty string when
+/// `doc.bin_data` is empty *and* no `Section::stream_bytes` cache
+/// exists — that lets the caller emit unconditionally without
+/// ending up with a stranded marker.
+///
+/// Section bytes ride in the same footer because they share the
+/// same "binary metadata, drop into a separate companion in split
+/// mode so it doesn't bloat the LLM context" property — keeping
+/// them in one place means a single parser handles both.
 pub fn render_assets_block(doc: &IrDocument, opts: &MdOptions) -> String {
     let encoded = encode_for_md(
         &doc.bin_data,
@@ -37,7 +45,11 @@ pub fn render_assets_block(doc: &IrDocument, opts: &MdOptions) -> String {
             dpi: opts.asset_dpi,
         },
     );
-    if encoded.is_empty() {
+    let has_section_bytes = doc
+        .sections
+        .iter()
+        .any(|s| s.stream_bytes.as_ref().map(|b| !b.is_empty()).unwrap_or(false));
+    if encoded.is_empty() && !has_section_bytes {
         return String::new();
     }
     let mut out = String::new();
@@ -65,6 +77,27 @@ pub fn render_assets_block(doc: &IrDocument, opts: &MdOptions) -> String {
         ));
         out.push_str("DATA: ");
         out.push_str(&asset.data_uri);
+        out.push_str("\n\n");
+    }
+    // Per-section verbatim XML bytes. Round-trip through MD then
+    // back through the writer reproduces the original section
+    // byte-equal (modulo any IR-side mutation that's already
+    // invalidated `stream_bytes` upstream). Critical for viewers
+    // that depend on `<hp:linesegarray>` / `<hp:secPr>` /
+    // paragraph layout metadata the typed parser doesn't decode.
+    for (idx, section) in doc.sections.iter().enumerate() {
+        let Some(bytes) = section.stream_bytes.as_ref() else {
+            continue;
+        };
+        if bytes.is_empty() {
+            continue;
+        }
+        out.push_str(&format!(
+            "SECTION_BYTES[id=section-{idx},len={len}]\n",
+            len = bytes.len(),
+        ));
+        out.push_str("DATA: data:application/octet-stream;base64,");
+        out.push_str(&STANDARD.encode(bytes));
         out.push_str("\n\n");
     }
     out

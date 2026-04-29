@@ -36,6 +36,25 @@ use hwp_transpiler_core::ir::{
 
 use crate::asset_pipeline::decode_data_uri_to_binary_entry;
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+/// Decode the `data:application/octet-stream;base64,…` URI emitted
+/// alongside `SECTION_BYTES` records. Returns `None` for any non-
+/// base64 / non-data scheme — the caller drops the section bytes
+/// silently in that case rather than corrupting `stream_bytes`.
+fn decode_octet_stream_data_uri(uri: &str) -> Option<Vec<u8>> {
+    let rest = uri.strip_prefix("data:")?;
+    let (header, payload) = rest.split_once(',')?;
+    let (_mime, encoding) = header
+        .split_once(';')
+        .map(|(m, e)| (m.trim(), e.trim()))
+        .unwrap_or((header.trim(), ""));
+    if encoding != "base64" {
+        return None;
+    }
+    STANDARD.decode(payload).ok()
+}
+
 /// Returns true when `src` is recognisably the LLM-mode export
 /// format. Uses the sigil our exporter emits at the top of every
 /// document — `SECTION[id=sec-…]` as the first non-blank line.
@@ -67,6 +86,11 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
     // `doc.bin_data` instead.
     let mut in_assets = false;
     let mut pending_asset: Option<PendingAsset> = None;
+    // When a `SECTION_BYTES[id=section-N,…]` record is seen, the
+    // following `DATA:` line decodes into `sections[N].stream_bytes`.
+    // Mutually exclusive with `pending_asset` — both branches read
+    // the next DATA line from the same handler.
+    let mut pending_section_idx: Option<usize> = None;
 
     for line in src.lines() {
         let trimmed = line.trim();
@@ -100,12 +124,34 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
                     })
                     .unwrap_or_default();
                 pending_asset = Some(PendingAsset { bin_id, source_id });
+                pending_section_idx = None;
+                continue;
+            }
+            if trimmed.starts_with("SECTION_BYTES[") {
+                let attrs = parse_attrs(trimmed);
+                // id="section-N" → N
+                pending_section_idx = attrs
+                    .0
+                    .get("id")
+                    .and_then(|s| s.strip_prefix("section-"))
+                    .and_then(|s| s.parse::<usize>().ok());
+                pending_asset = None;
                 continue;
             }
             if let Some(uri) = trimmed.strip_prefix("DATA: ") {
                 if let Some(p) = pending_asset.take() {
                     if let Some(entry) = decode_data_uri_to_binary_entry(uri.trim(), &p.source_id) {
                         doc.bin_data.push(entry);
+                    }
+                } else if let Some(idx) = pending_section_idx.take() {
+                    // `data:application/octet-stream;base64,…` → raw
+                    // bytes back into the matching section's
+                    // verbatim cache. Writer's existing
+                    // stream_bytes-first emit handles re-using them.
+                    if let Some(bytes) = decode_octet_stream_data_uri(uri.trim()) {
+                        if let Some(section) = sections.get_mut(idx) {
+                            section.stream_bytes = Some(bytes);
+                        }
                     }
                 }
                 continue;
@@ -116,9 +162,17 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
 
         if trimmed.starts_with("SECTION[") {
             // Flush prior pending state into the current section,
-            // then push it and start a new one.
+            // then push it (but only if it actually carries
+            // anything — the first SECTION marker arrives before
+            // any content, so an empty `current` here is the
+            // leading buffer and would shift `SECTION_BYTES
+            // [id=section-N]` indexing off by one).
             flush_state(&mut state, &mut current);
-            sections.push(std::mem::take(&mut current));
+            if !current.paragraphs.is_empty() || current.stream_bytes.is_some() {
+                sections.push(std::mem::take(&mut current));
+            } else {
+                current = Section::default();
+            }
             state = State::Idle;
             continue;
         }

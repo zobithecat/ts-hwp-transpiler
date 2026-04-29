@@ -146,6 +146,47 @@ fn gfm_inline_image_round_trips_via_data_uri() {
 }
 
 #[test]
+fn section_bytes_round_trip_via_inline_footer() {
+    // Build a doc with one section that carries verbatim XML bytes
+    // — simulating what the HWPX reader stores when it loads a real
+    // file. After exporting to LLM Markdown with inline assets and
+    // re-importing, the section's `stream_bytes` should be back.
+    let mut doc = IrDocument::default();
+    let mut section = Section::default();
+    section.paragraphs.push({
+        let mut p = Paragraph::default();
+        p.text = "본문".into();
+        p
+    });
+    section.stream_bytes = Some(b"<hs:sec>verbatim payload</hs:sec>".to_vec());
+    doc.sections.push(section);
+
+    let opts = MdOptions {
+        llm: Some(LlmOptions::default()),
+        asset_mode: AssetMode::Inline,
+        asset_dpi: None,
+        ..MdOptions::default()
+    };
+    let md = to_llm_markdown(&doc, &opts);
+    assert!(
+        md.contains("SECTION_BYTES[id=section-0,len=33]"),
+        "SECTION_BYTES record emitted: {md}"
+    );
+
+    let reloaded = from_llm_markdown(&md).expect("import");
+    assert_eq!(reloaded.sections.len(), 1);
+    let bytes = reloaded.sections[0]
+        .stream_bytes
+        .as_ref()
+        .expect("section stream_bytes restored");
+    assert_eq!(
+        bytes.as_slice(),
+        b"<hs:sec>verbatim payload</hs:sec>",
+        "section bytes round-trip byte-equal"
+    );
+}
+
+#[test]
 fn asset_mode_none_omits_footer_even_with_pictures() {
     let doc = doc_with_one_picture();
     let opts = MdOptions {
