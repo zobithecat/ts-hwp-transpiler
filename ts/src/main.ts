@@ -443,6 +443,16 @@ async function handleMarkdownFile(
   sourceOverride?: SourceKind,
 ): Promise<void> {
   const text = await file.text();
+  // Reject `.assets.md` companion uploaded on its own — without the
+  // matching body it carries only base64 footers and the importer
+  // would fall through to the empty-body GFM path.
+  if (sourceOverride !== "md+assets" && detectMdKind(text) === "assets") {
+    setStatus(
+      "이 파일은 split 모드의 .assets.md 동반 파일입니다. 본문 .md와 함께 같이 업로드하세요.",
+      true,
+    );
+    return;
+  }
   // Editor iframe has nothing to consume from a .md upload, so
   // clear any leftover buffer state from a previous HWP load.
   lastBuffer = null;
@@ -539,26 +549,45 @@ async function handleFiles(files: File[]): Promise<void> {
     void handleFile(files[0]);
     return;
   }
-  const body = files.find(
-    (f) =>
-      isMarkdownFile(f.name) && !f.name.toLowerCase().endsWith(".assets.md"),
+  // Content-based pairing: classify each candidate by its
+  // format-dispatch stamp on the first non-blank line. macOS
+  // Finder mangles `.assets.md` into `(N).md` when the base name
+  // collides with the body file, so filename-suffix detection is
+  // unreliable; the comment header is authoritative.
+  const candidates = files.filter((f) => isMarkdownFile(f.name));
+  const tagged = await Promise.all(
+    candidates.map(async (f) => {
+      const body = await f.text();
+      return { file: f, body, kind: detectMdKind(body) };
+    }),
   );
-  const assets = files.find((f) =>
-    f.name.toLowerCase().endsWith(".assets.md"),
-  );
+  const body = tagged.find((t) => t.kind === "llm" || t.kind === "human");
+  const assets = tagged.find((t) => t.kind === "assets");
   if (body && assets) {
-    const main = await body.text();
-    const companion = await assets.text();
-    const merged = `${main}\n\n${companion}`;
-    const synthetic = new File([merged], body.name, { type: "text/markdown" });
-    // Side-step the auto-dispatch in `handleFile` so we can flag the
-    // chip with the "md+assets" badge — `handleMarkdownFile` accepts
-    // an explicit `SourceKind` override exactly for this case.
+    const merged = `${body.body}\n\n${assets.body}`;
+    const synthetic = new File([merged], body.file.name, {
+      type: "text/markdown",
+    });
     void handleMarkdownFile(synthetic, "md+assets");
     return;
   }
   // No recognised pair — fall through to first file.
   void handleFile(files[0]);
+}
+
+/// Read the format-dispatch comment on the first non-blank line.
+function detectMdKind(text: string): "llm" | "human" | "assets" | "unknown" {
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (line.length === 0) continue;
+    const m = line.match(/^<!-- hwp-transpiler: format=([a-z]+) -->$/);
+    if (!m) return "unknown";
+    if (m[1] === "llm") return "llm";
+    if (m[1] === "human") return "human";
+    if (m[1] === "assets") return "assets";
+    return "unknown";
+  }
+  return "unknown";
 }
 
 for (const el of [
