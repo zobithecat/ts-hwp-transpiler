@@ -274,10 +274,49 @@ fn emit_table(t: &TableControl, out: &mut String, bin_lookup: &BinLookup) {
             r#"textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" "#,
             r#"dropcapstyle="None" pageBreak="CELL" repeatHeader="1" "#,
             r#"rowCnt="{rows}" colCnt="{cols}" cellSpacing="0" "#,
-            r#"borderFillIDRef="0" noAdjust="0">"#,
+            r#"borderFillIDRef="{border}" noAdjust="0">"#,
         ),
         rows = t.rows,
         cols = t.cols,
+        border = t.border_fill_id,
+    ));
+
+    // `<hp:sz>` / `<hp:pos>` / `<hp:outMargin>` / `<hp:inMargin>` —
+    // every Hancom-authored `<hp:tbl>` carries these four layout
+    // children right after the opening tag. Without them viewers
+    // can't determine the table's bounding box or anchor and fall
+    // back to broken zero-size rendering. Compute the table extent
+    // from cell widths/heights; clamp to 1 HWPU so a degenerate
+    // empty table still emits structurally-valid attributes.
+    let table_w: u32 = t
+        .cells
+        .iter()
+        .filter(|c| c.row == 0)
+        .map(|c| c.width_hwpu)
+        .sum::<u32>()
+        .max(1);
+    let table_h: u32 = (0..t.rows)
+        .map(|r| {
+            t.cells
+                .iter()
+                .filter(|c| c.row == r)
+                .map(|c| c.height_hwpu)
+                .max()
+                .unwrap_or(0)
+        })
+        .sum::<u32>()
+        .max(1);
+    out.push_str(&format!(
+        concat!(
+            r#"<hp:sz width="{w}" widthRelTo="ABSOLUTE" height="{h}" heightRelTo="ABSOLUTE" protect="0"/>"#,
+            r#"<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" "#,
+            r#"allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" "#,
+            r#"vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/>"#,
+            r#"<hp:outMargin left="283" right="283" top="283" bottom="283"/>"#,
+            r#"<hp:inMargin left="141" right="141" top="141" bottom="141"/>"#,
+        ),
+        w = table_w,
+        h = table_h,
     ));
 
     // Group cells by row-index into `<hp:tr>` wrappers so the output
