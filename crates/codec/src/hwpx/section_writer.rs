@@ -74,6 +74,16 @@ fn emit_paragraph(para: &Paragraph, out: &mut String, id: u32) {
         emit_paragraph_as_split_runs(para, out);
     }
 
+    // Bare-minimum `<hp:linesegarray>`. Without this, viewers see
+    // every paragraph as `line_height=0` and the doc explodes into
+    // a few-thousand-page layout (one line per page) on open.
+    // rhwp's auto-fix and Hancom's textRun reflow both expect AT
+    // LEAST one lineseg per paragraph; values mirror Hancom's 10pt-
+    // on-A4 defaults so the reflow has reasonable seed metrics.
+    out.push_str(
+        r#"<hp:linesegarray><hp:lineseg textpos="0" vertpos="0" vertsize="1000" textheight="1000" baseline="850" spacing="600" horzpos="0" horzsize="42520" flags="393216"/></hp:linesegarray>"#,
+    );
+
     out.push_str("</hp:p>");
 }
 
