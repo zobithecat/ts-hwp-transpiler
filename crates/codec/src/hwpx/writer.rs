@@ -56,8 +56,15 @@ impl Writer for HwpxWriter {
         // changed.
         for (i, section) in doc.sections.iter().enumerate() {
             let bytes = match &section.stream_bytes {
-                Some(cached) => cached.clone(),
-                None => write_section_xml(section)?,
+                // Verbatim only when the cache actually IS HWPX XML —
+                // a HWP5 reader populates `stream_bytes` with the
+                // binary `BodyText/Section{N}` blob, and dumping that
+                // into `Contents/section{N}.xml` produces an archive
+                // every HWPX consumer rejects mid-parse with
+                // "tag not closed". Sniff the leading bytes; fall
+                // back to the typed XML emitter for non-XML payloads.
+                Some(cached) if looks_like_xml(cached) => cached.clone(),
+                _ => write_section_xml(section)?,
             };
             zip.add_part(&format!("Contents/section{i}.xml"), &bytes)?;
         }
@@ -100,6 +107,19 @@ impl Writer for HwpxWriter {
                 continue;
             }
             if name.starts_with("BinData/") {
+                continue;
+            }
+            if !is_hwpx_path(name) {
+                // HWP5 → HWPX cross-format conversion: the HWP5 reader
+                // surfaces OLE compound-file streams (e.g.
+                // `/\x05HwpSummaryInformation`, `/PrvImage`,
+                // `/Scripts/DefaultJScript`) into `unknown_streams`.
+                // Those names aren't valid HWPX paths and embedding
+                // them straight into the OCF zip produces an archive
+                // HWP 2014 / rhwp refuse to open. Drop anything that
+                // doesn't match a recognised HWPX prefix; the cross-
+                // format converter doesn't preserve HWP5 metadata
+                // through the round-trip yet.
                 continue;
             }
             if name == "Contents/header.xml" {
@@ -329,6 +349,42 @@ fn is_section_xml(name: &str) -> bool {
         return false;
     };
     !idx.is_empty() && idx.chars().all(|c| c.is_ascii_digit())
+}
+
+/// Cheap "is this XML?" check — used to gate the verbatim section
+/// passthrough. Skips ASCII whitespace + the optional UTF-8 BOM,
+/// then requires `<` so a HWP5 binary `BodyText/Section{N}` cache
+/// (which never starts with `<`) takes the fresh-emit path. We
+/// don't validate the XML here; a malformed declaration is the
+/// reader's problem, not ours.
+fn looks_like_xml(bytes: &[u8]) -> bool {
+    let mut i = 0;
+    if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        i = 3;
+    }
+    while let Some(&b) = bytes.get(i) {
+        if matches!(b, b' ' | b'\t' | b'\r' | b'\n') {
+            i += 1;
+            continue;
+        }
+        return b == b'<';
+    }
+    false
+}
+
+/// Path-prefix whitelist for HWPX (OCF) container parts. Anything
+/// not on this list is HWP5 OLE leakage when the IR came from the
+/// `.hwp` reader and shouldn't be written into a `.hwpx` archive.
+fn is_hwpx_path(name: &str) -> bool {
+    name == "mimetype"
+        || name == "settings.xml"
+        || name == "version.xml"
+        || name.starts_with("Contents/")
+        || name.starts_with("BinData/")
+        || name.starts_with("META-INF/")
+        || name.starts_with("Preview/")
+        || name.starts_with("Scripts/")
+        || name.starts_with("Charts/")
 }
 
 #[cfg(test)]

@@ -39,6 +39,19 @@ const CONTENT_HPF_STR: &str = r##"<?xml version="1.0" encoding="UTF-8" standalon
 pub const HEADER_XML: &[u8] = HEADER_XML_STR.as_bytes();
 const HEADER_XML_STR: &str = r##"<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><hh:head xmlns:ha="http://www.hancom.co.kr/hwpml/2011/app" xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph" xmlns:hs="http://www.hancom.co.kr/hwpml/2011/section" xmlns:hc="http://www.hancom.co.kr/hwpml/2011/core" xmlns:hh="http://www.hancom.co.kr/hwpml/2011/head" version="1.4" secCnt="1"><hh:beginNum page="1" footnote="1" endnote="1" pic="1" tbl="1" equation="1"/><hh:refList><hh:fontfaces><hh:fontface lang="HANGUL" fontCnt="1"><hh:font id="0" face="함초롬바탕" type="TTF" isEmbedded="0"/></hh:fontface><hh:fontface lang="LATIN" fontCnt="1"><hh:font id="0" face="함초롬바탕" type="TTF" isEmbedded="0"/></hh:fontface><hh:fontface lang="HANJA" fontCnt="1"><hh:font id="0" face="함초롬바탕" type="TTF" isEmbedded="0"/></hh:fontface><hh:fontface lang="JAPANESE" fontCnt="1"><hh:font id="0" face="함초롬바탕" type="TTF" isEmbedded="0"/></hh:fontface><hh:fontface lang="OTHER" fontCnt="1"><hh:font id="0" face="함초롬바탕" type="TTF" isEmbedded="0"/></hh:fontface><hh:fontface lang="SYMBOL" fontCnt="1"><hh:font id="0" face="함초롬바탕" type="TTF" isEmbedded="0"/></hh:fontface><hh:fontface lang="USER" fontCnt="1"><hh:font id="0" face="함초롬바탕" type="TTF" isEmbedded="0"/></hh:fontface></hh:fontfaces><hh:borderFills><hh:borderFill id="0" threeD="0" shadow="0" centerLine="NONE" breakCellSeparateLine="0"><hh:slash type="NONE" Crooked="0" isCounter="0"/><hh:backSlash type="NONE" Crooked="0" isCounter="0"/><hh:leftBorder type="NONE" width="0.1 mm" color="#000000"/><hh:rightBorder type="NONE" width="0.1 mm" color="#000000"/><hh:topBorder type="NONE" width="0.1 mm" color="#000000"/><hh:bottomBorder type="NONE" width="0.1 mm" color="#000000"/><hh:diagonal type="SOLID" width="0.1 mm" color="#000000"/></hh:borderFill><hh:borderFill id="1" threeD="0" shadow="0" centerLine="NONE" breakCellSeparateLine="0"><hh:slash type="NONE" Crooked="0" isCounter="0"/><hh:backSlash type="NONE" Crooked="0" isCounter="0"/><hh:leftBorder type="SOLID" width="0.12 mm" color="#000000"/><hh:rightBorder type="SOLID" width="0.12 mm" color="#000000"/><hh:topBorder type="SOLID" width="0.12 mm" color="#000000"/><hh:bottomBorder type="SOLID" width="0.12 mm" color="#000000"/><hh:diagonal type="SOLID" width="0.1 mm" color="#000000"/></hh:borderFill></hh:borderFills><hh:charProperties></hh:charProperties><hh:paraProperties></hh:paraProperties><hh:styles></hh:styles></hh:refList></hh:head>"##;
 
+/// HWPX version stamp. Some viewers (notably mac HWP 2014) refuse
+/// to open the package when this is missing — the spec calls it
+/// optional but a bare-minimum stub keeps parity with Hancom-
+/// authored archives.
+pub const VERSION_XML: &[u8] = VERSION_XML_STR.as_bytes();
+const VERSION_XML_STR: &str = r##"<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><hv:HCFVersion xmlns:hv="http://www.hancom.co.kr/hwpml/2011/version" tagetApplication="WORDPROC" major="5" minor="1" micro="0" buildNumber="0"/>"##;
+
+/// Document-level settings (zoom, view mode, …). Empty stub keeps
+/// viewers from complaining about a missing settings.xml; mutations
+/// can replace the entry verbatim later.
+pub const SETTINGS_XML: &[u8] = SETTINGS_XML_STR.as_bytes();
+const SETTINGS_XML_STR: &str = r##"<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><ha:HWPApplicationSetting xmlns:ha="http://www.hancom.co.kr/hwpml/2011/app"/>"##;
+
 /// Inject the default skeleton parts into `doc.unknown_streams` for
 /// any path that hasn't already been provided. Idempotent: pre-
 /// existing entries (e.g. from a real HWPX read) are preserved.
@@ -47,6 +60,8 @@ pub fn bundle_default_skeleton(doc: &mut IrDocument) {
         ("META-INF/container.xml", CONTAINER_XML),
         ("Contents/content.hpf", CONTENT_HPF),
         ("Contents/header.xml", HEADER_XML),
+        ("settings.xml", SETTINGS_XML),
+        ("version.xml", VERSION_XML),
     ];
     for (path, bytes) in entries {
         doc.unknown_streams
