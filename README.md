@@ -10,13 +10,17 @@
 고충실도 미리보기 (사람용) 두 형태로 모두 렌더링하는 것.
 
 > 상태: HWP5/HWPX 양쪽 reader/writer 동작 중. HWPX writer는
-> DocInfo-side mutation도 surgical rewriter로 round-trip. **MD ↔
-> HWPX 양방향 종단 동작** — `md-to-hwpx` CLI + 데모 .hwpx 다운로드.
-> 그림은 `--inline-assets`(단일 자족 .md, base64 footer) /
-> `--split-assets`(`<stem>.md` + `<stem>.assets.md` 페어) 두 모드로
-> round-trip. WASM은 handle-based 레지스트리로 62MB+ 처리, Vite
-> 데모에서 라이브. 픽셀 fidelity 뷰는 `@rhwp/editor` iframe 임베드.
-> 진행 상황은 `docs/memory/CURRENT.md` 참고.
+> DocInfo-side mutation도 surgical rewriter로 round-trip. **HWPX
+> 라운드트립이 컨테이너 byte-equal** (mimetype + section + header +
+> manifest + BinData + META-INF + Preview + settings + version 13개
+> stream `cmp` exit 0). MD 포맷에 UNKNOWN_STREAM 레코드를 추가해
+> Hancom-authored 컨테이너 part 를 무손실 보존. HWP5 → MD → HWPX
+> cross-format 도 viewer 가 열고 그림 모두 표시 (단 layout/표는 MD
+> 포맷이 doc_info 를 encode 하지 않아 정확도 한계 — 저널
+> `2026-04-29-md-roundtrip-viewer-arc.md` 참고). WASM은 handle-based
+> 레지스트리로 62MB+ 처리, Vite 데모에서 라이브. 픽셀 fidelity 뷰는
+> `@rhwp/editor` iframe 임베드. 진행 상황은 `docs/memory/CURRENT.md`
+> 참고.
 
 ## 이 프로젝트가 이미 보여준 가치
 
@@ -243,6 +247,14 @@ HWPX (3 MB, 그림 다수) 기준으로 round-trip + export 모두 통과.
 
 ## 아직 없는 것
 
+- **HWP5 → MD → HWPX 의 layout 정확도** — HWPX 원본 라운드트립은
+  컨테이너 byte-equal 까지 도달했지만, HWP5(.hwp) 입력은 MD 포맷이
+  doc_info(charShape/paraShape/style 테이블) 을 encode 하지 않아
+  round-trip 시 모든 paragraph 가 default `paraPrIDRef="0"` 참조 →
+  heading/body/cell 이 같은 metric 으로 렌더, 표 dimension/행 높이
+  제어 정확도 손실. 그림은 정상 표시. MD 포맷 확장 (`STYLES`/
+  `CHAR_SHAPES`/`PARA_SHAPES` 레코드) 또는 HWP5 → HWPX 직접 변환이
+  자연스러운 다음 단계.
 - **비-헤딩 구조 스타일 round-trip** — `# 제목`(개요 N) 헤딩은 양방향
   동작. 한국 법조문 양식의 "조"/"항"/"호" 같은 사용자 정의 스타일은
   IR로는 읽지만 MD 측 emit에서 이름이 빠져 round-trip 시 본문 스타일로
