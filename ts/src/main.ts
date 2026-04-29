@@ -374,6 +374,13 @@ async function handleFile(file: File): Promise<void> {
 
   const buffer = await file.arrayBuffer();
   const bytes = new Uint8Array(buffer);
+  // Inspect the input ZIP before handing it to wasm so the user
+  // can compare the file we received against what `loadHwp` came
+  // back with — discrepancies between this list and the IR's
+  // `bin_data` summary point straight at the wasm-side reader.
+  if (file.name.toLowerCase().endsWith(".hwpx")) {
+    logHwpxEntries(`upload ${file.name}`, bytes);
+  }
 
   // Remember the buffer for the editor iframe's deferred load.
   // The editor is only booted when the user switches to that tab,
