@@ -45,11 +45,19 @@ impl Writer for HwpxWriter {
         // OCF requires mimetype first, stored uncompressed.
         zip.write_mimetype(MIMETYPE)?;
 
-        // Regenerate sections from IR — they carry the mutations we
-        // care about (typed paragraphs, tables, cell spans).
+        // Prefer verbatim cached bytes when the section hasn't been
+        // mutated — the typed-IR re-emit path drops elements the
+        // parser doesn't yet understand (`<hp:linesegarray>`,
+        // `<hp:secPr>`, paragraph layout metadata) and viewers
+        // notice. Mutating helpers in `Section` clear the cache so
+        // a fresh emit happens whenever the IR shape actually
+        // changed.
         for (i, section) in doc.sections.iter().enumerate() {
-            let xml = write_section_xml(section)?;
-            zip.add_part(&format!("Contents/section{i}.xml"), &xml)?;
+            let bytes = match &section.stream_bytes {
+                Some(cached) => cached.clone(),
+                None => write_section_xml(section)?,
+            };
+            zip.add_part(&format!("Contents/section{i}.xml"), &bytes)?;
         }
 
         // Re-emit embedded binaries under `BinData/<id>` — the reader

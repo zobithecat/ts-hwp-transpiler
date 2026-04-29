@@ -49,7 +49,19 @@ impl Reader for HwpxReader {
 
         for name in &section_names {
             let bytes = archive.read_part(name)?;
-            let section = parse_section_xml(&bytes)?;
+            let mut section = parse_section_xml(&bytes)?;
+            // Cache the original section XML so the writer can emit
+            // it verbatim when the IR hasn't been mutated. The HWPX
+            // section parser only decodes a subset of the section's
+            // elements (paragraph text, tables, char-shape runs) —
+            // metadata like `<hp:linesegarray>`, `<hp:secPr>`, and
+            // `<hp:colPr>` would otherwise be lost on write,
+            // breaking viewer layout (656-page reflow,
+            // line_height=0 warnings, picture position drift).
+            // Mutating helpers (`paragraphs_mut`,
+            // `invalidate_verbatim`) clear this cache so a fresh
+            // emit re-encodes from the typed fields.
+            section.stream_bytes = Some(bytes);
             doc.sections.push(section);
         }
 
