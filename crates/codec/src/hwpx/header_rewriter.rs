@@ -940,21 +940,25 @@ fn emit_new_para_pr(id: u32, shape: &ParaShape, out: &mut Vec<u8>) {
         )
         .as_bytes(),
     );
-    // `<hh:lineSpacing>` — prefer the HWP 5.0.3.0+ pair when
-    // present, fall back to the legacy single-field value (treated
-    // as PERCENT). Spacing kind 0=PERCENT, 1=FIXED, 2=BETWEEN_LINE,
-    // 3=AT_LEAST mirroring HWP5 conventions.
-    let (spacing_kind, spacing_value) = match (shape.line_spacing_kind, shape.line_spacing) {
-        (Some(k), Some(v)) => (k, v),
-        _ => (0u32, shape.line_space_legacy.max(0) as u32),
+    // `<hh:lineSpacing>` — `line_space_legacy` is the source of
+    // truth (a u32 PERCENT value: 160=1.6 line, 130=1.3 line, …).
+    // The HWP 5.0.3.0+ typed pair `line_spacing_kind` /
+    // `line_spacing` would let us round-trip non-PERCENT modes,
+    // but in HWP5 fixtures we've inspected the pair often holds
+    // garbage (kind=160, spacing=0) — likely a parser-side field
+    // swap. Until that's resolved at the reader layer, treat
+    // legacy as authoritative and only use the typed kind when
+    // it's a recognised enum (1/2/3) — those would be FIXED /
+    // BETWEEN_LINE / AT_LEAST values whose semantics warrant
+    // a non-PERCENT type stamp even if our legacy fallback is
+    // wrong for them.
+    let legacy_value = shape.line_space_legacy.max(0) as u32;
+    let (spacing_type, spacing_value) = match shape.line_spacing_kind {
+        Some(1) => ("FIXED", shape.line_spacing.unwrap_or(legacy_value)),
+        Some(2) => ("BETWEEN_LINE", shape.line_spacing.unwrap_or(legacy_value)),
+        Some(3) => ("AT_LEAST", shape.line_spacing.unwrap_or(legacy_value)),
+        _ => ("PERCENT", if legacy_value > 0 { legacy_value } else { 160 }),
     };
-    let spacing_type = match spacing_kind {
-        1 => "FIXED",
-        2 => "BETWEEN_LINE",
-        3 => "AT_LEAST",
-        _ => "PERCENT",
-    };
-    let spacing_value = if spacing_value == 0 { 160 } else { spacing_value };
     out.extend_from_slice(
         format!(
             r#"<hh:lineSpacing type="{ty}" value="{val}" unit="HWPUNIT"/>"#,
