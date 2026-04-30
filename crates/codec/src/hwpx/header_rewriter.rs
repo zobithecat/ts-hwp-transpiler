@@ -1025,10 +1025,19 @@ fn emit_new_border_fill(id: u32, fill: &BorderFill, out: &mut Vec<u8>) {
     emit_border_element(b"diagonal", &fill.diagonal, out);
 
     if let Some((r, g, b, _a)) = fill.fill.back_color() {
-        let hex = format!("#{r:02X}{g:02X}{b:02X}");
-        out.extend_from_slice(b"<hc:fillBrush><hc:winBrush faceColor=\"");
-        out.extend_from_slice(hex.as_bytes());
-        out.extend_from_slice(b"\" hatchColor=\"#000000\" hatchStyle=\"NONE\" alpha=\"0\"/></hc:fillBrush>");
+        // Skip the fillBrush emit for white (#FFFFFF). HWP5 commonly
+        // stores "no background" as a kind=KIND_COLOR + RGB=white
+        // pair (a synthetic sentinel, not an authored white fill);
+        // emitting a real `<hc:fillBrush winBrush faceColor="#FFFFFF">`
+        // here paints a white box behind every glyph in cells that
+        // reference this borderFill. Hancom-authored docs simply
+        // omit `<hc:fillBrush>` when the cell has no background.
+        if !(r == 0xFF && g == 0xFF && b == 0xFF) {
+            let hex = format!("#{r:02X}{g:02X}{b:02X}");
+            out.extend_from_slice(b"<hc:fillBrush><hc:winBrush faceColor=\"");
+            out.extend_from_slice(hex.as_bytes());
+            out.extend_from_slice(b"\" hatchColor=\"#000000\" hatchStyle=\"NONE\" alpha=\"0\"/></hc:fillBrush>");
+        }
     }
 
     out.extend_from_slice(b"</hh:borderFill>");
