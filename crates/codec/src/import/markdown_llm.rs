@@ -310,7 +310,7 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
             continue;
         }
 
-        if let Some(text) = strip_text_prefix(trimmed) {
+        if let Some((text, line_ps, line_cs)) = parse_text_line(trimmed) {
             match &mut state {
                 State::ExpectingParagraphText {
                     explicit_level,
@@ -324,13 +324,13 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
                     state = State::Idle;
                 }
                 State::InTable(builder) => {
-                    builder.set_pending_text(text.to_string());
+                    builder.set_pending_text_with_shapes(text.to_string(), line_ps, line_cs);
                 }
                 State::Idle => {
                     // Bare TEXT without a preceding PARAGRAPH marker
                     // — treat as a body paragraph so prose isn't
                     // dropped on the floor.
-                    current.paragraphs.push(make_paragraph(0, text.to_string(), 0, 0));
+                    current.paragraphs.push(make_paragraph(0, text.to_string(), line_ps, line_cs));
                 }
             }
             continue;
@@ -435,18 +435,28 @@ struct PendingCell {
 
 impl LlmTableBuilder {
     fn set_pending_text(&mut self, text: String) {
+        self.set_pending_text_with_shapes(text, 0, 0);
+    }
+    fn set_pending_text_with_shapes(&mut self, text: String, ps: u32, cs: u32) {
         if let Some(p) = self.pending.take() {
-            self.push_cell(p, text);
+            self.push_cell(p, text, ps, cs);
         }
     }
     fn flush_pending(&mut self) {
         if let Some(p) = self.pending.take() {
-            self.push_cell(p, String::new());
+            self.push_cell(p, String::new(), 0, 0);
         }
     }
-    fn push_cell(&mut self, p: PendingCell, text: String) {
+    fn push_cell(&mut self, p: PendingCell, text: String, ps: u32, cs: u32) {
         let mut para = Paragraph::default();
         para.text = text;
+        para.header.para_shape_id = ps as u16;
+        if cs != 0 {
+            para.char_shape_runs.push(CharShapeRun {
+                start: 0,
+                char_shape_id: cs,
+            });
+        }
         self.cells.push(TableCell {
             row: p.row,
             col: p.col,
@@ -609,6 +619,31 @@ fn strip_text_prefix(line: &str) -> Option<&str> {
     let rest = line.strip_prefix("TEXT[")?;
     let close = rest.find("]: ")?;
     Some(&rest[close + 3..])
+}
+
+/// Parse a `TEXT[par-PATH,para_shape=N,char_shape=N]: text` line into
+/// `(text, para_shape, char_shape)`. `para_shape` / `char_shape` are
+/// `0` when the attrs are missing (older exports). Returns `None`
+/// for non-TEXT lines.
+fn parse_text_line(line: &str) -> Option<(&str, u32, u32)> {
+    if let Some(rest) = line.strip_prefix("TEXT: ") {
+        return Some((rest, 0, 0));
+    }
+    let rest = line.strip_prefix("TEXT[")?;
+    let close = rest.find("]: ")?;
+    let attrs_text = &rest[..close];
+    let body = &rest[close + 3..];
+    let mut ps = 0u32;
+    let mut cs = 0u32;
+    for kv in attrs_text.split(',') {
+        let kv = kv.trim();
+        if let Some(v) = kv.strip_prefix("para_shape=") {
+            ps = v.parse().unwrap_or(0);
+        } else if let Some(v) = kv.strip_prefix("char_shape=") {
+            cs = v.parse().unwrap_or(0);
+        }
+    }
+    Some((body, ps, cs))
 }
 
 #[cfg(test)]

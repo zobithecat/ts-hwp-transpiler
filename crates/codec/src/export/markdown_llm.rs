@@ -366,7 +366,22 @@ fn emit_cell(
         let text = super::markdown::clean_text(&p.text);
         let inner_par_path = format!("{path}-p{pi}");
         if !text.is_empty() {
-            line(out, &format!("TEXT[par-{inner_par_path}]: {text}"));
+            // Stamp `para_shape` / `char_shape` on cell text records
+            // too. Cell paragraphs aren't routed through the top-
+            // level PARAGRAPH path so the only place to carry the
+            // slot ids is the TEXT bracket. HWP5-sourced cells often
+            // use varied shapes (label vs value, header row, …) —
+            // without these attrs every cell collapsed to slot 0 on
+            // round-trip.
+            let cs = p
+                .char_shape_runs
+                .first()
+                .map(|r| r.char_shape_id)
+                .unwrap_or(0);
+            line(out, &format!(
+                "TEXT[par-{inner_par_path},para_shape={ps},char_shape={cs}]: {text}",
+                ps = p.header.para_shape_id,
+            ));
         }
         for (ci, ctrl) in p.controls.iter().enumerate() {
             let inner_ctrl_path = format!("{inner_par_path}-c{ci}");
@@ -529,8 +544,10 @@ mod tests {
             md.contains("CELL[id=cell-s0-p3-c0-r0c1,row=0,col=1,rowspan=1,colspan=1"),
             "got: {md}"
         );
-        assert!(md.contains("TEXT[par-s0-p3-c0-r0c0-p0]: A"), "got: {md}");
-        assert!(md.contains("TEXT[par-s0-p3-c0-r0c1-p0]: B"), "got: {md}");
+        assert!(md.contains("TEXT[par-s0-p3-c0-r0c0-p0,"), "got: {md}");
+        assert!(md.contains("]: A"), "got: {md}");
+        assert!(md.contains("TEXT[par-s0-p3-c0-r0c1-p0,"), "got: {md}");
+        assert!(md.contains("]: B"), "got: {md}");
         assert!(md.contains("END TABLE[tbl-s0-p3-c0]"), "got: {md}");
     }
 
