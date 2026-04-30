@@ -334,7 +334,17 @@ impl HwpEmit for IrDocument {
         w.write(self).map_err(js_err)
     }
     fn then_emit_hwpx(&self) -> Result<Vec<u8>, JsValue> {
+        // Bundle the OCF skeleton parts (META-INF/container.xml,
+        // Contents/content.hpf, Contents/header.xml, settings.xml,
+        // version.xml) before writing — HWP5-sourced IRs don't carry
+        // any of these, and the HWPX writer's path-prefix filter
+        // strips the OLE leakage but doesn't synthesise the missing
+        // HWPX-required parts. Idempotent: real HWPX-sourced IRs
+        // already have these in `unknown_streams`, so the bundle
+        // call is a no-op for them.
+        let mut clone = self.clone();
+        bundle_default_skeleton(&mut clone);
         let mut w = hwp_transpiler_codec::hwpx::HwpxWriter::default();
-        w.write(self).map_err(js_err)
+        w.write(&clone).map_err(js_err)
     }
 }
