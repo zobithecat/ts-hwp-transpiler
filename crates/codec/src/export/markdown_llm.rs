@@ -126,10 +126,24 @@ fn emit_paragraph(
         // shared `super::markdown::heading_level` lookup keys off
         // `Style::name` ("개요 N" / "Outline N"), the same convention
         // the human-Markdown exporter uses.
-        let header = match super::markdown::heading_level(doc, para) {
-            Some(n) => format!("PARAGRAPH[id=par-{path},level={n}]"),
-            None => format!("PARAGRAPH[id=par-{path}]"),
+        let mut header = match super::markdown::heading_level(doc, para) {
+            Some(n) => format!("PARAGRAPH[id=par-{path},level={n}"),
+            None => format!("PARAGRAPH[id=par-{path}"),
         };
+        // Stamp `para_shape` and (first-run) `char_shape` so the
+        // importer can route the right HWPX `paraPrIDRef` /
+        // `charPrIDRef` back. Without these, every paragraph
+        // collapsed to slot 0 on round-trip and HWP5-sourced docs
+        // rendered with uniform layout (same alignment / line height
+        // / font size for all 1300+ paragraphs).
+        header.push_str(&format!(",para_shape={}", para.header.para_shape_id));
+        let first_run_shape = para
+            .char_shape_runs
+            .first()
+            .map(|r| r.char_shape_id)
+            .unwrap_or(0);
+        header.push_str(&format!(",char_shape={}", first_run_shape));
+        header.push(']');
         line(out, &header);
         line(out, &format!("TEXT: {text}"));
         out.push('\n');
@@ -475,7 +489,7 @@ mod tests {
         });
         let md = to_llm_markdown(&doc, &opts_llm());
         assert!(md.contains("SECTION[id=sec-0]"), "got: {md}");
-        assert!(md.contains("PARAGRAPH[id=par-s0-p0]"), "got: {md}");
+        assert!(md.contains("PARAGRAPH[id=par-s0-p0"), "got: {md}");
         assert!(md.contains("TEXT: hello"), "got: {md}");
     }
 
@@ -1082,9 +1096,9 @@ mod tests {
             ..Section::default()
         });
         let md = to_llm_markdown(&doc, &opts_llm());
-        assert!(md.contains("PARAGRAPH[id=par-s0-p0]"));
-        assert!(md.contains("PARAGRAPH[id=par-s0-p1]"));
-        assert!(md.contains("PARAGRAPH[id=par-s0-p2]"));
+        assert!(md.contains("PARAGRAPH[id=par-s0-p0"));
+        assert!(md.contains("PARAGRAPH[id=par-s0-p1"));
+        assert!(md.contains("PARAGRAPH[id=par-s0-p2"));
     }
 
     fn equation_para(script: &str, font: Option<&str>, size_hwpu: i32) -> Paragraph {

@@ -226,7 +226,23 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
             //     docs that don't carry the attr.
             let attrs = parse_attrs(trimmed);
             let level = attrs.get_int("level").map(|n| n.clamp(0, 6) as u8);
-            state = State::ExpectingParagraphText { explicit_level: level };
+            // `para_shape` / `char_shape` route the paragraph back to
+            // the right slot in `doc_info.{para,char}_shapes`. Without
+            // these every paragraph collapsed to slot 0 on round-trip
+            // and HWP5-sourced layout was uniform across the doc.
+            let para_shape = attrs
+                .get_int("para_shape")
+                .map(|n| n.clamp(0, u32::MAX as i64) as u32)
+                .unwrap_or(0);
+            let char_shape = attrs
+                .get_int("char_shape")
+                .map(|n| n.clamp(0, u32::MAX as i64) as u32)
+                .unwrap_or(0);
+            state = State::ExpectingParagraphText {
+                explicit_level: level,
+                para_shape_id: para_shape,
+                char_shape_id: char_shape,
+            };
             continue;
         }
 
@@ -296,9 +312,15 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
 
         if let Some(text) = strip_text_prefix(trimmed) {
             match &mut state {
-                State::ExpectingParagraphText { explicit_level } => {
+                State::ExpectingParagraphText {
+                    explicit_level,
+                    para_shape_id,
+                    char_shape_id,
+                } => {
                     let (level, body) = resolve_heading(*explicit_level, text);
-                    current.paragraphs.push(make_paragraph(level, body));
+                    let ps = *para_shape_id;
+                    let cs = *char_shape_id;
+                    current.paragraphs.push(make_paragraph(level, body, ps, cs));
                     state = State::Idle;
                 }
                 State::InTable(builder) => {
@@ -308,7 +330,7 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
                     // Bare TEXT without a preceding PARAGRAPH marker
                     // — treat as a body paragraph so prose isn't
                     // dropped on the floor.
-                    current.paragraphs.push(make_paragraph(0, text.to_string()));
+                    current.paragraphs.push(make_paragraph(0, text.to_string(), 0, 0));
                 }
             }
             continue;
@@ -362,9 +384,15 @@ enum State {
     Idle,
     /// `explicit_level` is `Some(N)` when the PARAGRAPH record
     /// carried `level=N`. The TEXT branch falls back to a `# `-
-    /// prefix scan when this is `None`.
+    /// prefix scan when this is `None`. `para_shape_id` /
+    /// `char_shape_id` are the slot ids the PARAGRAPH record
+    /// carries — applied to the resulting `Paragraph::header` /
+    /// `char_shape_runs` so HWPX `paraPrIDRef` / `charPrIDRef`
+    /// route to the matching shape entries on round-trip.
     ExpectingParagraphText {
         explicit_level: Option<u8>,
+        para_shape_id: u32,
+        char_shape_id: u32,
     },
     InTable(LlmTableBuilder),
 }
@@ -501,18 +529,34 @@ impl AttrMap {
 /// `style_id` / `para_shape_id` / `char_shape_id` so HWPX viewers
 /// render with the heading style/font from the synthesised
 /// DocInfo table.
-fn make_paragraph(level: u8, text: String) -> Paragraph {
+fn make_paragraph(level: u8, text: String, para_shape: u32, char_shape: u32) -> Paragraph {
     let mut p = Paragraph::default();
     p.text = text;
+    // PARAGRAPH record's `para_shape` overrides the heading-level
+    // fallback when present. Heading paragraphs from `# `-prefix MD
+    // (no doc_info) keep using `level` as the slot id since
+    // `style_synth` synthesises one paraShape per heading level.
+    let para_shape_id = if para_shape != 0 {
+        para_shape as u16
+    } else {
+        level as u16
+    };
     p.header = ParagraphHeader {
         style_id: level,
-        para_shape_id: level as u16,
+        para_shape_id,
         ..ParagraphHeader::default()
     };
-    if level > 0 {
+    let char_shape_id = if char_shape != 0 {
+        char_shape
+    } else if level > 0 {
+        level as u32
+    } else {
+        0
+    };
+    if char_shape_id != 0 || level > 0 {
         p.char_shape_runs.push(CharShapeRun {
             start: 0,
-            char_shape_id: level as u32,
+            char_shape_id,
         });
     }
     p
