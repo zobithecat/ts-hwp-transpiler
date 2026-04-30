@@ -903,13 +903,11 @@ fn emit_new_style(id: u32, style: &Style, out: &mut Vec<u8>) {
 }
 
 /// Emit a from-scratch `<hh:paraPr>` block for an IR-side paraShape
-/// the original document didn't carry. Hancom-authored paraPrs ship
-/// a full child set (align, heading, breakSetting, margin, lineSpacing,
-/// border, autoSpacing); without those, mac HWP 2014 / rhwp default
-/// to broken layout (zero line height, missing word breaks, no
-/// margins) and tables ride along with the same broken metrics. The
-/// IR's ParaShape only carries `align` typed for now — the other
-/// values use Hancom's "single-spaced 10pt body text" defaults.
+/// the original document didn't carry. Reads the IR's actual
+/// margin / indent / line-spacing values so HWP5-sourced docs
+/// don't collapse to a single uniform layout — without these
+/// every paragraph rendered with the same indent / spacing /
+/// padding regardless of paraShape id.
 fn emit_new_para_pr(id: u32, shape: &ParaShape, out: &mut Vec<u8>) {
     out.extend_from_slice(b"<hh:paraPr id=\"");
     out.extend_from_slice(id.to_string().as_bytes());
@@ -926,9 +924,58 @@ fn emit_new_para_pr(id: u32, shape: &ParaShape, out: &mut Vec<u8>) {
             r#"" vertical="BASELINE"/>"#,
             r#"<hh:heading type="NONE" idRef="0" level="0"/>"#,
             r#"<hh:breakSetting breakLatinWord="KEEP_WORD" breakNonLatinWord="KEEP_WORD" widowOrphan="0" keepWithNext="0" keepLines="0" pageBreakBefore="0" lineWrap="BREAK"/>"#,
-            r#"<hh:margin intent="0" left="0" right="0" prev="0" next="0"/>"#,
-            r#"<hh:lineSpacing type="PERCENT" value="160" unit="HWPUNIT"/>"#,
-            r#"<hh:border borderFillIDRef="0" offsetLeft="0" offsetRight="0" offsetTop="0" offsetBottom="0" connect="0" ignoreMargin="0"/>"#,
+        ).as_bytes(),
+    );
+    // `<hh:margin>` — pulled from the IR's `ParaShape`. HWP5
+    // ParaShape uses HWPUNIT throughout; `intent` is the first-line
+    // indent, `prev`/`next` are space-before / space-after.
+    out.extend_from_slice(
+        format!(
+            r#"<hh:margin intent="{intent}" left="{left}" right="{right}" prev="{prev}" next="{next}"/>"#,
+            intent = shape.indent,
+            left = shape.left_margin,
+            right = shape.right_margin,
+            prev = shape.top_space,
+            next = shape.bottom_space,
+        )
+        .as_bytes(),
+    );
+    // `<hh:lineSpacing>` — prefer the HWP 5.0.3.0+ pair when
+    // present, fall back to the legacy single-field value (treated
+    // as PERCENT). Spacing kind 0=PERCENT, 1=FIXED, 2=BETWEEN_LINE,
+    // 3=AT_LEAST mirroring HWP5 conventions.
+    let (spacing_kind, spacing_value) = match (shape.line_spacing_kind, shape.line_spacing) {
+        (Some(k), Some(v)) => (k, v),
+        _ => (0u32, shape.line_space_legacy.max(0) as u32),
+    };
+    let spacing_type = match spacing_kind {
+        1 => "FIXED",
+        2 => "BETWEEN_LINE",
+        3 => "AT_LEAST",
+        _ => "PERCENT",
+    };
+    let spacing_value = if spacing_value == 0 { 160 } else { spacing_value };
+    out.extend_from_slice(
+        format!(
+            r#"<hh:lineSpacing type="{ty}" value="{val}" unit="HWPUNIT"/>"#,
+            ty = spacing_type,
+            val = spacing_value,
+        )
+        .as_bytes(),
+    );
+    out.extend_from_slice(
+        format!(
+            r#"<hh:border borderFillIDRef="{bf}" offsetLeft="{l}" offsetRight="{r}" offsetTop="{t}" offsetBottom="{b}" connect="0" ignoreMargin="0"/>"#,
+            bf = shape.border_fill_id,
+            l = shape.left_border_space,
+            r = shape.right_border_space,
+            t = shape.top_border_space,
+            b = shape.bottom_border_space,
+        )
+        .as_bytes(),
+    );
+    out.extend_from_slice(
+        concat!(
             r#"<hh:autoSpacing eAsianEng="0" eAsianNum="0"/>"#,
             r#"</hh:paraPr>"#,
         ).as_bytes(),
