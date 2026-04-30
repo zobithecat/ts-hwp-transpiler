@@ -940,24 +940,17 @@ fn emit_new_para_pr(id: u32, shape: &ParaShape, out: &mut Vec<u8>) {
         )
         .as_bytes(),
     );
-    // `<hh:lineSpacing>` — `line_space_legacy` is the source of
-    // truth (a u32 PERCENT value: 160=1.6 line, 130=1.3 line, …).
-    // The HWP 5.0.3.0+ typed pair `line_spacing_kind` /
-    // `line_spacing` would let us round-trip non-PERCENT modes,
-    // but in HWP5 fixtures we've inspected the pair often holds
-    // garbage (kind=160, spacing=0) — likely a parser-side field
-    // swap. Until that's resolved at the reader layer, treat
-    // legacy as authoritative and only use the typed kind when
-    // it's a recognised enum (1/2/3) — those would be FIXED /
-    // BETWEEN_LINE / AT_LEAST values whose semantics warrant
-    // a non-PERCENT type stamp even if our legacy fallback is
-    // wrong for them.
+    // `<hh:lineSpacing>` — kind comes from `line_spacing_kind`
+    // (HWP5 attribute1 bits 0–1: 0=PERCENT, 1=FIXED, 2=SPACING_ONLY)
+    // and value from `line_spacing` (5.0.2.5+) or `line_space_legacy`
+    // (older). Both fields are HWPUNIT for FIXED/SPACING_ONLY and a
+    // bare percent integer (160 = 1.6 line) for PERCENT.
     let legacy_value = shape.line_space_legacy.max(0) as u32;
-    let (spacing_type, spacing_value) = match shape.line_spacing_kind {
-        Some(1) => ("FIXED", shape.line_spacing.unwrap_or(legacy_value)),
-        Some(2) => ("BETWEEN_LINE", shape.line_spacing.unwrap_or(legacy_value)),
-        Some(3) => ("AT_LEAST", shape.line_spacing.unwrap_or(legacy_value)),
-        _ => ("PERCENT", if legacy_value > 0 { legacy_value } else { 160 }),
+    let raw_value = shape.line_spacing.unwrap_or(legacy_value);
+    let (spacing_type, spacing_value) = match shape.line_spacing_kind.unwrap_or(0) {
+        1 => ("FIXED", raw_value),
+        2 => ("BETWEEN_LINE", raw_value),
+        _ => ("PERCENT", if raw_value > 0 { raw_value } else { 160 }),
     };
     out.extend_from_slice(
         format!(

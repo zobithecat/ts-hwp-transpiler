@@ -18,9 +18,15 @@
 //!   i16   bottom_border_space
 //!   [opt HWP 5.0.1.7+]  u32 attribute2
 //!   [opt HWP 5.0.2.5+]  u32 attribute3
-//!   [opt HWP 5.0.3.0+]  u32 line_spacing_kind + u32 line_spacing
+//!   [opt HWP 5.0.2.5+]  u32 line_spacing
 //!
-//! Base size: 42 bytes. Growth: +4 → 46 → 50 → 58 bytes.
+//! `line_spacing_kind` is NOT a separate binary field — it's packed
+//! into `attribute` bits 0–1 (per HWP 5.0 spec table 44):
+//! 0 = PERCENT (글자에 따라 %), 1 = FIXED (고정값), 2 = SPACING_ONLY
+//! (여백만 지정). The IR exposes it as a separate `Option<u32>` so
+//! emitters don't have to mask the attribute themselves.
+//!
+//! Base size: 42 bytes. Growth: +4 → 46 → 50 → 54 bytes.
 
 use hwp_transpiler_core::ir::{IrError, ParaShape, Record};
 
@@ -29,7 +35,7 @@ use super::doc_info::tag;
 const BASE: usize = 4 + 6 * 4 + 3 * 2 + 4 * 2; // 42
 const WITH_ATTR2: usize = BASE + 4;            // 46
 const WITH_ATTR3: usize = WITH_ATTR2 + 4;      // 50
-const WITH_LINE_SPACING: usize = WITH_ATTR3 + 8; // 58
+const WITH_LINE_SPACING: usize = WITH_ATTR3 + 4; // 54
 
 pub fn parse(rec: &Record) -> Result<ParaShape, IrError> {
     if rec.tag != tag::PARA_SHAPE {
@@ -65,11 +71,13 @@ pub fn parse(rec: &Record) -> Result<ParaShape, IrError> {
     let n = rec.data.len();
     let attribute2 = (n >= WITH_ATTR2).then(|| c.u32()).transpose()?;
     let attribute3 = (n >= WITH_ATTR3).then(|| c.u32()).transpose()?;
-    let (line_spacing_kind, line_spacing) = if n >= WITH_LINE_SPACING {
-        (Some(c.u32()?), Some(c.u32()?))
-    } else {
-        (None, None)
-    };
+    let line_spacing = (n >= WITH_LINE_SPACING).then(|| c.u32()).transpose()?;
+    // Kind is packed into attribute bits 0-1 (HWP 5.0 spec table 44):
+    //   0 = PERCENT (글자에 따라), 1 = FIXED (고정값),
+    //   2 = SPACING_ONLY (여백만 지정).
+    // Surface it as an `Option<u32>` aligned with `line_spacing` so
+    // both are present together (5.0.2.5+) or both absent.
+    let line_spacing_kind = line_spacing.map(|_| attribute & 0x3);
 
     Ok(ParaShape {
         attribute,
@@ -115,8 +123,20 @@ pub fn emit(ps: &ParaShape) -> Vec<u8> {
     if let Some(a) = ps.attribute3 {
         out.extend_from_slice(&a.to_le_bytes());
     }
-    if let (Some(k), Some(v)) = (ps.line_spacing_kind, ps.line_spacing) {
-        out.extend_from_slice(&k.to_le_bytes());
+    // `line_spacing_kind` is packed into `attribute` bits 0–1; the
+    // serialized form has only the value as a u32. Mask the kind
+    // back into attribute on emit so a parse → emit round-trip
+    // stays bit-equal even if the IR was constructed manually.
+    if let Some(v) = ps.line_spacing {
+        // Patch attribute's low 2 bits with kind if it diverged.
+        if let Some(k) = ps.line_spacing_kind {
+            let k = k & 0x3;
+            let live = ps.attribute & 0x3;
+            if live != k {
+                let patched = (ps.attribute & !0x3) | k;
+                out[0..4].copy_from_slice(&patched.to_le_bytes());
+            }
+        }
         out.extend_from_slice(&v.to_le_bytes());
     }
     out
@@ -184,7 +204,10 @@ mod tests {
             bottom_border_space: -3,
             attribute2: Some(0),
             attribute3: Some(0),
-            line_spacing_kind: Some(0),
+            // attribute bits 0–1 = 1 (FIXED line spacing kind), so
+            // the parser derives kind=1 on read-back. Keep the
+            // sample consistent with that.
+            line_spacing_kind: Some(1),
             line_spacing: Some(160),
         }
     }
