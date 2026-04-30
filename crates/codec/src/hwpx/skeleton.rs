@@ -17,7 +17,7 @@
 //! container-end splice path can insert any IR-side shapes that
 //! weren't yet present in the bundled skeleton.
 
-use hwp_transpiler_core::ir::IrDocument;
+use hwp_transpiler_core::ir::{FontFace, FontFaces, IrDocument};
 
 /// Standard OCF container manifest pointing at the HWPX content
 /// package.
@@ -55,6 +55,15 @@ const SETTINGS_XML_STR: &str = r##"<?xml version="1.0" encoding="UTF-8" standalo
 /// Inject the default skeleton parts into `doc.unknown_streams` for
 /// any path that hasn't already been provided. Idempotent: pre-
 /// existing entries (e.g. from a real HWPX read) are preserved.
+///
+/// When `doc.doc_info.font_faces` is non-empty (HWP5-sourced docs
+/// carry 17+ fonts per script), the bundled `Contents/header.xml`
+/// gets its empty `<hh:fontfaces>` block substituted with one
+/// derived from the IR — otherwise every `<hh:fontRef hangul="N">`
+/// in section bodies references a slot that doesn't exist (the
+/// skeleton ships a single `id="0"` placeholder), the viewer falls
+/// back to its default font, and the rendered text uses the wrong
+/// typeface for every glyph.
 pub fn bundle_default_skeleton(doc: &mut IrDocument) {
     let entries: &[(&str, &[u8])] = &[
         ("META-INF/container.xml", CONTAINER_XML),
@@ -68,6 +77,103 @@ pub fn bundle_default_skeleton(doc: &mut IrDocument) {
             .entry((*path).to_string())
             .or_insert_with(|| bytes.to_vec());
     }
+
+    // Substitute the bundled header's fontfaces block with one built
+    // from the IR's actual fonts. Only runs when (a) the header is
+    // exactly the bundled stub (so we don't perturb real HWPX
+    // headers) and (b) the IR carries any font face entries.
+    if let Some(header) = doc.unknown_streams.get_mut("Contents/header.xml") {
+        if header.as_slice() == HEADER_XML && fontfaces_has_content(&doc.doc_info.font_faces) {
+            let new = substitute_fontfaces_in_header(header, &doc.doc_info.font_faces);
+            *header = new;
+        }
+    }
+}
+
+fn fontfaces_has_content(f: &FontFaces) -> bool {
+    !f.hangul.is_empty()
+        || !f.latin.is_empty()
+        || !f.hanja.is_empty()
+        || !f.japanese.is_empty()
+        || !f.other.is_empty()
+        || !f.symbol.is_empty()
+        || !f.user.is_empty()
+}
+
+/// Replace the `<hh:fontfaces>...</hh:fontfaces>` span in `header`
+/// with one populated from the IR's per-script font tables. Each
+/// non-empty script lang gets its own `<hh:fontface lang="…"
+/// fontCnt="N">` container with one `<hh:font id="i" face="…">`
+/// child per IR entry. Empty scripts emit a single placeholder so
+/// `<hh:fontRef ...="0">` references stay resolvable.
+fn substitute_fontfaces_in_header(header: &[u8], fonts: &FontFaces) -> Vec<u8> {
+    let Ok(text) = std::str::from_utf8(header) else {
+        return header.to_vec();
+    };
+    let Some(open_pos) = text.find("<hh:fontfaces>") else {
+        return header.to_vec();
+    };
+    let close_marker = "</hh:fontfaces>";
+    let Some(close_pos) = text[open_pos..].find(close_marker) else {
+        return header.to_vec();
+    };
+    let close_end = open_pos + close_pos + close_marker.len();
+
+    let mut block = String::new();
+    block.push_str("<hh:fontfaces>");
+    for (lang, faces) in [
+        ("HANGUL", &fonts.hangul),
+        ("LATIN", &fonts.latin),
+        ("HANJA", &fonts.hanja),
+        ("JAPANESE", &fonts.japanese),
+        ("OTHER", &fonts.other),
+        ("SYMBOL", &fonts.symbol),
+        ("USER", &fonts.user),
+    ] {
+        block.push_str(&render_fontface_lang(lang, faces));
+    }
+    block.push_str("</hh:fontfaces>");
+
+    let mut out = Vec::with_capacity(text.len() + block.len());
+    out.extend_from_slice(text[..open_pos].as_bytes());
+    out.extend_from_slice(block.as_bytes());
+    out.extend_from_slice(text[close_end..].as_bytes());
+    out
+}
+
+fn render_fontface_lang(lang: &str, faces: &[FontFace]) -> String {
+    if faces.is_empty() {
+        // Always emit at least one placeholder per script so
+        // `<hh:fontRef ...="0">` resolves regardless of which lang
+        // a paragraph references.
+        return format!(
+            r#"<hh:fontface lang="{lang}" fontCnt="1"><hh:font id="0" face="함초롬바탕" type="TTF" isEmbedded="0"/></hh:fontface>"#
+        );
+    }
+    let mut s = format!(r#"<hh:fontface lang="{lang}" fontCnt="{}">"#, faces.len());
+    for (i, ff) in faces.iter().enumerate() {
+        let face = xml_escape(&ff.name);
+        s.push_str(&format!(
+            r#"<hh:font id="{i}" face="{face}" type="TTF" isEmbedded="0"/>"#,
+        ));
+    }
+    s.push_str("</hh:fontface>");
+    s
+}
+
+fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
