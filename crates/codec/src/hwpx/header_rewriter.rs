@@ -948,7 +948,13 @@ fn emit_new_char_pr(id: u32, shape: &CharShape, out: &mut Vec<u8>) {
     out.extend_from_slice(b"\" textColor=\"");
     out.extend_from_slice(color_to_hex(shape.color).as_bytes());
     out.extend_from_slice(b"\" shadeColor=\"");
-    if shape.shade_color == 0 {
+    // HWP5 stores "no shading" two ways: an all-zero u32, or the
+    // sentinel `0xFFFFFFFF` (all bits set). Both must round-trip as
+    // the HWPX `"none"` keyword — emitting the literal `#FFFFFF`
+    // shows visible white shading even on a white page (rhwp + mac
+    // HWP 2014 both render it). Only emit a real colour when the
+    // value isn't one of the sentinels.
+    if shape.shade_color == 0 || shape.shade_color == 0xFFFFFFFF {
         out.extend_from_slice(b"none");
     } else {
         out.extend_from_slice(color_to_hex(shape.shade_color).as_bytes());
