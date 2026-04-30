@@ -66,7 +66,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use hwp_transpiler_core::ir::{CharShape, Fill, IrDocument, IrError, ParaShape, Style};
+use hwp_transpiler_core::ir::{
+    Border, BorderFill, CharShape, Fill, IrDocument, IrError, ParaShape, Style,
+};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 
@@ -119,6 +121,13 @@ pub fn rewrite_header_xml(original: &[u8], doc: &IrDocument) -> Result<Vec<u8>, 
     // its End. Separate from `container` because the element name
     // differs and we may technically encounter both in any order.
     let mut styles_container: Option<HashSet<u32>> = None;
+    // Border fills sit in their own `<hh:borderFills>` container.
+    // When the original ships fewer entries than the IR carries
+    // (HWP5-sourced docs typically have 30+ borderFills, the bundled
+    // skeleton has only 2), we need to splice the missing ones before
+    // the closing tag — otherwise table cells reference IDs that
+    // don't resolve and viewers render them with no borders.
+    let mut border_fills_container: Option<HashSet<u32>> = None;
     let mut skip: Option<SkipState> = None;
 
     let mut buf = Vec::new();
@@ -171,6 +180,9 @@ pub fn rewrite_header_xml(original: &[u8], doc: &IrDocument) -> Result<Vec<u8>, 
                     }
                     "styles" => {
                         styles_container = Some(HashSet::new());
+                    }
+                    "borderFills" => {
+                        border_fills_container = Some(HashSet::new());
                     }
                     "style" if styles_container.is_some() => {
                         // Rare Start variant `<hh:style ...>...</hh:style>`.
@@ -258,7 +270,17 @@ pub fn rewrite_header_xml(original: &[u8], doc: &IrDocument) -> Result<Vec<u8>, 
                         )?;
                     }
                     "borderFill" => {
-                        border_fill_id = u32_attr(e, "id");
+                        let id = u32_attr(e, "id");
+                        border_fill_id = id;
+                        // Track the id in the borderFills container so
+                        // the End-of-`<hh:borderFills>` handler can
+                        // append only the IR entries the original
+                        // didn't already carry.
+                        if let (Some(id), Some(c)) =
+                            (id, border_fills_container.as_mut())
+                        {
+                            c.insert(id);
+                        }
                     }
                     "strikeout" if char_pr_id.is_some() => {
                         seen_strikeout = true;
@@ -531,6 +553,27 @@ pub fn rewrite_header_xml(original: &[u8], doc: &IrDocument) -> Result<Vec<u8>, 
                             }
                         }
                         container = None;
+                    }
+                    "borderFills" => {
+                        if let Some(c) = border_fills_container.as_ref() {
+                            let mut insertion = Vec::new();
+                            for (idx, fill) in
+                                doc.doc_info.border_fills.iter().enumerate()
+                            {
+                                let id = idx as u32;
+                                if !c.contains(&id) {
+                                    emit_new_border_fill(id, fill, &mut insertion);
+                                }
+                            }
+                            if !insertion.is_empty() {
+                                insert_before_event(
+                                    original, &mut out, &mut cursor,
+                                    event_start, event_end,
+                                    &insertion,
+                                );
+                            }
+                        }
+                        border_fills_container = None;
                     }
                     "styles" => {
                         if let Some(c) = styles_container.as_ref() {
@@ -946,6 +989,72 @@ fn emit_new_char_pr(id: u32, shape: &CharShape, out: &mut Vec<u8>) {
     out.extend_from_slice(b"\"/>");
 
     out.extend_from_slice(b"</hh:charPr>");
+}
+
+/// Emit a from-scratch `<hh:borderFill>` for an IR-side BorderFill the
+/// original document didn't carry. HWP5-sourced docs commonly ship
+/// 30+ borderFills (one per cell-style combination) but the bundled
+/// HWPX skeleton only has 2 — table cells whose `borderFillIDRef`
+/// points past the skeleton end render with no borders. Emit the full
+/// shape: `slash` / `backSlash` / 4 borders + `diagonal` + `fillBrush`
+/// (when the IR's Fill is a solid color), matching what Hancom-
+/// authored docs ship.
+fn emit_new_border_fill(id: u32, fill: &BorderFill, out: &mut Vec<u8>) {
+    out.extend_from_slice(b"<hh:borderFill id=\"");
+    out.extend_from_slice(id.to_string().as_bytes());
+    out.extend_from_slice(
+        b"\" threeD=\"0\" shadow=\"0\" centerLine=\"NONE\" breakCellSeparateLine=\"0\">",
+    );
+    out.extend_from_slice(b"<hh:slash type=\"NONE\" Crooked=\"0\" isCounter=\"0\"/>");
+    out.extend_from_slice(b"<hh:backSlash type=\"NONE\" Crooked=\"0\" isCounter=\"0\"/>");
+    let names: [&[u8]; 4] = [
+        b"leftBorder",
+        b"rightBorder",
+        b"topBorder",
+        b"bottomBorder",
+    ];
+    for (i, name) in names.iter().enumerate() {
+        emit_border_element(name, &fill.borders[i], out);
+    }
+    emit_border_element(b"diagonal", &fill.diagonal, out);
+
+    if let Some((r, g, b, _a)) = fill.fill.back_color() {
+        let hex = format!("#{r:02X}{g:02X}{b:02X}");
+        out.extend_from_slice(b"<hc:fillBrush><hc:winBrush faceColor=\"");
+        out.extend_from_slice(hex.as_bytes());
+        out.extend_from_slice(b"\" hatchColor=\"#000000\" hatchStyle=\"NONE\" alpha=\"0\"/></hc:fillBrush>");
+    }
+
+    out.extend_from_slice(b"</hh:borderFill>");
+}
+
+/// Map an IR `Border` to a HWPX `<hh:NAME type=… width=… color=…/>`
+/// element. `kind` is HWP5's u8 line-style enum; values >7 fall back
+/// to `SOLID`. `width` is in 0.1mm units.
+fn emit_border_element(name: &[u8], border: &Border, out: &mut Vec<u8>) {
+    let kind_str = match border.kind {
+        0 => "NONE",
+        1 => "SOLID",
+        2 => "DASH",
+        3 => "DOT",
+        4 => "DASH_DOT",
+        5 => "DASH_DOT_DOT",
+        6 => "LONG_DASH",
+        7 => "DOUBLE",
+        _ => "SOLID",
+    };
+    let width_mm = (border.width.max(1) as f32) / 10.0;
+    let r = (border.color & 0xFF) as u8;
+    let g = ((border.color >> 8) & 0xFF) as u8;
+    let b = ((border.color >> 16) & 0xFF) as u8;
+    let color_hex = format!("#{r:02X}{g:02X}{b:02X}");
+    out.extend_from_slice(b"<hh:");
+    out.extend_from_slice(name);
+    out.extend_from_slice(b" type=\"");
+    out.extend_from_slice(kind_str.as_bytes());
+    out.extend_from_slice(format!("\" width=\"{width_mm:.2} mm\" color=\"").as_bytes());
+    out.extend_from_slice(color_hex.as_bytes());
+    out.extend_from_slice(b"\"/>");
 }
 
 /// Trait-free helper: write `<hh:NAME hangul=… latin=… …/>` for the
