@@ -53,7 +53,8 @@ pub fn render_assets_block(doc: &IrDocument, opts: &MdOptions) -> String {
         .unknown_streams
         .iter()
         .any(|(_, b)| !b.is_empty());
-    if encoded.is_empty() && !has_section_bytes && !has_unknown_streams {
+    let has_doc_info = doc_info_has_content(&doc.doc_info);
+    if encoded.is_empty() && !has_section_bytes && !has_unknown_streams && !has_doc_info {
         return String::new();
     }
     let mut out = String::new();
@@ -122,7 +123,45 @@ pub fn render_assets_block(doc: &IrDocument, opts: &MdOptions) -> String {
         out.push_str(&STANDARD.encode(bytes));
         out.push_str("\n\n");
     }
+
+    // DocInfo (font_faces / border_fills / char_shapes / para_shapes /
+    // styles / properties) as a JSON blob. HWP5 sources don't ship a
+    // `Contents/header.xml` for the importer to reparse, so without
+    // this record the round-trip drops every charShape/paraShape and
+    // every paragraph collapses to default `paraPrIDRef="0"`. Emitted
+    // verbatim, opaque to LLM editors — body text/structural records
+    // are what the LLM mutates, doc_info is layout metadata that just
+    // needs to survive.
+    if has_doc_info {
+        if let Ok(json) = serde_json::to_vec(&doc.doc_info) {
+            out.push_str(&format!("DOC_INFO[len={len}]\n", len = json.len()));
+            out.push_str("DATA: data:application/json;base64,");
+            out.push_str(&STANDARD.encode(&json));
+            out.push_str("\n\n");
+        }
+    }
+
     out
+}
+
+/// `true` when any DocInfo field carries data the importer needs to
+/// preserve — typed shape tables, font face entries, border fills,
+/// styles, or non-zero document properties. An entirely-default
+/// `DocInfo` (e.g. plain MD-only flow with no HWP source) skips the
+/// emit so the footer stays compact.
+fn doc_info_has_content(info: &hwp_transpiler_core::ir::DocInfo) -> bool {
+    !info.char_shapes.is_empty()
+        || !info.para_shapes.is_empty()
+        || !info.styles.is_empty()
+        || !info.border_fills.is_empty()
+        || !info.font_faces.hangul.is_empty()
+        || !info.font_faces.latin.is_empty()
+        || !info.font_faces.hanja.is_empty()
+        || !info.font_faces.japanese.is_empty()
+        || !info.font_faces.other.is_empty()
+        || !info.font_faces.symbol.is_empty()
+        || !info.font_faces.user.is_empty()
+        || !info.bin_data.is_empty()
 }
 
 #[cfg(test)]

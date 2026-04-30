@@ -12,6 +12,7 @@ zip = { workspace = true }
 quick-xml = { workspace = true }
 pulldown-cmark = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 # Asset pipeline: decode arbitrary picture bytes, resize for MD
 # embedding, re-encode (lossless WebP) before base64-wrapping into

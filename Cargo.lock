@@ -227,6 +227,7 @@ dependencies = [
  "pulldown-cmark",
  "quick-xml",
  "serde",
+ "serde_json",
  "thiserror",
  "zip",
 ]

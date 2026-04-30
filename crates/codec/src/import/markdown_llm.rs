@@ -96,6 +96,13 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
     // ZIP entries (META-INF/, settings.xml, version.xml, Preview/)
     // round-trip verbatim.
     let mut pending_stream_name: Option<String> = None;
+    // `DOC_INFO[len=N]` followed by a JSON `DATA:` line restores the
+    // entire `doc.doc_info` (font_faces / border_fills / char_shapes /
+    // para_shapes / styles / properties). HWP5 sources don't carry a
+    // `Contents/header.xml` for the post-loop reparse to feed off, so
+    // without this record every paragraph collapses to default
+    // `paraPrIDRef="0"` after round-trip.
+    let mut pending_doc_info = false;
 
     for line in src.lines() {
         let trimmed = line.trim();
@@ -130,6 +137,7 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
                     .unwrap_or_default();
                 pending_asset = Some(PendingAsset { bin_id, source_id });
                 pending_section_idx = None;
+                pending_doc_info = false;
                 continue;
             }
             if trimmed.starts_with("SECTION_BYTES[") {
@@ -142,6 +150,7 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
                     .and_then(|s| s.parse::<usize>().ok());
                 pending_asset = None;
                 pending_stream_name = None;
+                pending_doc_info = false;
                 continue;
             }
             if trimmed.starts_with("UNKNOWN_STREAM[") {
@@ -149,6 +158,14 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
                 pending_stream_name = attrs.0.get("name").cloned();
                 pending_asset = None;
                 pending_section_idx = None;
+                pending_doc_info = false;
+                continue;
+            }
+            if trimmed.starts_with("DOC_INFO[") {
+                pending_doc_info = true;
+                pending_asset = None;
+                pending_section_idx = None;
+                pending_stream_name = None;
                 continue;
             }
             if let Some(uri) = trimmed.strip_prefix("DATA: ") {
@@ -165,6 +182,15 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
                 } else if let Some(name) = pending_stream_name.take() {
                     if let Some(bytes) = decode_octet_stream_data_uri(uri.trim()) {
                         doc.unknown_streams.insert(name, bytes);
+                    }
+                } else if std::mem::take(&mut pending_doc_info) {
+                    if let Some(bytes) = decode_octet_stream_data_uri(uri.trim()) {
+                        if let Ok(info) = serde_json::from_slice::<
+                            hwp_transpiler_core::ir::DocInfo,
+                        >(&bytes)
+                        {
+                            doc.doc_info = info;
+                        }
                     }
                 }
                 continue;
