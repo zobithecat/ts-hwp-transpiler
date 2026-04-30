@@ -232,7 +232,10 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
 
         if trimmed.starts_with("TABLE[") {
             flush_state(&mut state, &mut current);
-            state = State::InTable(LlmTableBuilder::default());
+            let attrs = parse_attrs(trimmed);
+            let mut builder = LlmTableBuilder::default();
+            builder.border_fill_id = attrs.get_int("border_fill").unwrap_or(0).max(0) as u16;
+            state = State::InTable(builder);
             continue;
         }
 
@@ -281,9 +284,12 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
             let col = attrs.get_int("col").unwrap_or(0) as u16;
             let row_span = attrs.get_int("rowspan").unwrap_or(1).max(1) as u16;
             let col_span = attrs.get_int("colspan").unwrap_or(1).max(1) as u16;
+            let border_fill_id = attrs.get_int("border_fill").unwrap_or(1).max(0) as u16;
             if let State::InTable(builder) = &mut state {
                 builder.flush_pending();
-                builder.pending = Some(PendingCell { row, col, row_span, col_span });
+                builder.pending = Some(PendingCell {
+                    row, col, row_span, col_span, border_fill_id,
+                });
             }
             continue;
         }
@@ -382,6 +388,9 @@ struct LlmTableBuilder {
     cols: u16,
     cells: Vec<TableCell>,
     pending: Option<PendingCell>,
+    /// Table-level `borderFillIDRef` from the `TABLE[border_fill=N]`
+    /// attribute. 0 = no table-level border (cells provide their own).
+    border_fill_id: u16,
 }
 
 struct PendingCell {
@@ -389,6 +398,11 @@ struct PendingCell {
     col: u16,
     row_span: u16,
     col_span: u16,
+    /// `border_fill` attribute from the CELL record. Falls back to 1
+    /// (skeleton's plain SOLID 0.12mm) when the attr is missing —
+    /// keeps GFM-imported tables visible while letting LLM-mode
+    /// round-trip preserve the source's per-cell border style.
+    border_fill_id: u16,
 }
 
 impl LlmTableBuilder {
@@ -411,11 +425,7 @@ impl LlmTableBuilder {
             row_span: p.row_span,
             col_span: p.col_span,
             para_count: 1,
-            // Bundled skeleton's borderFill id=1 carries solid 0.12 mm
-            // black borders on all four sides — references it so cell
-            // outlines are visible in HWPX viewers (id=0 is the
-            // no-border default).
-            border_fill_id: 1,
+            border_fill_id: p.border_fill_id,
             paragraphs: vec![para],
             ..TableCell::default()
         });
@@ -434,6 +444,7 @@ impl LlmTableBuilder {
             cols: self.cols,
             row_cell_counts,
             cells: self.cells,
+            border_fill_id: self.border_fill_id,
             ..TableControl::default()
         }
     }

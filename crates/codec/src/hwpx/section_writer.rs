@@ -375,6 +375,21 @@ fn emit_cell(cell: &TableCell, out: &mut String, bin_lookup: &BinLookup) {
         w = cell.width_hwpu,
         h = cell.height_hwpu,
     ));
+    // `<hp:cellMargin>` — Hancom-authored cells always carry this.
+    // Use IR padding when it's nonzero; otherwise fall back to
+    // Hancom's standard 510 (left/right) / 141 (top/bottom) HWPU.
+    let pad = cell.padding_hwpu;
+    let pad_l = if pad[0] > 0 { pad[0] as i32 } else { 510 };
+    let pad_r = if pad[1] > 0 { pad[1] as i32 } else { 510 };
+    let pad_t = if pad[2] > 0 { pad[2] as i32 } else { 141 };
+    let pad_b = if pad[3] > 0 { pad[3] as i32 } else { 141 };
+    out.push_str(&format!(
+        r#"<hp:cellMargin left="{l}" right="{r}" top="{t}" bottom="{b}"/>"#,
+        l = pad_l,
+        r = pad_r,
+        t = pad_t,
+        b = pad_b,
+    ));
 
     out.push_str("</hp:tc>");
 }

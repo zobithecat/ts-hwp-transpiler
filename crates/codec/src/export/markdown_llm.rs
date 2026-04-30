@@ -173,6 +173,9 @@ fn emit_table(
             tbl_header.push_str(&format!(",kind={}", domain.as_str()));
         }
     }
+    // `border_fill` carries the table-level BorderFill slot id so the
+    // importer can route it back into `<hp:tbl borderFillIDRef=N>`.
+    tbl_header.push_str(&format!(",border_fill={}", t.border_fill_id));
     tbl_header.push(']');
     line(out, &tbl_header);
 
@@ -334,6 +337,14 @@ fn emit_cell(
         let ed = infer_editable(cell, role);
         header.push_str(&format!(",editable={}", editable_name(ed)));
     }
+    // `border_fill` attaches the IR's per-cell `BorderFill` slot id
+    // so the importer can route the right border style back into
+    // `<hp:tc borderFillIDRef=N>`. HWP5-sourced docs use 30+ slots
+    // (one per visual style); without this every cell collapsed to
+    // the default slot 1 on round-trip — table borders disappeared
+    // because 1 was the skeleton's plain SOLID 0.12mm and the source
+    // had richer styles per cell.
+    header.push_str(&format!(",border_fill={}", cell.border_fill_id));
     header.push(']');
     line(out, &header);
 
@@ -495,13 +506,13 @@ mod tests {
         });
         doc.sections.push(Section { paragraphs: paras, ..Section::default() });
         let md = to_llm_markdown(&doc, &opts_llm());
-        assert!(md.contains("TABLE[id=tbl-s0-p3-c0,rows=1,cols=2]"), "got: {md}");
+        assert!(md.contains("TABLE[id=tbl-s0-p3-c0,rows=1,cols=2"), "got: {md}");
         assert!(
-            md.contains("CELL[id=cell-s0-p3-c0-r0c0,row=0,col=0,rowspan=1,colspan=1]"),
+            md.contains("CELL[id=cell-s0-p3-c0-r0c0,row=0,col=0,rowspan=1,colspan=1"),
             "got: {md}"
         );
         assert!(
-            md.contains("CELL[id=cell-s0-p3-c0-r0c1,row=0,col=1,rowspan=1,colspan=1]"),
+            md.contains("CELL[id=cell-s0-p3-c0-r0c1,row=0,col=1,rowspan=1,colspan=1"),
             "got: {md}"
         );
         assert!(md.contains("TEXT[par-s0-p3-c0-r0c0-p0]: A"), "got: {md}");
@@ -883,7 +894,7 @@ mod tests {
             },
         );
         assert!(
-            md_on.contains("TABLE[id=tbl-s0-p0-c0,rows=1,cols=4,kind=budget]"),
+            md_on.contains("TABLE[id=tbl-s0-p0-c0,rows=1,cols=4,kind=budget"),
             "got: {md_on}"
         );
     }
@@ -992,7 +1003,7 @@ mod tests {
         // First cell (yellow) → label. Second cell → header (first_row
         // non-first_col path); content has to wait for a row-2 example.
         assert!(
-            md.contains("CELL[id=cell-s0-p0-c0-r0c0,row=0,col=0,rowspan=1,colspan=1,role=label]"),
+            md.contains("CELL[id=cell-s0-p0-c0-r0c0,row=0,col=0,rowspan=1,colspan=1,role=label,"),
             "expected label on yellow cell; got: {md}"
         );
     }
