@@ -1,6 +1,6 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "installCommand": "bash scripts/vercel-install.sh",
-  "buildCommand": ". \"${CARGO_HOME:-$HOME/.cargo}/env\" && npm run build:wasm && npm run build",
+  "buildCommand": ". scripts/cargo-env.sh && npm run build:wasm && npm run build",
   "outputDirectory": "dist"
 }
