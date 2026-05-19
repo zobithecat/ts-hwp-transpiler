@@ -797,8 +797,19 @@ setStatus(`ready · ts-hwp-transpiler ${version()}`);
 await consumeFetchParam();
 
 async function consumeFetchParam(): Promise<void> {
-  const params = new URLSearchParams(window.location.search);
-  const fetchUrl = params.get("fetch");
+  // Pull the raw substring after `?fetch=` instead of going through
+  // URLSearchParams. An S3 presigned URL contains its own `&`-joined
+  // signing params; URLSearchParams would clip the value at the
+  // first `&`, leaving a useless URL that S3 rejects. Apple Shortcut
+  // appends the presigned URL verbatim (no percent-encoding), so we
+  // mirror that and read everything after `?fetch=` as the URL.
+  const search = window.location.search;
+  const idx = search.indexOf("?fetch=");
+  // `?` may have been swapped to `&` by another wrapper — accept both.
+  const altIdx = search.indexOf("&fetch=");
+  const start = idx !== -1 ? idx + "?fetch=".length : altIdx !== -1 ? altIdx + "&fetch=".length : -1;
+  if (start === -1) return;
+  const fetchUrl = search.substring(start);
   if (!fetchUrl) return;
 
   // Strip the param immediately so a page refresh doesn't re-trigger
