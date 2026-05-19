@@ -19,6 +19,25 @@
       </p>
     </header>
 
+    <!-- Mobile-only floating bar. Desktop CSS hides this; the
+         responsive media query in demo.css hides the desktop topbar
+         + output-stack + header and reveals this strip instead, so
+         the preview area takes the full viewport. -->
+    <div class="mobile-bar" aria-hidden="false">
+      <label class="mobile-bar-file" title=".hwp · .hwpx · .md 선택">
+        <input
+          type="file"
+          id="mobile-file"
+          accept=".hwp,.hwpx,.md,.markdown"
+          multiple
+        />
+        📂
+      </label>
+      <span class="mobile-bar-status" id="mobile-status">wasm 로드 중…</span>
+      <button type="button" id="mobile-html-download" disabled>HTML</button>
+      <button type="button" id="mobile-md-download" disabled>MD</button>
+    </div>
+
     <main>
       <!-- Top control row: file chip + status. Always visible so the
            user knows what's currently loaded regardless of which pane

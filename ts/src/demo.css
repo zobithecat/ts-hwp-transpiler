@@ -481,9 +481,146 @@ main {
   color: white;
 }
 
-/* ── Responsive: collapse to single column on narrow viewports ── */
+/* ── Mobile-only floating bar ────────────────────────────────── */
+/* Hidden by default; the @media block below reveals it and hides
+   header/topbar/output-stack so the preview pane fills the screen. */
 
-@media (max-width: 900px) {
+.mobile-bar {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  /* Header (project title + tagline) is dead weight on mobile — the
+     floating bar covers what the user needs (file picker, status,
+     two downloads). */
+  header {
+    display: none;
+  }
+
+  /* The desktop topbar and option-card stack both move out of the
+     viewport — file picker + downloads live in .mobile-bar instead. */
+  .topbar,
+  .output-stack {
+    display: none;
+  }
+
+  main {
+    padding: 0;
+    height: 100vh;
+    gap: 0;
+    grid-template-rows: 1fr;
+    /* Reserve room under the fixed mobile bar (48 px + safe area). */
+    padding-top: calc(env(safe-area-inset-top, 0px) + 48px);
+  }
+
+  .split {
+    grid-template-columns: 1fr;
+    height: 100%;
+    padding: 0;
+  }
+
+  .pane {
+    border-radius: 0;
+    border-left: 0;
+    border-right: 0;
+  }
+
+  /* Floating bar pinned to the top of the viewport. */
+  .mobile-bar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: calc(env(safe-area-inset-top, 0px) + 0.4rem) 0.6rem 0.4rem;
+    background: rgba(255, 255, 255, 0.92);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  }
+
+  .mobile-bar-file {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    background: var(--accent);
+    color: white;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 1.1rem;
+    flex-shrink: 0;
+  }
+
+  .mobile-bar-file input[type="file"] {
+    display: none;
+  }
+
+  .mobile-bar-status {
+    flex: 1;
+    min-width: 0;
+    font-size: 0.72rem;
+    color: var(--muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--font-mono);
+  }
+
+  .mobile-bar-status.error {
+    color: #d93025;
+  }
+
+  .mobile-bar button {
+    padding: 0.4rem 0.6rem;
+    font-size: 0.78rem;
+    font-weight: 600;
+    font-family: var(--font-mono);
+    border: 1px solid var(--border);
+    background: white;
+    color: var(--fg);
+    border-radius: 6px;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
+  .mobile-bar button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .mobile-bar button:not(:disabled):active {
+    background: var(--accent-soft);
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+
+  /* Tabs are still useful on mobile but compress them. */
+  .pane-header {
+    padding: 0.4rem 0.5rem;
+  }
+
+  .tabs .tab {
+    padding: 0.25rem 0.45rem;
+    font-size: 0.75rem;
+  }
+
+  .tabs .tab .tag {
+    display: none;
+  }
+
+  .preview-meta {
+    display: none;
+  }
+}
+
+/* ── Tablet / narrow desktop: keep both columns but stacked ─── */
+
+@media (min-width: 769px) and (max-width: 900px) {
   .split {
     grid-template-columns: 1fr;
   }

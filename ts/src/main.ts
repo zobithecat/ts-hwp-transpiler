@@ -159,6 +159,13 @@ let lastBufferLoadedInEditor = false;
 function setStatus(text: string, isError = false): void {
   statusEl.textContent = text;
   statusEl.classList.toggle("error", isError);
+  // Mirror to the mobile floating bar — visible only under the mobile
+  // media query but always present in the DOM.
+  const mobileStatus = document.getElementById("mobile-status");
+  if (mobileStatus) {
+    mobileStatus.textContent = text;
+    mobileStatus.classList.toggle("error", isError);
+  }
 }
 
 /// What kind of source the loaded IR came from. Drives the colored
@@ -788,6 +795,8 @@ setTab(activeTab);
 await init();
 setStatus(`ready · ts-hwp-transpiler ${version()}`);
 
+wireMobileBar();
+
 // Share-relay entry point. When the page is opened with `?fetch=<url>`
 // (typically by an Apple Shortcut that uploaded a HWP file to S3 via
 // our Lambda signing endpoint), pull the bytes down and dispatch
@@ -839,4 +848,48 @@ async function consumeFetchParam(): Promise<void> {
     setStatus(`공유 파일 로드 실패: ${err instanceof Error ? err.message : String(err)}`);
     console.warn(TAG, TAG_STYLE, "share-fetch failed:", err);
   }
+}
+
+// Mobile floating bar — wires the file picker to the existing
+// handleFiles dispatcher and proxies the two visible buttons (HTML,
+// MD) to the desktop buttons hidden inside the right-column cards.
+// The desktop buttons remain the source of truth for `disabled`
+// state; we mirror that onto the mobile twins via MutationObserver.
+function wireMobileBar(): void {
+  const fileInput = document.getElementById(
+    "mobile-file",
+  ) as HTMLInputElement | null;
+  const mHtml = document.getElementById(
+    "mobile-html-download",
+  ) as HTMLButtonElement | null;
+  const mMd = document.getElementById(
+    "mobile-md-download",
+  ) as HTMLButtonElement | null;
+  if (!fileInput || !mHtml || !mMd) return;
+
+  fileInput.addEventListener("change", () => {
+    const files = Array.from(fileInput.files ?? []);
+    if (files.length > 0) {
+      void handleFiles(files);
+    }
+    // Reset so picking the same file again re-fires `change`.
+    fileInput.value = "";
+  });
+
+  const mirror = (src: HTMLButtonElement, dst: HTMLButtonElement): void => {
+    const sync = () => {
+      dst.disabled = src.disabled;
+    };
+    sync();
+    new MutationObserver(sync).observe(src, {
+      attributes: true,
+      attributeFilter: ["disabled"],
+    });
+    dst.addEventListener("click", () => {
+      if (!src.disabled) src.click();
+    });
+  };
+
+  mirror(htmlBtn, mHtml);
+  mirror(mdDlBtn, mMd);
 }
