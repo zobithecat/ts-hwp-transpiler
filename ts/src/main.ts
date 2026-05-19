@@ -787,3 +787,45 @@ setTab(activeTab);
 // wasm pulled when the user only wants Markdown.
 await init();
 setStatus(`ready · ts-hwp-transpiler ${version()}`);
+
+// Share-relay entry point. When the page is opened with `?fetch=<url>`
+// (typically by an Apple Shortcut that uploaded a HWP file to S3 via
+// our Lambda signing endpoint), pull the bytes down and dispatch
+// through the same `handleFiles` path as a drag-and-drop. The bytes
+// never persist on our infra — the presigned URL is single-shot and
+// S3 lifecycle deletes the object within 1 hour.
+await consumeFetchParam();
+
+async function consumeFetchParam(): Promise<void> {
+  const params = new URLSearchParams(window.location.search);
+  const fetchUrl = params.get("fetch");
+  if (!fetchUrl) return;
+
+  // Strip the param immediately so a page refresh doesn't re-trigger
+  // (and so the signed URL doesn't linger in the address bar).
+  history.replaceState(null, "", window.location.pathname);
+
+  setStatus("공유받은 파일 가져오는 중…");
+  try {
+    const resp = await fetch(fetchUrl);
+    if (!resp.ok) {
+      throw new Error(`HTTP ${resp.status}`);
+    }
+    const buf = new Uint8Array(await resp.arrayBuffer());
+
+    // Recover filename from Content-Disposition (set by the signing
+    // Lambda via ResponseContentDisposition). Falls back to a sane
+    // default so the rest of the pipeline always has a name.
+    const disp = resp.headers.get("content-disposition") || "";
+    const m = disp.match(/filename="?([^"]+)"?/i);
+    const name = m ? m[1] : "shared.hwp";
+
+    const file = new File([buf], name, {
+      type: resp.headers.get("content-type") || "application/octet-stream",
+    });
+    void handleFiles([file]);
+  } catch (err) {
+    setStatus(`공유 파일 로드 실패: ${err instanceof Error ? err.message : String(err)}`);
+    console.warn(TAG, TAG_STYLE, "share-fetch failed:", err);
+  }
+}
