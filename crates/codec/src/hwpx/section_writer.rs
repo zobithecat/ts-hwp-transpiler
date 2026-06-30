@@ -133,6 +133,39 @@ fn entry_bin_id(entry: &BinaryEntry) -> Option<u16> {
     digits.parse::<u16>().ok()
 }
 
+/// Single Hancom 10pt-on-A4 lineseg, used only when a paragraph
+/// carries no captured layout (e.g. synthesised from Markdown that
+/// never had a `PARA_LINE_SEG`). Without at least one lineseg the
+/// viewer treats `line_height=0` and explodes the page count.
+const DEFAULT_LINESEG: &str = r#"<hp:lineseg textpos="0" vertpos="0" vertsize="1000" textheight="1000" baseline="850" spacing="600" horzpos="0" horzsize="42520" flags="393216"/>"#;
+
+/// Render `<hp:linesegarray>` from the paragraph's captured line
+/// segments (`PARA_LINE_SEG` ↔ `<hp:lineseg>` is a 1:1 field map).
+/// Emits every segment so multi-line paragraphs report their true
+/// height; falls back to `DEFAULT_LINESEG` when none were captured.
+fn render_linesegarray(para: &Paragraph, out: &mut String) {
+    out.push_str("<hp:linesegarray>");
+    if para.line_segments.is_empty() {
+        out.push_str(DEFAULT_LINESEG);
+    } else {
+        for s in &para.line_segments {
+            out.push_str(&format!(
+                r#"<hp:lineseg textpos="{tp}" vertpos="{vp}" vertsize="{vs}" textheight="{th}" baseline="{bl}" spacing="{sp}" horzpos="{hp}" horzsize="{hs}" flags="{fl}"/>"#,
+                tp = s.text_start,
+                vp = s.vertical_position_hwpu,
+                vs = s.line_height_hwpu,
+                th = s.text_height_hwpu,
+                bl = s.baseline_distance_hwpu,
+                sp = s.line_spacing_hwpu,
+                hp = s.start_x_hwpu,
+                hs = s.width_hwpu,
+                fl = s.tag,
+            ));
+        }
+    }
+    out.push_str("</hp:linesegarray>");
+}
+
 fn emit_paragraph(para: &Paragraph, out: &mut String, id: u32, bin_lookup: &BinLookup) {
     let para_pr = para.header.para_shape_id;
     let style = para.header.style_id;
@@ -153,15 +186,15 @@ fn emit_paragraph(para: &Paragraph, out: &mut String, id: u32, bin_lookup: &BinL
         emit_paragraph_as_split_runs(para, out, bin_lookup);
     }
 
-    // Bare-minimum `<hp:linesegarray>`. Without this, viewers see
-    // every paragraph as `line_height=0` and the doc explodes into
-    // a few-thousand-page layout (one line per page) on open.
-    // rhwp's auto-fix and Hancom's textRun reflow both expect AT
-    // LEAST one lineseg per paragraph; values mirror Hancom's 10pt-
-    // on-A4 defaults so the reflow has reasonable seed metrics.
-    out.push_str(
-        r#"<hp:linesegarray><hp:lineseg textpos="0" vertpos="0" vertsize="1000" textheight="1000" baseline="850" spacing="600" horzpos="0" horzsize="42520" flags="393216"/></hp:linesegarray>"#,
-    );
+    // `<hp:linesegarray>` — one `<hp:lineseg>` per visual line. When
+    // the paragraph carries its real line layout (preserved from the
+    // source `PARA_LINE_SEG` record), emit every segment so multi-line
+    // paragraphs advance the correct vertical distance. A paragraph
+    // that wrapped to N lines but emits a single seed lineseg makes
+    // cache-trusting viewers stack all N lines (and the next paragraph)
+    // at the same Y — the overlap bug. Falls back to a single Hancom
+    // 10pt-on-A4 default only when no layout was captured.
+    render_linesegarray(para, out);
 
     out.push_str("</hp:p>");
 }

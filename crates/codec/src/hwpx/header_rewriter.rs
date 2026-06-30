@@ -641,7 +641,60 @@ pub fn rewrite_header_xml(original: &[u8], doc: &IrDocument) -> Result<Vec<u8>, 
     }
 
     out.extend_from_slice(&original[cursor..]);
-    Ok(out)
+    Ok(inject_item_counts(out))
+}
+
+/// Hancom HWPX requires an `itemCnt` on each ref-list container
+/// (`<hh:borderFills>`, `<hh:charProperties>`, …) equal to its child
+/// count. A header assembled from the skeleton + IR-spliced shapes
+/// ships these containers *without* the attribute, and Hancom then
+/// rejects the whole collection — borders, char/para shapes and styles
+/// silently fall back to defaults (no table borders, uniform layout).
+///
+/// `itemCnt` is defined as the container's child count, so it must
+/// always equal the actual number of entries. We recompute it on the
+/// finished bytes: replacing an existing value in place (byte-for-byte
+/// identical when unchanged, so an unmutated real HWPX still round-
+/// trips equal) and inserting it when absent (skeleton-built headers).
+/// This catches the case where the rewriter splices in an extra shape
+/// but the source's `itemCnt` is left stale — Hancom then rejects the
+/// whole collection and borders / shapes fall back to defaults.
+fn inject_item_counts(header: Vec<u8>) -> Vec<u8> {
+    let mut s = match String::from_utf8(header) {
+        Ok(s) => s,
+        Err(e) => return e.into_bytes(),
+    };
+    // (container, child) — child needle has a trailing space so it
+    // matches `<hh:charPr ` (entry) but never `<hh:charProperties>`.
+    const CONTAINERS: &[(&str, &str)] = &[
+        ("fontfaces", "fontface"),
+        ("borderFills", "borderFill"),
+        ("charProperties", "charPr"),
+        ("paraProperties", "paraPr"),
+        ("styles", "style"),
+    ];
+    for (container, child) in CONTAINERS {
+        let open_prefix = format!("<hh:{container}");
+        let close = format!("</hh:{container}>");
+        let Some(open_start) = s.find(&open_prefix) else { continue };
+        let Some(gt_rel) = s[open_start..].find('>') else { continue };
+        let open_end = open_start + gt_rel; // points at '>'
+        let Some(close_rel) = s[open_end..].find(&close) else { continue };
+        let close_start = open_end + close_rel;
+        let needle = format!("<hh:{child} ");
+        let count = s[open_end..close_start].matches(&needle).count();
+        // Existing `itemCnt="N"` inside the open tag? Replace its value.
+        let open_tag = s[open_start..open_end].to_string();
+        if let Some(attr_rel) = open_tag.find("itemCnt=\"") {
+            let val_start = open_start + attr_rel + "itemCnt=\"".len();
+            let Some(val_len) = s[val_start..].find('"') else { continue };
+            s.replace_range(val_start..val_start + val_len, &count.to_string());
+        } else {
+            let insert_at = open_start + open_prefix.len();
+            s.insert_str(insert_at, &format!(" itemCnt=\"{count}\""));
+        }
+    }
+    s.into_bytes()
 }
 
 // ─── Per-element overlay helpers ────────────────────────────────────
@@ -1666,7 +1719,8 @@ mod tests {
         let s = std::str::from_utf8(&out).unwrap();
         assert!(!s.contains(r#"id="2""#), "paraPr id=2 dropped: {s}");
         assert!(!s.contains("horizontal=\"LEFT\""), "align child gone: {s}");
-        assert!(s.contains("<hh:paraProperties>"), "container kept: {s}");
+        // Container is kept, now stamped with its (zero) child count.
+        assert!(s.contains("<hh:paraProperties itemCnt=\"0\">"), "container kept w/ count: {s}");
         assert!(s.contains("</hh:paraProperties>"), "container kept: {s}");
     }
 

@@ -1,10 +1,22 @@
 # 현재 위치
 
-**지금** (2026-04-29): MD 라운드트립이 HWPX 원본 기준 **container byte-equal**.
-`cmp` 가 exit 0 — 13개 stream 한 byte도 다르지 않음. HWP5 → MD → HWPX
-cross-format 도 viewer 가 *열고* 9개 그림 다 표시. 단 HWP5 source 의 표/
-body layout 은 doc_info 손실로 인해 본 원본과 다름 (저널
-`2026-04-29-md-roundtrip-viewer-arc.md` 참고).
+**지금** (2026-06-30): **HWPX 소스 라운드트립이 한컴 렌더 충실**. 실 문서
+(`06.23 연구개발계획서`, 37쪽)에서 `hwpx → md → hwpx` 가 Hancom-authored
+정답 HWPX 대비 **15개 stream 중 14개 byte-equal**(`section0.xml` 본문 포함),
+한컴 오피스 렌더가 원본과 사실상 동일(사용자 확인). **권장 워크플로 확정**:
+`.hwp` 는 한컴에서 `.hwpx` 로 저장 후 `hwpx ↔ md` 로 편집/복원.
+
+이번 라운드 핵심 발견: **Hancom HWPX 는 header refList 컨테이너에 정확한
+`itemCnt` 를 요구** — 없거나 실제 자식 수와 다르면 한컴이 그 컬렉션 전체를
+거부하고 기본값 폴백(표 테두리·문자/문단 모양 전부 무시 → "완전 깨짐").
+`header_rewriter::inject_item_counts` 가 최종 바이트에서 항상 재계산해 해결.
+또 실제 lineseg(문단 겹침)·셀 width(열 비율)를 MD 가 운반하도록 확장. 상세는
+저널 `2026-06-30-hwpx-itemcnt-and-roundtrip-fidelity.md`.
+
+(이전 2026-04-29: MD 라운드트립이 HWPX 원본 기준 container byte-equal, `cmp`
+exit 0. HWP5 → MD → HWPX cross-format 도 viewer 가 열고 그림 표시. 단 HWP5
+source 의 표/body layout 은 doc_info 손실로 원본과 다름 — 저널
+`2026-04-29-md-roundtrip-viewer-arc.md`.)
 
 ## 이번 라운드 ship (4월 29일)
 
@@ -56,13 +68,13 @@ cross-format 결함 10개 발견. 단계별 ship:
 
 ## 알려진 갭
 
-- **HWP5 → MD → HWPX 의 표/body layout 결함** — 가장 큰 미해결 이슈.
-  MD 포맷이 doc_info detail (full charShape/paraShape/style 테이블)을
-  encode 하지 않아 round-trip 시 모든 paragraph 가 `paraPrIDRef="0"`
-  / `charPrIDRef="0"` 참조. heading/body/cell 이 동일 metric 으로
-  렌더 → 다양한 layout 손실. 가능한 fix 후보:
-  - MD 포맷 확장 (`STYLES` / `CHAR_SHAPES` / `PARA_SHAPES` 레코드)
-  - HWP5 → HWPX 직접 변환 (MD 우회)
+- **HWP5 → MD → HWPX 의 표/body layout** — 2026-06-30 대폭 개선. DOC_INFO
+  레코드(doc_info JSON), 실제 lineseg, 셀 width, header itemCnt 까지 모두
+  운반/재계산해 표 테두리·문단 겹침·열 비율 해결. **남은 갭**: HWP5 PAGE_DEF
+  (tag 0x0049) 미파싱 → 페이지 여백이 하드코딩 기본값(3000/1417, 원본은
+  5669/4251)이라 본문 폭/page-flow 가 원본과 다름. 키 큰 표가 다음 페이지로
+  밀리는 현상도 여기서 옴. → HWP5 직접 경로의 픽셀 충실도는 아직 HWPX 소스
+  경로에 못 미침. **권장은 HWPX 소스 경로**(원본 header verbatim 보존).
 - **lossy 옵션 없음** — JPEG/WebP-lossy 로 더 줄일 수 있으나 round-trip
   안전성 깨짐. 의도적 미지원.
 - **GFM split 모드 미구현** — GFM(human) 경로는 인라인 data URI 만 지원.

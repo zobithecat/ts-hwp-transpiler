@@ -30,8 +30,8 @@
 use std::collections::HashMap;
 
 use hwp_transpiler_core::ir::{
-    CharShapeRun, Control, ControlKind, IrDocument, IrError, Paragraph, ParagraphHeader,
-    PictureControl, Section, TableCell, TableControl,
+    CharShapeRun, Control, ControlKind, IrDocument, IrError, LineSegment, Paragraph,
+    ParagraphHeader, PictureControl, Section, TableCell, TableControl,
 };
 
 use crate::asset_pipeline::decode_data_uri_to_binary_entry;
@@ -238,10 +238,16 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
                 .get_int("char_shape")
                 .map(|n| n.clamp(0, u32::MAX as i64) as u32)
                 .unwrap_or(0);
+            let line_segments = attrs
+                .0
+                .get("lineseg")
+                .map(|v| crate::lineseg_codec::decode(v))
+                .unwrap_or_default();
             state = State::ExpectingParagraphText {
                 explicit_level: level,
                 para_shape_id: para_shape,
                 char_shape_id: char_shape,
+                line_segments,
             };
             continue;
         }
@@ -301,36 +307,56 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
             let row_span = attrs.get_int("rowspan").unwrap_or(1).max(1) as u16;
             let col_span = attrs.get_int("colspan").unwrap_or(1).max(1) as u16;
             let border_fill_id = attrs.get_int("border_fill").unwrap_or(1).max(0) as u16;
+            let width_hwpu = attrs.get_int("width").unwrap_or(0).max(0) as u32;
+            let height_hwpu = attrs.get_int("height").unwrap_or(0).max(0) as u32;
+            let text_width_hwpu = attrs.get_int("text_width").unwrap_or(0).max(0) as u32;
             if let State::InTable(builder) = &mut state {
                 builder.flush_pending();
                 builder.pending = Some(PendingCell {
                     row, col, row_span, col_span, border_fill_id,
+                    width_hwpu, height_hwpu, text_width_hwpu,
                 });
             }
             continue;
         }
 
-        if let Some((text, line_ps, line_cs)) = parse_text_line(trimmed) {
+        if let Some((text, line_ps, line_cs, line_segs)) = parse_text_line(trimmed) {
             match &mut state {
                 State::ExpectingParagraphText {
                     explicit_level,
                     para_shape_id,
                     char_shape_id,
+                    line_segments,
                 } => {
                     let (level, body) = resolve_heading(*explicit_level, text);
                     let ps = *para_shape_id;
                     let cs = *char_shape_id;
-                    current.paragraphs.push(make_paragraph(level, body, ps, cs));
+                    // Top-level paragraphs carry layout on the PARAGRAPH
+                    // record (the TEXT line is bare), so prefer the
+                    // state's segments and fall back to any on the line.
+                    let segs = if line_segments.is_empty() {
+                        line_segs
+                    } else {
+                        std::mem::take(line_segments)
+                    };
+                    current.paragraphs.push(make_paragraph(level, body, ps, cs, segs));
                     state = State::Idle;
                 }
                 State::InTable(builder) => {
-                    builder.set_pending_text_with_shapes(text.to_string(), line_ps, line_cs);
+                    builder.set_pending_text_with_shapes(
+                        text.to_string(),
+                        line_ps,
+                        line_cs,
+                        line_segs,
+                    );
                 }
                 State::Idle => {
                     // Bare TEXT without a preceding PARAGRAPH marker
                     // — treat as a body paragraph so prose isn't
                     // dropped on the floor.
-                    current.paragraphs.push(make_paragraph(0, text.to_string(), line_ps, line_cs));
+                    current
+                        .paragraphs
+                        .push(make_paragraph(0, text.to_string(), line_ps, line_cs, line_segs));
                 }
             }
             continue;
@@ -393,6 +419,10 @@ enum State {
         explicit_level: Option<u8>,
         para_shape_id: u32,
         char_shape_id: u32,
+        /// Line layout from the PARAGRAPH record's `lineseg=` attr,
+        /// applied to the paragraph so multi-line bodies keep their
+        /// per-line geometry instead of collapsing to a single seed.
+        line_segments: Vec<LineSegment>,
     },
     InTable(LlmTableBuilder),
 }
@@ -431,25 +461,42 @@ struct PendingCell {
     /// keeps GFM-imported tables visible while letting LLM-mode
     /// round-trip preserve the source's per-cell border style.
     border_fill_id: u16,
+    /// Real cell geometry (HWPUNIT) from the CELL record. `0` when the
+    /// attr is absent (older exports / GFM) → `apply_defaults` then
+    /// distributes the page width evenly as before.
+    width_hwpu: u32,
+    height_hwpu: u32,
+    text_width_hwpu: u32,
 }
 
 impl LlmTableBuilder {
-    fn set_pending_text(&mut self, text: String) {
-        self.set_pending_text_with_shapes(text, 0, 0);
-    }
-    fn set_pending_text_with_shapes(&mut self, text: String, ps: u32, cs: u32) {
+    fn set_pending_text_with_shapes(
+        &mut self,
+        text: String,
+        ps: u32,
+        cs: u32,
+        segs: Vec<LineSegment>,
+    ) {
         if let Some(p) = self.pending.take() {
-            self.push_cell(p, text, ps, cs);
+            self.push_cell(p, text, ps, cs, segs);
         }
     }
     fn flush_pending(&mut self) {
         if let Some(p) = self.pending.take() {
-            self.push_cell(p, String::new(), 0, 0);
+            self.push_cell(p, String::new(), 0, 0, Vec::new());
         }
     }
-    fn push_cell(&mut self, p: PendingCell, text: String, ps: u32, cs: u32) {
+    fn push_cell(
+        &mut self,
+        p: PendingCell,
+        text: String,
+        ps: u32,
+        cs: u32,
+        segs: Vec<LineSegment>,
+    ) {
         let mut para = Paragraph::default();
         para.text = text;
+        para.line_segments = segs;
         para.header.para_shape_id = ps as u16;
         if cs != 0 {
             para.char_shape_runs.push(CharShapeRun {
@@ -464,6 +511,9 @@ impl LlmTableBuilder {
             col_span: p.col_span,
             para_count: 1,
             border_fill_id: p.border_fill_id,
+            width_hwpu: p.width_hwpu,
+            height_hwpu: p.height_hwpu,
+            text_width_hwpu: p.text_width_hwpu,
             paragraphs: vec![para],
             ..TableCell::default()
         });
@@ -539,9 +589,16 @@ impl AttrMap {
 /// `style_id` / `para_shape_id` / `char_shape_id` so HWPX viewers
 /// render with the heading style/font from the synthesised
 /// DocInfo table.
-fn make_paragraph(level: u8, text: String, para_shape: u32, char_shape: u32) -> Paragraph {
+fn make_paragraph(
+    level: u8,
+    text: String,
+    para_shape: u32,
+    char_shape: u32,
+    line_segments: Vec<LineSegment>,
+) -> Paragraph {
     let mut p = Paragraph::default();
     p.text = text;
+    p.line_segments = line_segments;
     // PARAGRAPH record's `para_shape` overrides the heading-level
     // fallback when present. Heading paragraphs from `# `-prefix MD
     // (no doc_info) keep using `level` as the slot id since
@@ -621,13 +678,14 @@ fn strip_text_prefix(line: &str) -> Option<&str> {
     Some(&rest[close + 3..])
 }
 
-/// Parse a `TEXT[par-PATH,para_shape=N,char_shape=N]: text` line into
-/// `(text, para_shape, char_shape)`. `para_shape` / `char_shape` are
-/// `0` when the attrs are missing (older exports). Returns `None`
-/// for non-TEXT lines.
-fn parse_text_line(line: &str) -> Option<(&str, u32, u32)> {
+/// Parse a `TEXT[par-PATH,para_shape=N,char_shape=N,lineseg=…]: text`
+/// line into `(text, para_shape, char_shape, line_segments)`.
+/// `para_shape` / `char_shape` are `0` and `line_segments` empty when
+/// the attrs are missing (older exports). Returns `None` for non-TEXT
+/// lines.
+fn parse_text_line(line: &str) -> Option<(&str, u32, u32, Vec<LineSegment>)> {
     if let Some(rest) = line.strip_prefix("TEXT: ") {
-        return Some((rest, 0, 0));
+        return Some((rest, 0, 0, Vec::new()));
     }
     let rest = line.strip_prefix("TEXT[")?;
     let close = rest.find("]: ")?;
@@ -635,15 +693,18 @@ fn parse_text_line(line: &str) -> Option<(&str, u32, u32)> {
     let body = &rest[close + 3..];
     let mut ps = 0u32;
     let mut cs = 0u32;
+    let mut segs = Vec::new();
     for kv in attrs_text.split(',') {
         let kv = kv.trim();
         if let Some(v) = kv.strip_prefix("para_shape=") {
             ps = v.parse().unwrap_or(0);
         } else if let Some(v) = kv.strip_prefix("char_shape=") {
             cs = v.parse().unwrap_or(0);
+        } else if let Some(v) = kv.strip_prefix("lineseg=") {
+            segs = crate::lineseg_codec::decode(v);
         }
     }
-    Some((body, ps, cs))
+    Some((body, ps, cs, segs))
 }
 
 #[cfg(test)]

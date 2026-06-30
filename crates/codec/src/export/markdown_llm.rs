@@ -143,6 +143,18 @@ fn emit_paragraph(
             .map(|r| r.char_shape_id)
             .unwrap_or(0);
         header.push_str(&format!(",char_shape={}", first_run_shape));
+        // Carry the real line layout so the HWPX writer emits the
+        // exact `<hp:lineseg>` geometry instead of a single seed.
+        // Needed even for single-line paragraphs: the seed's 1000-unit
+        // line height rarely matches the source (e.g. 1100/1320), and
+        // every under-advance accumulates into paragraph overlap down
+        // the page. Carried whenever the source captured any layout.
+        if !para.line_segments.is_empty() {
+            header.push_str(&format!(
+                ",lineseg={}",
+                super::super::lineseg_codec::encode(&para.line_segments)
+            ));
+        }
         header.push(']');
         line(out, &header);
         line(out, &format!("TEXT: {text}"));
@@ -359,6 +371,22 @@ fn emit_cell(
     // because 1 was the skeleton's plain SOLID 0.12mm and the source
     // had richer styles per cell.
     header.push_str(&format!(",border_fill={}", cell.border_fill_id));
+    // Carry the cell's real geometry (HWPUNIT). Without it the
+    // importer falls back to evenly-distributing the page width across
+    // columns, so a narrow label column (e.g. 9648) balloons to half
+    // the table and its DISTRIBUTE-aligned text smears edge to edge.
+    // Width (and text_width) only — they fix the column proportions
+    // (narrow label vs wide value). Height is deliberately NOT carried:
+    // Hancom auto-grows each row to fit its content, and forcing the
+    // source's laid-out height makes the table overflow and spill onto
+    // the next page (the row heights double-count against reflowed
+    // content). Let the viewer size rows itself.
+    if cell.width_hwpu > 0 {
+        header.push_str(&format!(",width={}", cell.width_hwpu));
+    }
+    if cell.text_width_hwpu > 0 {
+        header.push_str(&format!(",text_width={}", cell.text_width_hwpu));
+    }
     header.push(']');
     line(out, &header);
 
@@ -378,8 +406,16 @@ fn emit_cell(
                 .first()
                 .map(|r| r.char_shape_id)
                 .unwrap_or(0);
+            let lineseg_attr = if !p.line_segments.is_empty() {
+                format!(
+                    ",lineseg={}",
+                    super::super::lineseg_codec::encode(&p.line_segments)
+                )
+            } else {
+                String::new()
+            };
             line(out, &format!(
-                "TEXT[par-{inner_par_path},para_shape={ps},char_shape={cs}]: {text}",
+                "TEXT[par-{inner_par_path},para_shape={ps},char_shape={cs}{lineseg_attr}]: {text}",
                 ps = p.header.para_shape_id,
             ));
         }
