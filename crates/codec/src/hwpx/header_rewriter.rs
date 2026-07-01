@@ -557,11 +557,25 @@ pub fn rewrite_header_xml(original: &[u8], doc: &IrDocument) -> Result<Vec<u8>, 
                     "borderFills" => {
                         if let Some(c) = border_fills_container.as_ref() {
                             let mut insertion = Vec::new();
+                            // Only append IR entries that lie BEYOND the
+                            // count the original container already had.
+                            // This loop treats the Vec index as the HWPX
+                            // id, which holds only when ids are 0-based
+                            // contiguous (HWP5 skeleton path). An HWPX
+                            // source whose borderFills start at id=1
+                            // (Hancom omits the implicit id=0) would
+                            // otherwise make idx=0 look "missing" and get
+                            // a spurious id=0 appended — shifting every
+                            // fill by one in positional viewers (한글2018)
+                            // so cell fills/shades render black. Guarding
+                            // on the original count means HWPX-source
+                            // headers (count == IR len) append nothing.
+                            let original_count = c.len();
                             for (idx, fill) in
                                 doc.doc_info.border_fills.iter().enumerate()
                             {
                                 let id = idx as u32;
-                                if !c.contains(&id) {
+                                if idx >= original_count && !c.contains(&id) {
                                     emit_new_border_fill(id, fill, &mut insertion);
                                 }
                             }
@@ -641,7 +655,7 @@ pub fn rewrite_header_xml(original: &[u8], doc: &IrDocument) -> Result<Vec<u8>, 
     }
 
     out.extend_from_slice(&original[cursor..]);
-    Ok(inject_item_counts(out))
+    Ok(strip_transparent_fillbrush(inject_item_counts(out)))
 }
 
 /// Hancom HWPX requires an `itemCnt` on each ref-list container
@@ -659,6 +673,39 @@ pub fn rewrite_header_xml(original: &[u8], doc: &IrDocument) -> Result<Vec<u8>, 
 /// This catches the case where the rewriter splices in an extra shape
 /// but the source's `itemCnt` is left stale — Hancom then rejects the
 /// whole collection and borders / shapes fall back to defaults.
+/// Drop `<hc:fillBrush>` blocks whose `<hc:winBrush>` has
+/// `faceColor="none"` (a "no background" cell). Hancom 2014 renders
+/// that transparent, but 한글2018 misreads `faceColor="none"` as
+/// `#000000` and fills the cell solid black — and there are usually a
+/// handful of such borderFills referenced by thousands of cells, so
+/// the whole document goes black. Removing the brush entirely leaves
+/// the borderFill with no fill (genuinely transparent), which both
+/// versions render as no background. Border lines are untouched.
+fn strip_transparent_fillbrush(header: Vec<u8>) -> Vec<u8> {
+    let s = match String::from_utf8(header) {
+        Ok(s) => s,
+        Err(e) => return e.into_bytes(),
+    };
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s.as_str();
+    const OPEN: &str = "<hc:fillBrush>";
+    const CLOSE: &str = "</hc:fillBrush>";
+    while let Some(i) = rest.find(OPEN) {
+        let after = &rest[i + OPEN.len()..];
+        let Some(j) = after.find(CLOSE) else { break };
+        let inner = &after[..j];
+        // Only strip the "no fill" brush; keep real colour/gradation fills.
+        if inner.contains("<hc:winBrush") && inner.contains("faceColor=\"none\"") {
+            out.push_str(&rest[..i]); // drop [OPEN..CLOSE] entirely
+        } else {
+            out.push_str(&rest[..i + OPEN.len() + j + CLOSE.len()]);
+        }
+        rest = &after[j + CLOSE.len()..];
+    }
+    out.push_str(rest);
+    out.into_bytes()
+}
+
 fn inject_item_counts(header: Vec<u8>) -> Vec<u8> {
     let mut s = match String::from_utf8(header) {
         Ok(s) => s,

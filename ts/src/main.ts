@@ -118,7 +118,13 @@ function assetModeInt(): number {
 }
 
 function assetDpiInt(): number {
-  return parseInt(assetDpiEl.value, 10) || 72;
+  // `0` is the "원본(무손실)" choice → wasm treats it as verbatim
+  // (no re-encode), keeping the source's original image bytes/format
+  // (e.g. BMP) so older viewers like 한글2018 render them. A plain
+  // `|| 72` would wrongly coerce that 0 back to 72, so handle NaN
+  // explicitly instead.
+  const v = parseInt(assetDpiEl.value, 10);
+  return Number.isNaN(v) ? 0 : v;
 }
 
 // Handle into the wasm-side document registry. We flip options
