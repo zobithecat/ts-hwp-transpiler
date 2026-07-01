@@ -90,20 +90,25 @@ pub fn render_assets_block(doc: &IrDocument, opts: &MdOptions) -> String {
     // invalidated `stream_bytes` upstream). Critical for viewers
     // that depend on `<hp:linesegarray>` / `<hp:secPr>` /
     // paragraph layout metadata the typed parser doesn't decode.
-    for (idx, section) in doc.sections.iter().enumerate() {
-        let Some(bytes) = section.stream_bytes.as_ref() else {
-            continue;
-        };
-        if bytes.is_empty() {
-            continue;
+    // Editable mode omits these so the writer rebuilds each section
+    // from the (edited) paragraph records instead of replaying the
+    // frozen original bytes verbatim.
+    if !opts.skip_section_bytes {
+        for (idx, section) in doc.sections.iter().enumerate() {
+            let Some(bytes) = section.stream_bytes.as_ref() else {
+                continue;
+            };
+            if bytes.is_empty() {
+                continue;
+            }
+            out.push_str(&format!(
+                "SECTION_BYTES[id=section-{idx},len={len}]\n",
+                len = bytes.len(),
+            ));
+            out.push_str("DATA: data:application/octet-stream;base64,");
+            out.push_str(&STANDARD.encode(bytes));
+            out.push_str("\n\n");
         }
-        out.push_str(&format!(
-            "SECTION_BYTES[id=section-{idx},len={len}]\n",
-            len = bytes.len(),
-        ));
-        out.push_str("DATA: data:application/octet-stream;base64,");
-        out.push_str(&STANDARD.encode(bytes));
-        out.push_str("\n\n");
     }
     // Verbatim non-section / non-BinData / non-mimetype streams —
     // META-INF/container.rdf, META-INF/manifest.xml, Preview/*,

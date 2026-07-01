@@ -73,6 +73,20 @@ pub struct MdOptions {
     /// canonical screen DPI; 36 halves the pixel dims for LLM-
     /// context budgets. Ignored when `asset_mode = None`.
     pub asset_dpi: Option<u32>,
+    /// Skip the `SECTION_BYTES` verbatim-section footer records.
+    ///
+    /// Default `false` (archival mode): the original section XML is
+    /// frozen and replayed byte-for-byte on round-trip — perfect
+    /// fidelity, but **edits to the body Markdown are ignored** because
+    /// the writer prefers the frozen bytes over the rebuilt paragraphs.
+    ///
+    /// Set `true` (editable mode) to omit them, so `md → hwpx` rebuilds
+    /// each section from the (possibly edited) paragraph records via the
+    /// typed emitter. Required for any workflow that actually changes
+    /// text/shape in the Markdown (LLM editing, `--edit-color`). Not
+    /// byte-equal, but layout is reconstructed from the carried
+    /// doc_info / lineseg / cell-width metadata.
+    pub skip_section_bytes: bool,
 }
 
 /// Where embedded picture bytes go in MD output.
@@ -113,6 +127,13 @@ pub struct LlmOptions {
     /// personnel). Off by default; enabling costs a per-table scan of
     /// its cell text against a fixed keyword vocabulary.
     pub domain_hints: bool,
+    /// When set, `to_llm_markdown` emits an `edit-color` marker
+    /// (`<!-- hwp-transpiler: edit-color char_shape=N color=#RRGGBB -->`).
+    /// `.0` is the CharShape id an editing agent should point
+    /// `char_shape=` at to mark added/modified paragraphs; `.1` is the
+    /// colour hex. Populate via `markdown_llm::inject_edit_color`, which
+    /// also adds the matching CharShape to the document.
+    pub edit_color: Option<(u32, String)>,
 }
 
 pub fn to_markdown(doc: &IrDocument) -> String {

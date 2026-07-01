@@ -27,6 +27,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use hwp_transpiler_codec::export::markdown::{self, LlmOptions, MdOptions};
+use hwp_transpiler_codec::export::markdown_llm;
 use hwp_transpiler_codec::hwp::HwpReader;
 use hwp_transpiler_codec::hwpx::skeleton::bundle_default_skeleton;
 use hwp_transpiler_codec::hwpx::HwpxReader;
@@ -144,6 +145,8 @@ pub fn export_markdown(
     emit_styles: bool,
     asset_mode: u32,
     asset_dpi: u32,
+    editable: bool,
+    edit_color: String,
 ) -> Result<String, JsValue> {
     let opts = build_md_opts(
         llm,
@@ -153,8 +156,13 @@ pub fn export_markdown(
         emit_styles,
         asset_mode,
         asset_dpi,
+        editable || !edit_color.is_empty(),
     );
-    with_doc(handle, |doc| markdown::to_markdown_with(doc, &opts))
+    with_doc(handle, |doc| {
+        with_edit_color(doc, &opts, llm, &edit_color, |d, o| {
+            markdown::to_markdown_with(d, o)
+        })
+    })
 }
 
 /// Companion text for `AssetMode::Split`. Returns an empty string
@@ -169,6 +177,8 @@ pub fn export_markdown_assets(
     emit_domain_hints: bool,
     emit_styles: bool,
     asset_dpi: u32,
+    editable: bool,
+    edit_color: String,
 ) -> Result<String, JsValue> {
     let opts = build_md_opts(
         llm,
@@ -178,14 +188,39 @@ pub fn export_markdown_assets(
         emit_styles,
         2, // Split
         asset_dpi,
+        editable || !edit_color.is_empty(),
     );
     with_doc(handle, |doc| {
-        markdown::to_markdown_export(doc, &opts)
-            .assets
-            .unwrap_or_default()
+        with_edit_color(doc, &opts, llm, &edit_color, |d, o| {
+            markdown::to_markdown_export(d, o).assets.unwrap_or_default()
+        })
     })
 }
 
+/// Run `f` with the edit-colour CharShape injected when `edit_color` is
+/// a non-empty `#RRGGBB` and `llm` is on. Injection happens on a clone
+/// so the registry's document stays pristine across repeated exports.
+fn with_edit_color(
+    doc: &IrDocument,
+    opts: &MdOptions,
+    llm: bool,
+    edit_color: &str,
+    f: impl FnOnce(&IrDocument, &MdOptions) -> String,
+) -> String {
+    if llm && !edit_color.is_empty() {
+        let mut d = doc.clone();
+        let id = markdown_llm::inject_edit_color(&mut d, edit_color);
+        let mut o = opts.clone();
+        if let Some(l) = o.llm.as_mut() {
+            l.edit_color = Some((id, edit_color.to_string()));
+        }
+        f(&d, &o)
+    } else {
+        f(doc, opts)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn build_md_opts(
     llm: bool,
     emit_roles: bool,
@@ -194,6 +229,7 @@ fn build_md_opts(
     emit_styles: bool,
     asset_mode: u32,
     asset_dpi: u32,
+    skip_section_bytes: bool,
 ) -> MdOptions {
     let mode = match asset_mode {
         1 => markdown::AssetMode::Inline,
@@ -206,6 +242,7 @@ fn build_md_opts(
             emit_roles,
             emit_editable,
             domain_hints: emit_domain_hints,
+            edit_color: None,
         }),
         domain_hints: emit_domain_hints && !llm,
         emit_roles: emit_roles && !llm,
@@ -213,6 +250,7 @@ fn build_md_opts(
         emit_styles: emit_styles && !llm,
         asset_mode: mode,
         asset_dpi: if asset_dpi == 0 { None } else { Some(asset_dpi) },
+        skip_section_bytes,
     }
 }
 

@@ -104,6 +104,22 @@ const domainHintsEl = $<HTMLInputElement>("domain-hints");
 const emitStylesEl = $<HTMLInputElement>("emit-styles");
 const assetModeEl = $<HTMLSelectElement>("asset-mode");
 const assetDpiEl = $<HTMLSelectElement>("asset-dpi");
+const editModeEl = $<HTMLInputElement>("edit-mode");
+const editColorOnEl = $<HTMLInputElement>("edit-color-on");
+const editColorEl = $<HTMLInputElement>("edit-color");
+
+/// Editable export: drop the frozen SECTION_BYTES so `md → hwpx`
+/// rebuilds each section from the (edited) paragraph records. Required
+/// for Markdown edits to actually take effect on round-trip.
+function editModeChecked(): boolean {
+  return editModeEl.checked;
+}
+
+/// `#RRGGBB` edit-tracking colour, or "" when disabled. A non-empty
+/// value also forces editable mode on the wasm side.
+function editColorValue(): string {
+  return editColorOnEl.checked ? editColorEl.value.toUpperCase() : "";
+}
 
 /// 0 = None, 1 = Inline, 2 = Split — matches the wasm-side enum.
 function assetModeInt(): number {
@@ -278,6 +294,8 @@ function renderMarkdown(handle: number): { bytes: number; ms: number } {
     emitStylesEl.checked,
     assetModeInt(),
     assetDpiInt(),
+    editModeChecked(),
+    editColorValue(),
   );
   markdownEl.textContent = md;
   copyBtn.disabled = md.length === 0;
@@ -610,6 +628,9 @@ for (const el of [
   emitStylesEl,
   assetModeEl,
   assetDpiEl,
+  editModeEl,
+  editColorOnEl,
+  editColorEl,
 ]) {
   el.addEventListener("change", () => {
     if (!ourIr) return;
@@ -657,6 +678,8 @@ mdDlBtn.addEventListener("click", () => {
         domainHintsEl.checked,
         emitStylesEl.checked,
         assetDpiInt(),
+        editModeChecked(),
+        editColorValue(),
       );
       if (assets.length > 0) {
         downloadBlob(

@@ -50,7 +50,8 @@
 //!   globally unique.
 
 use hwp_transpiler_core::ir::{
-    ControlKind, EquationControl, IrDocument, Paragraph, PictureControl, TableCell, TableControl,
+    CharShape, ControlKind, EquationControl, IrDocument, Paragraph, PictureControl, TableCell,
+    TableControl,
 };
 use hwp_transpiler_core::semantics::{
     CellRole, DocInfoResolver, TableDomain, VisualExtract, classify_roles,
@@ -75,6 +76,13 @@ pub fn to_llm_markdown(doc: &IrDocument, opts: &MdOptions) -> String {
     let mut out = String::new();
     out.push_str(super::markdown::FORMAT_HEADER_LLM);
     out.push('\n');
+    if let Some((id, hex)) = &llm.edit_color {
+        // Editing agents read this to know which CharShape id renders
+        // the "edited" colour; see docs/llm-edit-prompt.md.
+        out.push_str(&format!(
+            "<!-- hwp-transpiler: edit-color char_shape={id} color={hex} -->\n"
+        ));
+    }
     out.push('\n');
     for (si, section) in doc.sections.iter().enumerate() {
         line(&mut out, &format!("SECTION[id=sec-{si}]"));
@@ -100,6 +108,96 @@ pub fn to_llm_markdown(doc: &IrDocument, opts: &MdOptions) -> String {
         }
     }
     out
+}
+
+/// Add a dedicated "edit colour" `CharShape` to `doc` and return its
+/// id (index into `doc_info.char_shapes`). An editing agent points
+/// `char_shape=<id>` at added/modified paragraphs so they render in
+/// `hex` (`#RRGGBB`) after the round-trip. Set the returned id + hex on
+/// `LlmOptions::edit_color` so the exporter emits the marker.
+///
+/// The new shape clones `char_shapes[0]` (sane font metrics) and only
+/// overrides the text colour. For HWPX sources the same `<hh:charPr>` is
+/// also spliced into the verbatim `Contents/header.xml` (itemCnt bumped)
+/// so it survives the importer's header reparse; HWP5 sources carry it
+/// through the `DOC_INFO` blob instead.
+pub fn inject_edit_color(doc: &mut IrDocument, hex: &str) -> u32 {
+    let id = doc.doc_info.char_shapes.len() as u32;
+    let mut shape = doc.doc_info.char_shapes.first().cloned().unwrap_or_default();
+    shape.color = parse_hex_color(hex);
+    doc.doc_info.char_shapes.push(shape);
+
+    if let Some(bytes) = doc.unknown_streams.get_mut("Contents/header.xml") {
+        if let Ok(xml) = std::str::from_utf8(bytes) {
+            if let Some(rewritten) = splice_edit_color_charpr(xml, id, hex) {
+                *bytes = rewritten.into_bytes();
+            }
+        }
+    }
+    id
+}
+
+/// `#RRGGBB` → the `CharShape::color` packing (`color_to_hex` reads it
+/// as `R | G<<8 | B<<16`). Falls back to red on a malformed value.
+fn parse_hex_color(hex: &str) -> u32 {
+    let h = hex.trim_start_matches('#');
+    if h.len() == 6 {
+        if let Ok(v) = u32::from_str_radix(h, 16) {
+            let (r, g, b) = ((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF);
+            return r | (g << 8) | (b << 16);
+        }
+    }
+    0x0000_00FF // red
+}
+
+/// Clone the first `<hh:charPr …>…</hh:charPr>` (or self-closing form)
+/// in the header, retag it as `id`, recolour its `textColor`, splice it
+/// before `</hh:charProperties>`, and bump that container's `itemCnt`.
+/// Returns `None` (leaving the header untouched) if the structure isn't
+/// found — the DOC_INFO path then still carries the shape.
+fn splice_edit_color_charpr(xml: &str, id: u32, hex: &str) -> Option<String> {
+    let cp_start = xml.find("<hh:charPr")?;
+    let after = &xml[cp_start..];
+    // Element extent: self-closing `.../>` vs `</hh:charPr>`.
+    let gt = after.find('>')?;
+    let cp_end = if after.as_bytes().get(gt.wrapping_sub(1)) == Some(&b'/') {
+        cp_start + gt + 1
+    } else {
+        cp_start + after.find("</hh:charPr>")? + "</hh:charPr>".len()
+    };
+    let mut cloned = xml[cp_start..cp_end].to_string();
+    cloned = replace_attr(&cloned, "id", &id.to_string());
+    cloned = replace_attr(&cloned, "textColor", hex);
+
+    let close = xml.find("</hh:charProperties>")?;
+    let mut out = String::with_capacity(xml.len() + cloned.len() + 16);
+    out.push_str(&xml[..close]);
+    out.push_str(&cloned);
+    out.push_str(&xml[close..]);
+    Some(bump_item_count(&out, "charProperties"))
+}
+
+/// Replace the first `name="…"` value in a single tag string. Assumes
+/// the attribute is present (true for `id`/`textColor` on charPr).
+fn replace_attr(tag: &str, name: &str, value: &str) -> String {
+    let needle = format!("{name}=\"");
+    let Some(i) = tag.find(&needle) else { return tag.to_string() };
+    let vstart = i + needle.len();
+    let Some(rel) = tag[vstart..].find('"') else { return tag.to_string() };
+    format!("{}{}{}", &tag[..vstart], value, &tag[vstart + rel..])
+}
+
+/// Increment `<hh:{container} itemCnt="N">` by one (no-op if absent).
+fn bump_item_count(xml: &str, container: &str) -> String {
+    let open = format!("<hh:{container}");
+    let Some(cs) = xml.find(&open) else { return xml.to_string() };
+    let Some(gt) = xml[cs..].find('>') else { return xml.to_string() };
+    let tag = &xml[cs..cs + gt];
+    let Some(ci) = tag.find("itemCnt=\"") else { return xml.to_string() };
+    let vstart = cs + ci + "itemCnt=\"".len();
+    let Some(rel) = xml[vstart..].find('"') else { return xml.to_string() };
+    let n: u32 = xml[vstart..vstart + rel].parse().unwrap_or(0);
+    format!("{}{}{}", &xml[..vstart], n + 1, &xml[vstart + rel..])
 }
 
 /// `path` is the positional segment for this paragraph (e.g. `"s0-p5"`

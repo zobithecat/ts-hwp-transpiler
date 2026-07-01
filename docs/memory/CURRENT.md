@@ -1,6 +1,18 @@
 # 현재 위치
 
-**지금** (2026-06-30): **HWPX 소스 라운드트립이 한컴 렌더 충실**. 실 문서
+**지금** (2026-07-01): **편집 워크플로 성립 — 두 모드 구분 확립.**
+기본(아카이브) export 는 `SECTION_BYTES` 로 원본 섹션을 동결해 byte-equal
+왕복을 만드는데, 이 때문에 **body md 편집이 무시됨**(writer 가 동결
+바이트를 재생). 편집이 반영되려면 `--editable`(또는 `--edit-color`, 웹앱
+토글)로 `SECTION_BYTES` 를 빼고 섹션을 문단 레코드에서 **재조립**해야 함
+(→ 이 세션의 typed-emit 수정들: itemCnt·lineseg·cell-width·id=0 이 여기서
+작동). 재조립 모드의 픽셀 충실도는 뷰어 검증 필요(freeze 모드의 byte-equal
+렌더와 별개). 또 `--edit-color=#RRGGBB` 구현: doc_info 에 색 CharShape 추가
++ HWPX면 verbatim header.xml 에 charPr splice + 본문에 `edit-color` 마커
+emit → 편집 에이전트가 `char_shape=` 를 그 id 로 바꿔 수정 문단을 색 표시.
+`markdown_llm::inject_edit_color`. CLI end-to-end 검증(편집·색 반영 확인).
+
+(2026-06-30): **HWPX 소스 라운드트립이 한컴 렌더 충실**. 실 문서
 (`06.23 연구개발계획서`, 37쪽)에서 `hwpx → md → hwpx` 가 Hancom-authored
 정답 HWPX 대비 **15개 stream 중 14개 byte-equal**(`section0.xml` 본문 포함),
 한컴 오피스 렌더가 원본과 사실상 동일(사용자 확인). **권장 워크플로 확정**:

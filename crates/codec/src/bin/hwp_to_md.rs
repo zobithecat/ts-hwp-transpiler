@@ -18,7 +18,7 @@
 //!           pass `--assets-dir=<path>` to override.
 //!   - omitted → `<input-stem>.md` next to the input.
 
-use hwp_transpiler_codec::export::{assets, markdown};
+use hwp_transpiler_codec::export::{assets, markdown, markdown_llm};
 use hwp_transpiler_codec::hwp::HwpReader;
 use hwp_transpiler_codec::hwpx::HwpxReader;
 use hwp_transpiler_core::ir::{IrDocument, Reader};
@@ -71,6 +71,15 @@ Options:
   --asset-dpi=N        Target DPI for the resampled embed. Default
                        72 (canonical screen DPI). 36 halves the
                        pixel dims for tighter LLM contexts.
+  --editable           Omit the frozen SECTION_BYTES so `md-to-hwpx`
+                       rebuilds each section from the (edited)
+                       paragraph records. Required for Markdown edits
+                       to take effect (default export is byte-equal
+                       archival, which ignores edits).
+  --edit-color=#RRGGBB LLM mode: emit an edit-color marker + CharShape
+                       so an editing agent can point char_shape= at it
+                       to render added/modified paragraphs in that
+                       colour. Implies --editable.
   -h, --help           Print this help and exit.
 ";
 
@@ -96,7 +105,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let doc = match parse_bytes(&bytes) {
+    let mut doc = match parse_bytes(&bytes) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("parse {}: {e}", args.input.display());
@@ -106,12 +115,26 @@ fn main() -> ExitCode {
 
     let plan = resolve_output_plan(&args);
 
+    // `--edit-color` (LLM mode only): add the edit-colour CharShape and
+    // capture its id for the marker so an editing agent can point
+    // `char_shape=` at it. See docs/llm-edit-prompt.md.
+    let edit_color = match (&args.edit_color, args.llm) {
+        (Some(hex), true) => {
+            let id = markdown_llm::inject_edit_color(&mut doc, hex);
+            Some((id, hex.clone()))
+        }
+        _ => None,
+    };
+    // Editing intent drops the frozen section bytes so edits rebuild.
+    let skip_section_bytes = args.editable || edit_color.is_some();
+
     let md_opts = markdown::MdOptions {
         assets_path: plan.assets_url_prefix.clone(),
         llm: args.llm.then(|| markdown::LlmOptions {
             emit_roles: args.emit_roles,
             emit_editable: args.emit_editable,
             domain_hints: args.emit_domain_hints,
+            edit_color,
         }),
         // Human-path mirrors: the `--emit-*` switches now also work
         // without `--llm`. Each flag gets routed to the appropriate
@@ -128,6 +151,7 @@ fn main() -> ExitCode {
         emit_styles: args.emit_styles && !args.llm,
         asset_mode: args.asset_mode,
         asset_dpi: args.asset_dpi,
+        skip_section_bytes,
     };
     let exported = markdown::to_markdown_export(&doc, &md_opts);
     let md = exported.main;
@@ -238,6 +262,15 @@ struct CliArgs {
     /// Target DPI for the resampled embed. 72 = canonical screen
     /// DPI; 36 halves the pixel dims for LLM-context budgets.
     asset_dpi: Option<u32>,
+    /// `--edit-color=#RRGGBB` (LLM mode only): emit an edit-color marker
+    /// + CharShape so an editing agent can mark added/modified
+    /// paragraphs in this colour. `None` disables the feature.
+    edit_color: Option<String>,
+    /// `--editable`: omit `SECTION_BYTES` so `md → hwpx` rebuilds each
+    /// section from the (edited) paragraph records instead of replaying
+    /// the frozen original. Required for edits to take effect. Implied
+    /// by `--edit-color`.
+    editable: bool,
 }
 
 #[derive(Debug)]
@@ -275,6 +308,8 @@ fn parse_args(raw: &[String]) -> Result<Option<CliArgs>, String> {
     let mut emit_styles = false;
     let mut asset_mode = markdown::AssetMode::None;
     let mut asset_dpi: Option<u32> = None;
+    let mut edit_color: Option<String> = None;
+    let mut editable = false;
 
     let mut i = 0;
     while i < raw.len() {
@@ -295,6 +330,9 @@ fn parse_args(raw: &[String]) -> Result<Option<CliArgs>, String> {
             }
             "--emit-styles" => {
                 emit_styles = true;
+            }
+            "--editable" => {
+                editable = true;
             }
             "--inline-assets" => {
                 if asset_mode == markdown::AssetMode::Split {
@@ -331,6 +369,16 @@ fn parse_args(raw: &[String]) -> Result<Option<CliArgs>, String> {
                     return Err("--asset-dpi must be > 0".into());
                 }
                 asset_dpi = Some(n);
+            }
+            s if s.starts_with("--edit-color=") => {
+                let val = s["--edit-color=".len()..].trim();
+                let hex = val.strip_prefix('#').unwrap_or(val);
+                if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return Err(format!(
+                        "--edit-color requires #RRGGBB hex, got {val:?}"
+                    ));
+                }
+                edit_color = Some(format!("#{}", hex.to_uppercase()));
             }
             "--no-assets" => {
                 if matches!(assets, AssetsMode::Explicit(_)) {
@@ -408,6 +456,8 @@ fn parse_args(raw: &[String]) -> Result<Option<CliArgs>, String> {
         emit_styles,
         asset_mode,
         asset_dpi,
+        edit_color,
+        editable,
     }))
 }
 
