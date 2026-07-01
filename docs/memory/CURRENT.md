@@ -68,6 +68,14 @@ cross-format 결함 10개 발견. 단계별 ship:
 
 ## 알려진 갭
 
+- **한글2018(구버전 미패치)에서 `="none"` 배경/음영을 검정으로 렌더** —
+  2026-07-01 확인. HWPX 의 `faceColor="none"` / `shadeColor="none"`(배경
+  없음)을 한글2018 편집화면이 검정으로 표시. **우리 파일 결함 아님**:
+  문서 모델·인쇄·docx export·한컴2014 모두 정상이고, 우리 출력은 한컴
+  원본과 15/15 byte-equal. 한컴 공식 **한글2018 패치 설치 시 정상**(알려진
+  버전 호환 버그, 참고: shhh9461.tistory.com/198). 잠시 `none`→흰색/제거로
+  우회하려 했으나 byte-equal 을 깨서 되돌림 — 정본은 무손실 유지, 미패치
+  뷰어 대응은 필요 시 opt-in 으로만.
 - **HWP5 → MD → HWPX 의 표/body layout** — 2026-06-30 대폭 개선. DOC_INFO
   레코드(doc_info JSON), 실제 lineseg, 셀 width, header itemCnt 까지 모두
   운반/재계산해 표 테두리·문단 겹침·열 비율 해결. **남은 갭**: HWP5 PAGE_DEF
