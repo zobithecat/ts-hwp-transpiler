@@ -60,6 +60,8 @@ use hwp_transpiler_core::semantics::{
 
 use super::markdown::{LlmOptions, MdOptions};
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+
 /// Emit a line terminated by `\n`. Small wrapper so call sites stay
 /// uncluttered; writing to a `String` is infallible so the `fmt::Result`
 /// that `writeln!` would return is simply not useful here.
@@ -93,7 +95,17 @@ pub fn to_llm_markdown(doc: &IrDocument, opts: &MdOptions) -> String {
     }
     out.push('\n');
     for (si, section) in doc.sections.iter().enumerate() {
-        line(&mut out, &format!("SECTION[id=sec-{si}]"));
+        // Carry the source `<hp:secPr>` verbatim (base64 — it's XML,
+        // full of the delimiters the record syntax uses). Editable
+        // exports have no SECTION_BYTES to salvage geometry from, so
+        // without this the rebuilt section falls back to A4-default
+        // margins and every line re-wraps at the wrong body width.
+        let sec_pr_attr = section
+            .sec_pr_xml
+            .as_deref()
+            .map(|xml| format!(",sec_pr={}", STANDARD.encode(xml)))
+            .unwrap_or_default();
+        line(&mut out, &format!("SECTION[id=sec-{si}{sec_pr_attr}]"));
         out.push('\n');
         for (pi, para) in section.paragraphs.iter().enumerate() {
             let par_path = format!("s{si}-p{pi}");

@@ -73,7 +73,18 @@ pub fn write_section_xml(section: &Section, bin_data: &[BinaryEntry]) -> Result<
     // Emitting it as a dedicated zero-text paragraph keeps the
     // typed emitter simple and matches what Hancom-authored docs
     // produce when the document opens to a blank state.
-    out.push_str(SEC_PR_PARAGRAPH);
+    //
+    // When the source captured its original `<hp:secPr>` verbatim,
+    // splice that in instead of the A4 default: margins / gutter /
+    // header-footer heights change the body width, and a different
+    // body width re-wraps every line on re-layout.
+    if let Some(sec_pr) = section.sec_pr_xml.as_deref() {
+        out.push_str(r#"<hp:p id="0" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="0">"#);
+        out.push_str(sec_pr);
+        out.push_str(r#"</hp:run></hp:p>"#);
+    } else {
+        out.push_str(SEC_PR_PARAGRAPH);
+    }
 
     for (i, para) in section.paragraphs.iter().enumerate() {
         // Offset paragraph ids by 1 so the synthetic leading

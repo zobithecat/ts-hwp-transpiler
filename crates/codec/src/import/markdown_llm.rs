@@ -212,6 +212,18 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
             } else {
                 current = Section::default();
             }
+            // `sec_pr=<base64>` restores the source `<hp:secPr>`
+            // verbatim so rebuilt sections keep the original page
+            // geometry (margins decide body width → line wrapping).
+            if let Some(b64) = parse_attrs(trimmed).0.get("sec_pr") {
+                if let Some(xml) = STANDARD
+                    .decode(b64)
+                    .ok()
+                    .and_then(|b| String::from_utf8(b).ok())
+                {
+                    current.sec_pr_xml = Some(xml);
+                }
+            }
             state = State::Idle;
             continue;
         }
@@ -423,6 +435,14 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
         };
         if comparable_text(&frozen.paragraphs) != comparable_text(&section.paragraphs) {
             section.stream_bytes = None;
+            // Salvage the original page geometry before discarding
+            // the frozen bytes — the rebuilt section must keep the
+            // source margins / gutter / header-footer heights, or
+            // the changed body width re-wraps every line. (Also
+            // rescues md files exported before `sec_pr=` carry.)
+            if section.sec_pr_xml.is_none() {
+                section.sec_pr_xml = frozen.sec_pr_xml.clone();
+            }
             // Line-layout cache goes with it. `vertpos` is cumulative
             // within its list (body flow / table cell), so any edit
             // that changes line count invalidates every following

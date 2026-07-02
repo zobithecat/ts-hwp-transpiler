@@ -17,6 +17,15 @@ pub struct Section {
     /// Exact stream bytes as read (raw DEFLATE when FileHeader.compressed
     /// is set). Verbatim-if-unchanged write path; cleared by mutation.
     pub stream_bytes: Option<Vec<u8>>,
+    /// Verbatim `<hp:secPr …>…</hp:secPr>` fragment from an HWPX
+    /// source. Page geometry (size, margins, gutter, header/footer
+    /// heights, page borders) lives here in far more detail than
+    /// `SectionProperties` models; the section writer splices this
+    /// into rebuilt sections instead of synthesising an A4 default,
+    /// so re-laid-out documents keep the original body width and
+    /// line wrapping. `None` for HWP5 sources and from-scratch docs.
+    #[serde(default)]
+    pub sec_pr_xml: Option<String>,
 }
 
 impl Section {

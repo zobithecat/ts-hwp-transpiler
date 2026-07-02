@@ -38,11 +38,31 @@ use quick_xml::Reader;
 /// Entry point. Parses the entire section XML and returns a populated
 /// `Section`. Page dimensions land in `section.properties` if the XML
 /// carries a `<hp:pagePr>` block (HWPX always does).
+/// Extract the verbatim `<hp:secPr …>…</hp:secPr>` fragment (or the
+/// self-closing form) from a section XML document. Plain byte scan —
+/// Hancom emits exactly one secPr per section and never nests it, so
+/// the first open/close pair is the whole element. Returns `None`
+/// when the input isn't UTF-8 or carries no secPr.
+pub fn extract_sec_pr_fragment(xml: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(xml).ok()?;
+    let start = text.find("<hp:secPr")?;
+    // Self-closing? Find whichever terminator comes first after the
+    // element name: `/>` before any `>` means an empty element.
+    let after = &text[start..];
+    let gt = after.find('>')?;
+    if after[..gt].ends_with('/') {
+        return Some(after[..gt + 1].to_string());
+    }
+    let close = after.find("</hp:secPr>")?;
+    Some(after[..close + "</hp:secPr>".len()].to_string())
+}
+
 pub fn parse_section_xml(xml: &[u8]) -> Result<Section, IrError> {
     let mut reader = Reader::from_reader(xml);
     reader.config_mut().trim_text(false);
 
     let mut section = Section::default();
+    section.sec_pr_xml = extract_sec_pr_fragment(xml);
     let mut buf = Vec::new();
 
     loop {

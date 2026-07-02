@@ -205,7 +205,7 @@ fn edited_body_invalidates_section_bytes_on_import() {
         p
     });
     section.stream_bytes = Some(
-        b"<hs:sec><hp:p><hp:run><hp:t>\xEB\xB3\xB8\xEB\xAC\xB8</hp:t></hp:run></hp:p></hs:sec>"
+        b"<hs:sec><hp:p><hp:run><hp:secPr id=\"\"><hp:pagePr landscape=\"WIDELY\" width=\"59528\" height=\"84188\" gutterType=\"LEFT_RIGHT\"><hp:margin header=\"2834\" footer=\"2834\" gutter=\"0\" left=\"5669\" right=\"5669\" top=\"4251\" bottom=\"4251\"/></hp:pagePr></hp:secPr><hp:t>\xEB\xB3\xB8\xEB\xAC\xB8</hp:t></hp:run></hp:p></hs:sec>"
             .to_vec(),
     );
     doc.sections.push(section);
@@ -226,6 +226,48 @@ fn edited_body_invalidates_section_bytes_on_import() {
         "verify-gate drops stale frozen bytes so the edit survives"
     );
     assert_eq!(reloaded.sections[0].paragraphs[0].text, "본문 (AI가 고침)");
+    // Page geometry must be salvaged from the frozen bytes before
+    // they're discarded — the rebuilt section keeps source margins.
+    let sec_pr = reloaded.sections[0]
+        .sec_pr_xml
+        .as_deref()
+        .expect("secPr salvaged from frozen bytes");
+    assert!(sec_pr.contains(r#"left="5669""#), "original margins kept: {sec_pr}");
+}
+
+#[test]
+fn sec_pr_carries_through_editable_markdown() {
+    // Editable exports have no SECTION_BYTES to salvage from, so the
+    // SECTION record itself must carry the source `<hp:secPr>`.
+    let mut doc = IrDocument::default();
+    let mut section = Section::default();
+    section.paragraphs.push({
+        let mut p = Paragraph::default();
+        p.text = "본문".into();
+        p
+    });
+    section.sec_pr_xml = Some(
+        r#"<hp:secPr id=""><hp:pagePr landscape="WIDELY" width="59528" height="84188" gutterType="LEFT_RIGHT"><hp:margin header="2834" footer="2834" gutter="0" left="5669" right="5669" top="4251" bottom="4251"/></hp:pagePr></hp:secPr>"#
+            .to_string(),
+    );
+    doc.sections.push(section);
+
+    let opts = MdOptions {
+        llm: Some(LlmOptions::default()),
+        asset_mode: AssetMode::Inline,
+        asset_dpi: None,
+        skip_section_bytes: true,
+        ..MdOptions::default()
+    };
+    let md = to_llm_markdown(&doc, &opts);
+    assert!(md.contains("sec_pr="), "SECTION record carries sec_pr attr: {md}");
+
+    let reloaded = from_llm_markdown(&md).expect("import");
+    let sec_pr = reloaded.sections[0]
+        .sec_pr_xml
+        .as_deref()
+        .expect("sec_pr restored on import");
+    assert!(sec_pr.contains(r#"left="5669""#), "original margins kept: {sec_pr}");
 }
 
 #[test]
