@@ -423,10 +423,33 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
         };
         if comparable_text(&frozen.paragraphs) != comparable_text(&section.paragraphs) {
             section.stream_bytes = None;
+            // Line-layout cache goes with it. `vertpos` is cumulative
+            // within its list (body flow / table cell), so any edit
+            // that changes line count invalidates every following
+            // paragraph's segments too — wipe the whole section and
+            // let Hancom re-run layout (it does so for paragraphs
+            // without a `<hp:linesegarray>`; the writer omits the
+            // element when segments are empty).
+            wipe_line_segments(&mut section.paragraphs);
         }
     }
 
     Ok(doc)
+}
+
+/// Recursively clear captured line segments (tables included) so the
+/// writer omits `<hp:linesegarray>` and the viewer re-lays-out.
+fn wipe_line_segments(paragraphs: &mut [Paragraph]) {
+    for p in paragraphs {
+        p.line_segments.clear();
+        for control in &mut p.controls {
+            if let ControlKind::Table(table) = &mut control.kind {
+                for cell in &mut table.cells {
+                    wipe_line_segments(&mut cell.paragraphs);
+                }
+            }
+        }
+    }
 }
 
 /// Concatenated paragraph text (tables included, depth-first) with

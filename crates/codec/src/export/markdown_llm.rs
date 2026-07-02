@@ -73,6 +73,14 @@ fn line(out: &mut String, s: &str) {
 /// routes here automatically when the option is present.
 pub fn to_llm_markdown(doc: &IrDocument, opts: &MdOptions) -> String {
     let llm = opts.llm.clone().unwrap_or_default();
+    // Editable exports (`skip_section_bytes`) drop the `lineseg=`
+    // carry: `vertpos` is cumulative within its list, so after any
+    // edit the captured layout is stale for everything that follows.
+    // Omitting it makes the writer skip `<hp:linesegarray>` and
+    // Hancom re-runs line layout — correct-by-construction, and the
+    // LLM context stays slimmer. Archive exports keep the carry for
+    // pixel-fidelity replay of HWP5-sourced layout.
+    let carry_lineseg = !opts.skip_section_bytes;
     let mut out = String::new();
     out.push_str(super::markdown::FORMAT_HEADER_LLM);
     out.push('\n');
@@ -89,7 +97,7 @@ pub fn to_llm_markdown(doc: &IrDocument, opts: &MdOptions) -> String {
         out.push('\n');
         for (pi, para) in section.paragraphs.iter().enumerate() {
             let par_path = format!("s{si}-p{pi}");
-            emit_paragraph(doc, para, &mut out, &llm, &par_path);
+            emit_paragraph(doc, para, &mut out, &llm, &par_path, carry_lineseg);
         }
     }
     while out.ends_with('\n') {
@@ -209,6 +217,7 @@ fn emit_paragraph(
     out: &mut String,
     llm: &LlmOptions,
     path: &str,
+    carry_lineseg: bool,
 ) {
     let text = super::markdown::clean_text(&para.text);
     let has_text = !text.is_empty();
@@ -247,7 +256,7 @@ fn emit_paragraph(
         // line height rarely matches the source (e.g. 1100/1320), and
         // every under-advance accumulates into paragraph overlap down
         // the page. Carried whenever the source captured any layout.
-        if !para.line_segments.is_empty() {
+        if carry_lineseg && !para.line_segments.is_empty() {
             header.push_str(&format!(
                 ",lineseg={}",
                 super::super::lineseg_codec::encode(&para.line_segments)
@@ -267,7 +276,7 @@ fn emit_paragraph(
         let ctrl_path = format!("{path}-c{ci}");
         match &c.kind {
             ControlKind::Table(t) => {
-                emit_table(doc, t, out, llm, &ctrl_path, &para.text);
+                emit_table(doc, t, out, llm, &ctrl_path, &para.text, carry_lineseg);
             }
             ControlKind::Picture(p) => {
                 emit_figure(p, c.caption_text.as_deref(), out);
@@ -287,6 +296,7 @@ fn emit_table(
     llm: &LlmOptions,
     path: &str,
     owner_para_text: &str,
+    carry_lineseg: bool,
 ) {
     let tbl_id = format!("tbl-{path}");
     let mut tbl_header =
@@ -318,7 +328,7 @@ fn emit_table(
     for (ci, cell) in t.cells.iter().enumerate() {
         let cell_path = format!("{path}-r{}c{}", cell.row, cell.col);
         let role = roles.get(ci).copied();
-        emit_cell(doc, cell, out, llm, &cell_path, role);
+        emit_cell(doc, cell, out, llm, &cell_path, role, carry_lineseg);
     }
     line(out, &format!("END TABLE[{tbl_id}]"));
     out.push('\n');
@@ -448,6 +458,7 @@ fn emit_cell(
     llm: &LlmOptions,
     path: &str,
     role: Option<CellRole>,
+    carry_lineseg: bool,
 ) {
     let cell_id = format!("cell-{path}");
     let mut header = format!(
@@ -504,7 +515,7 @@ fn emit_cell(
                 .first()
                 .map(|r| r.char_shape_id)
                 .unwrap_or(0);
-            let lineseg_attr = if !p.line_segments.is_empty() {
+            let lineseg_attr = if carry_lineseg && !p.line_segments.is_empty() {
                 format!(
                     ",lineseg={}",
                     super::super::lineseg_codec::encode(&p.line_segments)
@@ -521,7 +532,7 @@ fn emit_cell(
             let inner_ctrl_path = format!("{inner_par_path}-c{ci}");
             match &ctrl.kind {
                 ControlKind::Table(nested) => {
-                    emit_table(doc, nested, out, llm, &inner_ctrl_path, &p.text);
+                    emit_table(doc, nested, out, llm, &inner_ctrl_path, &p.text, carry_lineseg);
                 }
                 ControlKind::Picture(pic) => {
                     emit_figure(pic, ctrl.caption_text.as_deref(), out);

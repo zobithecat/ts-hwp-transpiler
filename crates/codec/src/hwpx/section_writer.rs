@@ -133,21 +133,22 @@ fn entry_bin_id(entry: &BinaryEntry) -> Option<u16> {
     digits.parse::<u16>().ok()
 }
 
-/// Single Hancom 10pt-on-A4 lineseg, used only when a paragraph
-/// carries no captured layout (e.g. synthesised from Markdown that
-/// never had a `PARA_LINE_SEG`). Without at least one lineseg the
-/// viewer treats `line_height=0` and explodes the page count.
-const DEFAULT_LINESEG: &str = r#"<hp:lineseg textpos="0" vertpos="0" vertsize="1000" textheight="1000" baseline="850" spacing="600" horzpos="0" horzsize="42520" flags="393216"/>"#;
-
 /// Render `<hp:linesegarray>` from the paragraph's captured line
 /// segments (`PARA_LINE_SEG` ↔ `<hp:lineseg>` is a 1:1 field map).
 /// Emits every segment so multi-line paragraphs report their true
-/// height; falls back to `DEFAULT_LINESEG` when none were captured.
+/// height. When none were captured the element is omitted entirely:
+/// Hancom re-runs line layout for paragraphs without a linesegarray,
+/// whereas a synthesised placeholder (vertpos=0) is trusted verbatim
+/// and stacks every paragraph at the same position — verified on a
+/// real 37-page document, 2026-07-02. `vertpos` is cumulative within
+/// its list (body flow / cell), so a stale-but-plausible guess is
+/// strictly worse than absence.
 fn render_linesegarray(para: &Paragraph, out: &mut String) {
-    out.push_str("<hp:linesegarray>");
     if para.line_segments.is_empty() {
-        out.push_str(DEFAULT_LINESEG);
-    } else {
+        return;
+    }
+    out.push_str("<hp:linesegarray>");
+    {
         for s in &para.line_segments {
             out.push_str(&format!(
                 r#"<hp:lineseg textpos="{tp}" vertpos="{vp}" vertsize="{vs}" textheight="{th}" baseline="{bl}" spacing="{sp}" horzpos="{hp}" horzsize="{hs}" flags="{fl}"/>"#,
