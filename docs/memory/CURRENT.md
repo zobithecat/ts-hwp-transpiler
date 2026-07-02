@@ -1,6 +1,25 @@
 # 현재 위치
 
-**지금** (2026-07-02 저녁): **재조립 섹션의 페이지 지오메트리 verbatim 보존.**
+**지금** (2026-07-02 밤): **md 왕복의 대형 데이터 손실 4종 수술 — 재조립 충실도 급상승.**
+1페이지 완치 후 "다음 페이지들 약간 이상" 추적 → 원본 vs 재조립 요소 전수
+비교로 발견: ① **멀티 문단 셀의 2번째+ TEXT 를 importer 가 조용히 폐기**
+(서약서 조항·두 줄 제목 증발 — set_pending 이 pending 소진 후 drop),
+② **셀 안 중첩 TABLE 이 바깥 표를 조기 종료**시키고 형제로 평탄화
+(State::InTable 을 빌더 스택으로 재구성, 셀 내 FIGURE 도 동일 수정),
+③ **빈 문단 551개 export 스킵** → 세로 리듬·페이지 흐름 붕괴 (이제
+TEXT 없는 PARAGRAPH 레코드로 emit, flush 에서 실체화; 셀은 빈 body TEXT),
+④ **pageBreak="1" 8개 미운반** (붙임/첨부 페이지 시작) →
+`ParagraphHeader.page_break_before` 신설, HWPX↔IR↔md 왕복 (HWP5
+divide_sort bit2 매핑). 추가: TEXT body 의 \n/\t 이스케이프 (lineBreak
+꼬리 유실 방지). verify-gate 에 **align_paragraphs** — 동결 바이트와
+2-포인터 정렬로 빈 문단 재삽입, pageBreak/styleIDRef 이식, lineBreak
+분단 텍스트 복원, 표 셀 (row,col) 페어링 재귀 — 구버전 md 자동 업그레이드.
+실측 회복: tc 1555/1555, tbl 62/62, p 1878→2331(원본 2429, 잔여는 AI 편집
+드리프트), pageBreak 7/8. 잔여 갭(무해/저순위): 중간 colPr 8(전부
+colCount=1 재선언 — 무해 확인), lineBreak 위치(소프트랩으로 대체),
+fieldBegin/End·pageNum·caption 미운반, 문단 내 멀티 charshape run 평탄화.
+
+(2026-07-02 저녁): **재조립 섹션의 페이지 지오메트리 verbatim 보존.**
 linesegarray 생략 검증 중 사용자 발견: 원래 한 줄이던 문단이 재배치 후
 줄바꿈 → 페이지 넘침. 문단 XML(paraPr/charPr)은 원본과 동일했고, 진범 후보는
 **합성 secPr** — 여백 3000(원본 5669), 머리말/꼬리말 850(원본 2834),
