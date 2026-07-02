@@ -54,6 +54,10 @@ pub fn parse(rec: &Record) -> Result<ParagraphHeader, IrError> {
         para_shape_id,
         style_id,
         divide_sort,
+        // HWP5 divide kind bit 2 (0x04) = start on a new page. Kept
+        // in sync with `divide_sort` so HWPX emission of an HWP5
+        // source reproduces forced page breaks.
+        page_break_before: divide_sort & 0x04 != 0,
         char_shape_count,
         range_tag_count,
         line_align_count,
@@ -124,6 +128,7 @@ mod tests {
             line_align_count: 1,
             instance_id: 0,
             change_tracking_merged: None,
+            page_break_before: false,
         }
     }
 

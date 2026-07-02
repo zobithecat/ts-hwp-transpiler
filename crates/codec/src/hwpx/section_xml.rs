@@ -121,6 +121,9 @@ fn parse_paragraph<R: BufRead>(
     // off `Style::name`) can re-classify headings on round-trip.
     // ParagraphHeader::style_id is a u8 — clamp anything past that.
     para.header.style_id = u32_attr(start, "styleIDRef").unwrap_or(0).min(255) as u8;
+    // Forced page break — the doc's form pages (붙임/첨부) all start
+    // with one; dropping it lets them flow onto the previous page.
+    para.header.page_break_before = u32_attr(start, "pageBreak").unwrap_or(0) != 0;
     let mut buf = Vec::new();
 
     loop {

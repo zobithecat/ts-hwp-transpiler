@@ -260,12 +260,12 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
                 para_shape_id: para_shape,
                 char_shape_id: char_shape,
                 line_segments,
+                page_break: attrs.get_int("page_break").unwrap_or(0) != 0,
             };
             continue;
         }
 
         if trimmed.starts_with("TABLE[") {
-            flush_state(&mut state, &mut current);
             let attrs = parse_attrs(trimmed);
             let mut builder = LlmTableBuilder::default();
             builder.border_fill_id = attrs.get_int("border_fill").unwrap_or(0).max(0) as u16;
@@ -279,26 +279,44 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
                 }
             }
             builder.cell_spacing = attrs.get_int("cell_spacing").unwrap_or(0) as i16;
-            state = State::InTable(builder);
+            if let State::InTable(stack) = &mut state {
+                // Nested table — the exporter emits these inside the
+                // owning CELL block. Push; END TABLE pops and attaches.
+                stack.push(builder);
+            } else {
+                flush_state(&mut state, &mut current);
+                state = State::InTable(vec![builder]);
+            }
             continue;
         }
 
         if trimmed.starts_with("END TABLE") {
-            if let State::InTable(builder) = std::mem::replace(&mut state, State::Idle) {
-                let table = builder.finish();
-                let mut wrapper = Paragraph::default();
-                wrapper.text = "\u{FFFC}".into();
-                wrapper.controls.push(Control {
-                    kind: ControlKind::Table(table),
-                    caption_text: None,
-                });
-                current.paragraphs.push(wrapper);
+            if let State::InTable(stack) = &mut state {
+                if let Some(builder) = stack.pop() {
+                    let table = builder.finish();
+                    let mut wrapper = Paragraph::default();
+                    wrapper.text = "\u{FFFC}".into();
+                    wrapper.controls.push(Control {
+                        kind: ControlKind::Table(table),
+                        caption_text: None,
+                    });
+                    if let Some(parent) = stack.last_mut() {
+                        parent.attach_paragraph(wrapper);
+                    } else {
+                        current.paragraphs.push(wrapper);
+                        state = State::Idle;
+                    }
+                }
             }
             continue;
         }
 
         if trimmed.starts_with("FIGURE[") {
-            flush_state(&mut state, &mut current);
+            // Only flush paragraph state — a figure inside a CELL
+            // block must not terminate the table being built.
+            if !matches!(state, State::InTable(_)) {
+                flush_state(&mut state, &mut current);
+            }
             let attrs = parse_attrs(trimmed);
             let bin_id = attrs.get_int("bin_id").map(|n| n.clamp(0, u16::MAX as i64) as u16);
             let width_mm = attrs.get_int("width_mm").unwrap_or(0).max(0) as u32;
@@ -318,7 +336,13 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
                 }),
                 caption_text: None,
             });
-            current.paragraphs.push(wrapper);
+            if let State::InTable(stack) = &mut state {
+                if let Some(builder) = stack.last_mut() {
+                    builder.attach_paragraph(wrapper);
+                }
+            } else {
+                current.paragraphs.push(wrapper);
+            }
             continue;
         }
 
@@ -332,25 +356,29 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
             let width_hwpu = attrs.get_int("width").unwrap_or(0).max(0) as u32;
             let height_hwpu = attrs.get_int("height").unwrap_or(0).max(0) as u32;
             let text_width_hwpu = attrs.get_int("text_width").unwrap_or(0).max(0) as u32;
-            if let State::InTable(builder) = &mut state {
-                builder.flush_pending();
-                builder.pending = Some(PendingCell {
-                    row, col, row_span, col_span, border_fill_id,
-                    width_hwpu, height_hwpu, text_width_hwpu,
-                });
+            if let State::InTable(stack) = &mut state {
+                if let Some(builder) = stack.last_mut() {
+                    builder.flush_pending();
+                    builder.pending = Some(PendingCell {
+                        row, col, row_span, col_span, border_fill_id,
+                        width_hwpu, height_hwpu, text_width_hwpu,
+                    });
+                }
             }
             continue;
         }
 
         if let Some((text, line_ps, line_cs, line_segs)) = parse_text_line(trimmed) {
+            let text = unescape_text(text);
             match &mut state {
                 State::ExpectingParagraphText {
                     explicit_level,
                     para_shape_id,
                     char_shape_id,
                     line_segments,
+                    page_break,
                 } => {
-                    let (level, body) = resolve_heading(*explicit_level, text);
+                    let (level, body) = resolve_heading(*explicit_level, &text);
                     let ps = *para_shape_id;
                     let cs = *char_shape_id;
                     // Top-level paragraphs carry layout on the PARAGRAPH
@@ -361,16 +389,20 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
                     } else {
                         std::mem::take(line_segments)
                     };
-                    current.paragraphs.push(make_paragraph(level, body, ps, cs, segs));
+                    let mut p = make_paragraph(level, body, ps, cs, segs);
+                    p.header.page_break_before = *page_break;
+                    current.paragraphs.push(p);
                     state = State::Idle;
                 }
-                State::InTable(builder) => {
-                    builder.set_pending_text_with_shapes(
-                        text.to_string(),
-                        line_ps,
-                        line_cs,
-                        line_segs,
-                    );
+                State::InTable(stack) => {
+                    if let Some(builder) = stack.last_mut() {
+                        builder.set_pending_text_with_shapes(
+                            text,
+                            line_ps,
+                            line_cs,
+                            line_segs,
+                        );
+                    }
                 }
                 State::Idle => {
                     // Bare TEXT without a preceding PARAGRAPH marker
@@ -378,7 +410,7 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
                     // dropped on the floor.
                     current
                         .paragraphs
-                        .push(make_paragraph(0, text.to_string(), line_ps, line_cs, line_segs));
+                        .push(make_paragraph(0, text, line_ps, line_cs, line_segs));
                 }
             }
             continue;
@@ -467,6 +499,12 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
                 let mut idx = 0usize;
                 transplant_table_props(&mut section.paragraphs, &frozen_tables, &mut idx);
             }
+            // Re-insert the source's empty paragraphs (blank lines —
+            // vertical rhythm) and copy per-paragraph header bits
+            // (forced page breaks, style ids) the md didn't carry.
+            // Rescues md files exported before those records existed;
+            // a no-op for current exports, which carry them inline.
+            align_paragraphs(&frozen.paragraphs, &mut section.paragraphs);
             // Line-layout cache goes with it. `vertpos` is cumulative
             // within its list (body flow / table cell), so any edit
             // that changes line count invalidates every following
@@ -523,6 +561,105 @@ fn transplant_table_props(
                 }
                 for cell in &mut t.cells {
                     transplant_table_props(&mut cell.paragraphs, frozen, idx);
+                }
+            }
+        }
+    }
+}
+
+/// Blank paragraph: no controls and no visible text. These are the
+/// blank lines that give a document its vertical rhythm; md exports
+/// prior to 2026-07-02 dropped them entirely.
+fn is_blank(p: &Paragraph) -> bool {
+    p.controls.is_empty()
+        && p
+            .text
+            .chars()
+            .all(|c| c.is_whitespace() || c == '\u{FFFC}')
+}
+
+/// Two-pointer alignment of frozen (source) paragraphs against typed
+/// (md-imported) paragraphs. Re-inserts blank paragraphs the md
+/// didn't carry, and copies per-paragraph header bits (forced page
+/// break, style id) onto each aligned pair. Text edits shift the
+/// pairing only locally — an added/removed paragraph desyncs blanks
+/// near the edit, never corrupts content. Recurses into positionally
+/// paired tables cell-by-cell.
+fn align_paragraphs(frozen: &[Paragraph], typed: &mut Vec<Paragraph>) {
+    let mut j = 0usize;
+    for f in frozen {
+        if is_blank(f) {
+            if typed.get(j).is_some_and(is_blank) {
+                copy_header_bits(f, &mut typed[j]);
+            } else {
+                let mut clone = f.clone();
+                // Layout cache is stale by definition here (the
+                // section was edited); the gate wipes the rest.
+                clone.line_segments.clear();
+                typed.insert(j, clone);
+            }
+            j += 1;
+        } else {
+            let Some(t) = typed.get_mut(j) else { break };
+            copy_header_bits(f, t);
+            // Restore text lost after `<hp:lineBreak/>` in older
+            // exports: their md carried only the first line, so the
+            // tail never reached the editing AI. Restore only when
+            // the typed text is exactly the frozen text's first line
+            // (whitespace-insensitive) — an edited prefix fails the
+            // match and the edit wins.
+            if f.text.contains('\n') {
+                let strip = |s: &str| -> String {
+                    s.chars()
+                        .filter(|c| !c.is_whitespace() && *c != '\u{FFFC}')
+                        .collect()
+                };
+                let first_line = f.text.split('\n').next().unwrap_or("");
+                if strip(&t.text) == strip(first_line) {
+                    t.text = f.text.clone();
+                    t.char_shape_runs = f.char_shape_runs.clone();
+                }
+            }
+            align_tables(f, t);
+            j += 1;
+        }
+    }
+}
+
+fn copy_header_bits(f: &Paragraph, t: &mut Paragraph) {
+    if f.header.page_break_before {
+        t.header.page_break_before = true;
+    }
+    if t.header.style_id == 0 {
+        t.header.style_id = f.header.style_id;
+    }
+}
+
+/// Pair the tables of two aligned paragraphs in order and align each
+/// pair's cells by (row, col).
+fn align_tables(f: &Paragraph, t: &mut Paragraph) {
+    let f_tables: Vec<&TableControl> = f
+        .controls
+        .iter()
+        .filter_map(|c| match &c.kind {
+            ControlKind::Table(ft) => Some(ft),
+            _ => None,
+        })
+        .collect();
+    let mut ti = 0usize;
+    for c in &mut t.controls {
+        if let ControlKind::Table(tt) = &mut c.kind {
+            if let Some(ft) = f_tables.get(ti) {
+                ti += 1;
+                for cell in &mut tt.cells {
+                    if let Some(fc) = ft
+                        .cells
+                        .iter()
+                        .find(|c2| c2.row == cell.row && c2.col == cell.col)
+                    {
+                        align_paragraphs(&fc.paragraphs, &mut cell.paragraphs);
+                        cell.para_count = cell.paragraphs.len() as i32;
+                    }
                 }
             }
         }
@@ -589,8 +726,17 @@ enum State {
         /// applied to the paragraph so multi-line bodies keep their
         /// per-line geometry instead of collapsing to a single seed.
         line_segments: Vec<LineSegment>,
+        /// `page_break=1` — start this paragraph on a new page.
+        page_break: bool,
     },
-    InTable(LlmTableBuilder),
+    /// Builder stack: `last()` is the innermost table. A `TABLE[`
+    /// record while already in a table pushes a nested builder; its
+    /// `END TABLE` pops it and attaches the finished table to the
+    /// parent's current cell. A flat single-builder state here used
+    /// to *finish* the outer table on nested `TABLE[` — flattening
+    /// every nested form table into top-level siblings and dropping
+    /// the outer table's remaining cells.
+    InTable(Vec<LlmTableBuilder>),
 }
 
 /// Held between an `ASSET[…]` line and its following `DATA: …`
@@ -651,7 +797,52 @@ impl LlmTableBuilder {
     ) {
         if let Some(p) = self.pending.take() {
             self.push_cell(p, text, ps, cs, segs);
+        } else if let Some(cell) = self.cells.last_mut() {
+            // Second and later TEXT records of the same CELL block —
+            // each is its own paragraph. These used to be silently
+            // dropped, which deleted every multi-paragraph cell's
+            // body past the first line.
+            let mut para = Paragraph::default();
+            para.text = text;
+            para.line_segments = segs;
+            para.header.para_shape_id = ps as u16;
+            if cs != 0 {
+                para.char_shape_runs.push(CharShapeRun {
+                    start: 0,
+                    char_shape_id: cs,
+                });
+            }
+            cell.paragraphs.push(para);
+            cell.para_count = cell.paragraphs.len() as i32;
         }
+    }
+    /// Append a pre-built paragraph (nested table / figure wrapper)
+    /// to the current cell, materialising a pending CELL record if
+    /// its first content is structural rather than text.
+    fn attach_paragraph(&mut self, para: Paragraph) {
+        if let Some(p) = self.pending.take() {
+            self.push_cell_with_paragraph(p, para);
+        } else if let Some(cell) = self.cells.last_mut() {
+            cell.paragraphs.push(para);
+            cell.para_count = cell.paragraphs.len() as i32;
+        }
+    }
+    fn push_cell_with_paragraph(&mut self, p: PendingCell, para: Paragraph) {
+        self.cells.push(TableCell {
+            row: p.row,
+            col: p.col,
+            row_span: p.row_span,
+            col_span: p.col_span,
+            para_count: 1,
+            border_fill_id: p.border_fill_id,
+            width_hwpu: p.width_hwpu,
+            height_hwpu: p.height_hwpu,
+            text_width_hwpu: p.text_width_hwpu,
+            paragraphs: vec![para],
+            ..TableCell::default()
+        });
+        self.rows = self.rows.max(p.row + p.row_span);
+        self.cols = self.cols.max(p.col + p.col_span);
     }
     fn flush_pending(&mut self) {
         if let Some(p) = self.pending.take() {
@@ -714,18 +905,47 @@ impl LlmTableBuilder {
 
 fn flush_state(state: &mut State, section: &mut Section) {
     match std::mem::replace(state, State::Idle) {
-        State::Idle | State::ExpectingParagraphText { .. } => {}
-        State::InTable(builder) => {
-            // Mid-table flush at section boundary — emit what we
-            // have so cells aren't lost.
-            let table = builder.finish();
-            let mut wrapper = Paragraph::default();
-            wrapper.text = "\u{FFFC}".into();
-            wrapper.controls.push(Control {
-                kind: ControlKind::Table(table),
-                caption_text: None,
-            });
-            section.paragraphs.push(wrapper);
+        State::Idle => {}
+        State::ExpectingParagraphText {
+            explicit_level,
+            para_shape_id,
+            char_shape_id,
+            line_segments,
+            page_break,
+        } => {
+            // PARAGRAPH record with no TEXT line — a deliberately
+            // empty paragraph. Each is a real blank line in the
+            // source document; materialise it so vertical spacing
+            // (and where page breaks fall) survives the round-trip.
+            let level = explicit_level.unwrap_or(0);
+            let mut p = make_paragraph(
+                level,
+                String::new(),
+                para_shape_id,
+                char_shape_id,
+                line_segments,
+            );
+            p.header.page_break_before = page_break;
+            section.paragraphs.push(p);
+        }
+        State::InTable(mut stack) => {
+            // Mid-table flush at section boundary — collapse the
+            // builder stack innermost-first so nested cells aren't
+            // lost, then land the outermost table in the section.
+            while let Some(builder) = stack.pop() {
+                let table = builder.finish();
+                let mut wrapper = Paragraph::default();
+                wrapper.text = "\u{FFFC}".into();
+                wrapper.controls.push(Control {
+                    kind: ControlKind::Table(table),
+                    caption_text: None,
+                });
+                if let Some(parent) = stack.last_mut() {
+                    parent.attach_paragraph(wrapper);
+                } else {
+                    section.paragraphs.push(wrapper);
+                }
+            }
         }
     }
 }
@@ -847,9 +1067,47 @@ fn strip_text_prefix(line: &str) -> Option<&str> {
     if let Some(rest) = line.strip_prefix("TEXT: ") {
         return Some(rest);
     }
+    // Empty-body records: the caller trims trailing whitespace off
+    // the raw line, so `TEXT: ` / `TEXT[…]: ` arrive as `TEXT:` /
+    // `TEXT[…]:`. They mark deliberately empty paragraphs (blank
+    // lines that give tall form cells their height) — return the
+    // empty string rather than rejecting the record.
+    if line == "TEXT:" {
+        return Some("");
+    }
     let rest = line.strip_prefix("TEXT[")?;
-    let close = rest.find("]: ")?;
-    Some(&rest[close + 3..])
+    if let Some(close) = rest.find("]: ") {
+        return Some(&rest[close + 3..]);
+    }
+    if rest.ends_with("]:") {
+        return Some("");
+    }
+    None
+}
+
+/// Inverse of `export::markdown_llm::escape_text` — restore `\n`
+/// (Shift+Enter line breaks, `<hp:lineBreak/>`), `\t`, and literal
+/// backslashes in TEXT record bodies.
+fn unescape_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('\\') => out.push('\\'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 /// Parse a `TEXT[par-PATH,para_shape=N,char_shape=N,lineseg=…]: text`
@@ -861,10 +1119,17 @@ fn parse_text_line(line: &str) -> Option<(&str, u32, u32, Vec<LineSegment>)> {
     if let Some(rest) = line.strip_prefix("TEXT: ") {
         return Some((rest, 0, 0, Vec::new()));
     }
+    if line == "TEXT:" {
+        return Some(("", 0, 0, Vec::new()));
+    }
     let rest = line.strip_prefix("TEXT[")?;
-    let close = rest.find("]: ")?;
-    let attrs_text = &rest[..close];
-    let body = &rest[close + 3..];
+    // Empty-body form: the import loop trims each raw line, so an
+    // empty cell paragraph's `TEXT[…]: ` arrives as `TEXT[…]:`.
+    let (attrs_text, body) = match rest.find("]: ") {
+        Some(close) => (&rest[..close], &rest[close + 3..]),
+        None if rest.ends_with("]:") => (&rest[..rest.len() - 2], ""),
+        None => return None,
+    };
     let mut ps = 0u32;
     let mut cs = 0u32;
     let mut segs = Vec::new();

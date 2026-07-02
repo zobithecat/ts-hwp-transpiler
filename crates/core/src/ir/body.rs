@@ -77,6 +77,11 @@ pub struct ParagraphHeader {
     pub instance_id: u32,
     /// Present in HWP 5.0.3.2+.
     pub change_tracking_merged: Option<u16>,
+    /// Start this paragraph on a new page (`<hp:p pageBreak="1">` in
+    /// HWPX; bit 2 of `divide_sort` in HWP5). Kept as its own field
+    /// so the HWPX round-trip doesn't depend on HWP5 bit semantics.
+    #[serde(default)]
+    pub page_break_before: bool,
 }
 
 impl ParagraphHeader {

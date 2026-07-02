@@ -223,6 +223,24 @@ fn bump_item_count(xml: &str, container: &str) -> String {
 /// `path` is the positional segment for this paragraph (e.g. `"s0-p5"`
 /// for a top-level paragraph, `"s0-p5-c0-r2c3-p1"` for one nested in a
 /// cell). Full ids prepend the kind tag: `par-<path>`.
+/// Make paragraph text safe for the single-line `TEXT:` record.
+/// `<hp:lineBreak/>` (Shift+Enter) reaches the IR as a literal `\n`;
+/// unescaped it would split the record across two md lines and the
+/// importer would drop everything after the break. Inverse lives in
+/// `import::markdown_llm::unescape_text`.
+fn escape_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 fn emit_paragraph(
     doc: &IrDocument,
     para: &Paragraph,
@@ -239,12 +257,18 @@ fn emit_paragraph(
             ControlKind::Table(_) | ControlKind::Picture(_) | ControlKind::Equation(_)
         )
     });
-    if has_text {
+    if has_text || !has_structural {
         // Stamp the heading level on the PARAGRAPH record so the LLM
         // importer can re-classify on the symmetric direction. The
         // shared `super::markdown::heading_level` lookup keys off
         // `Style::name` ("개요 N" / "Outline N"), the same convention
         // the human-Markdown exporter uses.
+        //
+        // Text-less paragraphs get a record too (with no TEXT line):
+        // each is a real blank line in the source — vertical rhythm
+        // that decides where page breaks land. Skipping them dropped
+        // 551 paragraphs from a 37-page fixture and compressed the
+        // whole document upward on re-layout.
         let mut header = match super::markdown::heading_level(doc, para) {
             Some(n) => format!("PARAGRAPH[id=par-{path},level={n}"),
             None => format!("PARAGRAPH[id=par-{path}"),
@@ -274,14 +298,15 @@ fn emit_paragraph(
                 super::super::lineseg_codec::encode(&para.line_segments)
             ));
         }
+        if para.header.page_break_before {
+            header.push_str(",page_break=1");
+        }
         header.push(']');
         line(out, &header);
-        line(out, &format!("TEXT: {text}"));
+        if has_text {
+            line(out, &format!("TEXT: {}", escape_text(&text)));
+        }
         out.push('\n');
-    } else if !has_structural {
-        // Fully empty paragraph — skip. It carries only layout metadata
-        // that doesn't help an LLM locate content.
-        return;
     }
 
     for (ci, c) in para.controls.iter().enumerate() {
@@ -525,7 +550,8 @@ fn emit_cell(
     for (pi, p) in cell.paragraphs.iter().enumerate() {
         let text = super::markdown::clean_text(&p.text);
         let inner_par_path = format!("{path}-p{pi}");
-        if !text.is_empty() {
+        let has_ctrl = !p.controls.is_empty();
+        if !text.is_empty() || !has_ctrl {
             // Stamp `para_shape` / `char_shape` on cell text records
             // too. Cell paragraphs aren't routed through the top-
             // level PARAGRAPH path so the only place to carry the
@@ -533,6 +559,10 @@ fn emit_cell(
             // use varied shapes (label vs value, header row, …) —
             // without these attrs every cell collapsed to slot 0 on
             // round-trip.
+            //
+            // Empty cell paragraphs emit a record too (blank body):
+            // they're the blank lines that give tall form cells
+            // their height — dropping them collapses the cell.
             let cs = p
                 .char_shape_runs
                 .first()
@@ -549,6 +579,7 @@ fn emit_cell(
             line(out, &format!(
                 "TEXT[par-{inner_par_path},para_shape={ps},char_shape={cs}{lineseg_attr}]: {text}",
                 ps = p.header.para_shape_id,
+                text = escape_text(&text),
             ));
         }
         for (ci, ctrl) in p.controls.iter().enumerate() {

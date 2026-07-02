@@ -198,8 +198,9 @@ fn emit_paragraph(
 ) {
     let para_pr = para.header.para_shape_id;
     let style = para.header.style_id;
+    let page_break = para.header.page_break_before as u8;
     out.push_str(&format!(
-        r#"<hp:p id="{id}" paraPrIDRef="{para_pr}" styleIDRef="{style}" pageBreak="0" columnBreak="0" merged="0">"#
+        r#"<hp:p id="{id}" paraPrIDRef="{para_pr}" styleIDRef="{style}" pageBreak="{page_break}" columnBreak="0" merged="0">"#
     ));
     // Section prolog (`<hp:secPr>` + colPr ctrl) rides in its own
     // leading run of the first content paragraph — Hancom's layout.
