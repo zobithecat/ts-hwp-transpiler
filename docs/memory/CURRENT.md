@@ -1,6 +1,21 @@
 # 현재 위치
 
-**지금** (2026-07-02 밤): **md 왕복의 대형 데이터 손실 4종 수술 — 재조립 충실도 급상승.**
+**지금** (2026-07-02 심야): **표 앵커 paraShape 복원 + 텍스트 앵커 정렬 — 페이지 분할 해결.**
+"기술개발 목표" 제목과 표가 두 페이지로 갈라진 원인: exporter 가 구조
+문단(표/그림 앵커)에 PARAGRAPH 레코드를 안 찍어 **모든 표 wrapper 가
+paraPr=0** 으로 임포트 — treatAsChar 표의 주변 간격은 앵커 paraShape 가
+결정하므로 페이지 총높이가 변함. 수정: ① exporter 가 모든 문단에
+PARAGRAPH 레코드 emit(앵커는 TEXT 없이 shape ids만), ② importer 가
+TABLE[/FIGURE[ 직전의 PARAGRAPH 레코드를 wrapper 앵커 속성으로 소비,
+③ verify-gate 정렬을 **텍스트 앵커 + 유계 resync 윈도우(5)** 로 교체
+(위치 기반 걷기는 편집 1곳 이후 문서 전체의 pageBreak/빈 문단을 오배치),
+④ 표 위치 이식에 frozen 앵커 shape 복사 추가(pageBreak 는 제외 — 깊은
+중첩에서 1개 어긋날 수 있어 자기교정되는 정렬에 일임). 실측: pageBreak
+8/8 원본 정위치, 표 앵커 paraShape 61/62, 대상 표 앵커 1/1. push 완료
+(ad0914f). 잔여: 앵커 1개 paraPr 미세 불일치(중첩 구간 zip 슬립), blank
+paraPr 일부 드리프트 — 시각 영향 미미.
+
+(2026-07-02 밤): **md 왕복의 대형 데이터 손실 4종 수술 — 재조립 충실도 급상승.**
 1페이지 완치 후 "다음 페이지들 약간 이상" 추적 → 원본 vs 재조립 요소 전수
 비교로 발견: ① **멀티 문단 셀의 2번째+ TEXT 를 importer 가 조용히 폐기**
 (서약서 조항·두 줄 제목 증발 — set_pending 이 pending 소진 후 drop),
