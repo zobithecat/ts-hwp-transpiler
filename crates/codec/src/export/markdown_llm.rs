@@ -322,6 +322,17 @@ fn emit_table(
     // `border_fill` carries the table-level BorderFill slot id so the
     // importer can route it back into `<hp:tbl borderFillIDRef=N>`.
     tbl_header.push_str(&format!(",border_fill={}", t.border_fill_id));
+    // Inner cell padding + cell gap — these decide each cell's text
+    // width, so dropping them re-wraps cell contents on re-layout.
+    if t.padding != [0; 4] {
+        tbl_header.push_str(&format!(
+            ",in_margin={}:{}:{}:{}",
+            t.padding[0], t.padding[1], t.padding[2], t.padding[3]
+        ));
+    }
+    if t.cell_spacing != 0 {
+        tbl_header.push_str(&format!(",cell_spacing={}", t.cell_spacing));
+    }
     tbl_header.push(']');
     line(out, &tbl_header);
 

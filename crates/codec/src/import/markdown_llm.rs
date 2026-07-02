@@ -269,6 +269,16 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
             let attrs = parse_attrs(trimmed);
             let mut builder = LlmTableBuilder::default();
             builder.border_fill_id = attrs.get_int("border_fill").unwrap_or(0).max(0) as u16;
+            if let Some(margins) = attrs.0.get("in_margin") {
+                let vals: Vec<i16> = margins
+                    .split(':')
+                    .filter_map(|s| s.trim().parse().ok())
+                    .collect();
+                if vals.len() == 4 {
+                    builder.padding = [vals[0], vals[1], vals[2], vals[3]];
+                }
+            }
+            builder.cell_spacing = attrs.get_int("cell_spacing").unwrap_or(0) as i16;
             state = State::InTable(builder);
             continue;
         }
@@ -443,6 +453,20 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
             if section.sec_pr_xml.is_none() {
                 section.sec_pr_xml = frozen.sec_pr_xml.clone();
             }
+            // Table-level layout props (frame fill, inner padding,
+            // cell gap) from md files exported before those attrs
+            // were carried. Positional zip in document order — text
+            // edits don't add or remove tables, so a count match
+            // means the mapping is sound; on mismatch skip rather
+            // than misattribute.
+            let mut frozen_tables = Vec::new();
+            collect_tables(&frozen.paragraphs, &mut frozen_tables);
+            let mut typed_count = Vec::new();
+            collect_tables(&section.paragraphs, &mut typed_count);
+            if frozen_tables.len() == typed_count.len() {
+                let mut idx = 0usize;
+                transplant_table_props(&mut section.paragraphs, &frozen_tables, &mut idx);
+            }
             // Line-layout cache goes with it. `vertpos` is cumulative
             // within its list (body flow / table cell), so any edit
             // that changes line count invalidates every following
@@ -455,6 +479,54 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
     }
 
     Ok(doc)
+}
+
+/// Pre-order (document order) walk collecting every table, nested
+/// ones included. Used by the verify-gate to pair frozen tables with
+/// their typed counterparts positionally.
+fn collect_tables<'a>(paragraphs: &'a [Paragraph], out: &mut Vec<&'a TableControl>) {
+    for p in paragraphs {
+        for c in &p.controls {
+            if let ControlKind::Table(t) = &c.kind {
+                out.push(t);
+                for cell in &t.cells {
+                    collect_tables(&cell.paragraphs, out);
+                }
+            }
+        }
+    }
+}
+
+/// Same pre-order walk on the mutable side, copying table-level
+/// layout props from the positionally-matching frozen table wherever
+/// the typed value is still the "not carried" default. Explicit md
+/// attrs win — only defaults are filled in.
+fn transplant_table_props(
+    paragraphs: &mut [Paragraph],
+    frozen: &[&TableControl],
+    idx: &mut usize,
+) {
+    for p in paragraphs {
+        for c in &mut p.controls {
+            if let ControlKind::Table(t) = &mut c.kind {
+                if let Some(src) = frozen.get(*idx) {
+                    *idx += 1;
+                    if t.border_fill_id == 0 {
+                        t.border_fill_id = src.border_fill_id;
+                    }
+                    if t.padding == [0; 4] {
+                        t.padding = src.padding;
+                    }
+                    if t.cell_spacing == 0 {
+                        t.cell_spacing = src.cell_spacing;
+                    }
+                }
+                for cell in &mut t.cells {
+                    transplant_table_props(&mut cell.paragraphs, frozen, idx);
+                }
+            }
+        }
+    }
 }
 
 /// Recursively clear captured line segments (tables included) so the
@@ -543,6 +615,12 @@ struct LlmTableBuilder {
     /// Table-level `borderFillIDRef` from the `TABLE[border_fill=N]`
     /// attribute. 0 = no table-level border (cells provide their own).
     border_fill_id: u16,
+    /// Inner cell padding `[left, right, top, bottom]` from
+    /// `in_margin=l:r:t:b`; zeros mean "not carried" (writer falls
+    /// back to the Hancom default).
+    padding: [i16; 4],
+    /// Cell gap from `cell_spacing=N`.
+    cell_spacing: i16,
 }
 
 struct PendingCell {
@@ -627,6 +705,8 @@ impl LlmTableBuilder {
             row_cell_counts,
             cells: self.cells,
             border_fill_id: self.border_fill_id,
+            padding: self.padding,
+            cell_spacing: self.cell_spacing,
             ..TableControl::default()
         }
     }

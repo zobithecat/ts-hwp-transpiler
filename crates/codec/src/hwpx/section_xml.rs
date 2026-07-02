@@ -38,8 +38,13 @@ use quick_xml::Reader;
 /// Entry point. Parses the entire section XML and returns a populated
 /// `Section`. Page dimensions land in `section.properties` if the XML
 /// carries a `<hp:pagePr>` block (HWPX always does).
-/// Extract the verbatim `<hp:secPr …>…</hp:secPr>` fragment (or the
-/// self-closing form) from a section XML document. Plain byte scan —
+/// Extract the verbatim section prolog from a section XML document:
+/// the `<hp:secPr …>…</hp:secPr>` element (or its self-closing form)
+/// plus the immediately-following `<hp:ctrl><hp:colPr …/></hp:ctrl>`
+/// column definition when present. Hancom emits both back-to-back in
+/// the first paragraph's first run; losing the colPr changes the
+/// column width Hancom lays text into, which re-wraps every line and
+/// pushes full-width tables past the right margin. Plain byte scan —
 /// Hancom emits exactly one secPr per section and never nests it, so
 /// the first open/close pair is the whole element. Returns `None`
 /// when the input isn't UTF-8 or carries no secPr.
@@ -50,11 +55,19 @@ pub fn extract_sec_pr_fragment(xml: &[u8]) -> Option<String> {
     // element name: `/>` before any `>` means an empty element.
     let after = &text[start..];
     let gt = after.find('>')?;
-    if after[..gt].ends_with('/') {
-        return Some(after[..gt + 1].to_string());
+    let sec_pr_end = if after[..gt].ends_with('/') {
+        gt + 1
+    } else {
+        after.find("</hp:secPr>")? + "</hp:secPr>".len()
+    };
+    let mut end = sec_pr_end;
+    let rest = &after[sec_pr_end..];
+    if rest.starts_with("<hp:ctrl><hp:colPr") {
+        if let Some(ctrl_close) = rest.find("</hp:ctrl>") {
+            end = sec_pr_end + ctrl_close + "</hp:ctrl>".len();
+        }
     }
-    let close = after.find("</hp:secPr>")?;
-    Some(after[..close + "</hp:secPr>".len()].to_string())
+    Some(after[..end].to_string())
 }
 
 pub fn parse_section_xml(xml: &[u8]) -> Result<Section, IrError> {
@@ -334,6 +347,12 @@ fn parse_table<R: BufRead>(
     let mut table = TableControl {
         rows,
         cols,
+        // Table-level frame fill and cell gap. Dropping these to 0
+        // loses the outer border style and (worse) lets the writer
+        // fall back to a synthesised inner padding that re-wraps
+        // every cell's text on re-layout.
+        border_fill_id: u32_attr(start, "borderFillIDRef").unwrap_or(0) as u16,
+        cell_spacing: u32_attr(start, "cellSpacing").unwrap_or(0) as i16,
         ..TableControl::default()
     };
 
@@ -354,6 +373,16 @@ fn parse_table<R: BufRead>(
                 }
                 _ => skip_until_close(reader, e.name().as_ref())?,
             },
+            // `<hp:inMargin …/>` is an empty element directly under
+            // `<hp:tbl>` — the table's inner cell padding.
+            Event::Empty(e) if local_name(&e) == "inMargin" => {
+                table.padding = [
+                    u32_attr(&e, "left").unwrap_or(0) as i16,
+                    u32_attr(&e, "right").unwrap_or(0) as i16,
+                    u32_attr(&e, "top").unwrap_or(0) as i16,
+                    u32_attr(&e, "bottom").unwrap_or(0) as i16,
+                ];
+            }
             Event::Empty(_) | Event::Text(_) | Event::CData(_) => {}
             Event::Eof => {
                 return Err(IrError::Invalid(

@@ -74,22 +74,33 @@ pub fn write_section_xml(section: &Section, bin_data: &[BinaryEntry]) -> Result<
     // typed emitter simple and matches what Hancom-authored docs
     // produce when the document opens to a blank state.
     //
-    // When the source captured its original `<hp:secPr>` verbatim,
-    // splice that in instead of the A4 default: margins / gutter /
-    // header-footer heights change the body width, and a different
-    // body width re-wraps every line on re-layout.
-    if let Some(sec_pr) = section.sec_pr_xml.as_deref() {
-        out.push_str(r#"<hp:p id="0" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="0">"#);
-        out.push_str(sec_pr);
-        out.push_str(r#"</hp:run></hp:p>"#);
-    } else {
-        out.push_str(SEC_PR_PARAGRAPH);
+    // When the source captured its original prolog (`<hp:secPr>` +
+    // the `<hp:ctrl><hp:colPr/>` column definition) verbatim, fold
+    // it into the FIRST CONTENT paragraph's leading run — exactly
+    // where Hancom puts it. Margins / gutter / column definition
+    // decide the body width, and a different body width re-wraps
+    // every line on re-layout; a separate zero-text carrier
+    // paragraph would also add a phantom blank line at the top.
+    let prolog = section.sec_pr_xml.as_deref();
+    if prolog.is_none() || section.paragraphs.is_empty() {
+        // No captured prolog (HWP5 / from-scratch), or nothing to
+        // fold it into — fall back to the synthetic A4 carrier.
+        match prolog {
+            Some(sec_pr) => {
+                out.push_str(r#"<hp:p id="0" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="0">"#);
+                out.push_str(sec_pr);
+                out.push_str(r#"</hp:run></hp:p>"#);
+            }
+            None => out.push_str(SEC_PR_PARAGRAPH),
+        }
     }
+    let fold_into_first = prolog.is_some() && !section.paragraphs.is_empty();
 
     for (i, para) in section.paragraphs.iter().enumerate() {
         // Offset paragraph ids by 1 so the synthetic leading
         // paragraph keeps id=0 to itself.
-        emit_paragraph(para, &mut out, (i as u32) + 1, &bin_lookup);
+        let para_prolog = if fold_into_first && i == 0 { prolog } else { None };
+        emit_paragraph(para, &mut out, (i as u32) + 1, &bin_lookup, para_prolog);
     }
 
     out.push_str("</hs:sec>");
@@ -178,12 +189,25 @@ fn render_linesegarray(para: &Paragraph, out: &mut String) {
     out.push_str("</hp:linesegarray>");
 }
 
-fn emit_paragraph(para: &Paragraph, out: &mut String, id: u32, bin_lookup: &BinLookup) {
+fn emit_paragraph(
+    para: &Paragraph,
+    out: &mut String,
+    id: u32,
+    bin_lookup: &BinLookup,
+    prolog: Option<&str>,
+) {
     let para_pr = para.header.para_shape_id;
     let style = para.header.style_id;
     out.push_str(&format!(
         r#"<hp:p id="{id}" paraPrIDRef="{para_pr}" styleIDRef="{style}" pageBreak="0" columnBreak="0" merged="0">"#
     ));
+    // Section prolog (`<hp:secPr>` + colPr ctrl) rides in its own
+    // leading run of the first content paragraph — Hancom's layout.
+    if let Some(prolog) = prolog {
+        out.push_str(r#"<hp:run charPrIDRef="0">"#);
+        out.push_str(prolog);
+        out.push_str("</hp:run>");
+    }
 
     // HWPX paragraph bodies are structured as a sequence of `<hp:run>`s.
     // If the paragraph has char_shape_runs, split at each boundary so
@@ -318,11 +342,12 @@ fn emit_table(t: &TableControl, out: &mut String, bin_lookup: &BinLookup) {
             r#"<hp:tbl id="0" zOrder="0" numberingType="TABLE" "#,
             r#"textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" "#,
             r#"dropcapstyle="None" pageBreak="CELL" repeatHeader="1" "#,
-            r#"rowCnt="{rows}" colCnt="{cols}" cellSpacing="0" "#,
+            r#"rowCnt="{rows}" colCnt="{cols}" cellSpacing="{spacing}" "#,
             r#"borderFillIDRef="{border}" noAdjust="0">"#,
         ),
         rows = t.rows,
         cols = t.cols,
+        spacing = t.cell_spacing,
         border = t.border_fill_id,
     ));
 
@@ -358,10 +383,17 @@ fn emit_table(t: &TableControl, out: &mut String, bin_lookup: &BinLookup) {
             r#"allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" "#,
             r#"vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/>"#,
             r#"<hp:outMargin left="283" right="283" top="283" bottom="283"/>"#,
-            r#"<hp:inMargin left="141" right="141" top="141" bottom="141"/>"#,
+            r#"<hp:inMargin left="{il}" right="{ir}" top="{it}" bottom="{ib}"/>"#,
         ),
         w = table_w,
         h = table_h,
+        // Source inner padding when captured; the Hancom default
+        // (141 all round) only for from-scratch tables. A different
+        // padding changes each cell's text width → re-wrap.
+        il = if t.padding == [0; 4] { 141 } else { t.padding[0] },
+        ir = if t.padding == [0; 4] { 141 } else { t.padding[1] },
+        it = if t.padding == [0; 4] { 141 } else { t.padding[2] },
+        ib = if t.padding == [0; 4] { 141 } else { t.padding[3] },
     ));
 
     // Group cells by row-index into `<hp:tr>` wrappers so the output
@@ -401,7 +433,7 @@ fn emit_cell(cell: &TableCell, out: &mut String, bin_lookup: &BinLookup) {
         r#"<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="CENTER" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">"#,
     );
     for (i, p) in cell.paragraphs.iter().enumerate() {
-        emit_paragraph(p, out, i as u32, bin_lookup);
+        emit_paragraph(p, out, i as u32, bin_lookup, None);
     }
     out.push_str("</hp:subList>");
 
