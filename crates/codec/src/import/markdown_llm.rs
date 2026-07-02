@@ -403,7 +403,58 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
         }
     }
 
+    // Verify-gate: `SECTION_BYTES` freezes a section for byte-equal
+    // replay, but the body records above it may have been edited after
+    // export. Replaying the frozen bytes would silently discard those
+    // edits. Compare the frozen XML's text against the typed
+    // paragraphs' text (whitespace/object-marker insensitive); on
+    // mismatch drop the verbatim cache so the writer rebuilds the
+    // section from the edited paragraphs. HWP5 binary caches are left
+    // alone — no cheap text diff exists for them.
+    for section in &mut doc.sections {
+        let Some(bytes) = section.stream_bytes.as_deref() else {
+            continue;
+        };
+        if !crate::hwpx::writer::looks_like_xml(bytes) {
+            continue;
+        }
+        let Ok(frozen) = crate::hwpx::section_xml::parse_section_xml(bytes) else {
+            continue;
+        };
+        if comparable_text(&frozen.paragraphs) != comparable_text(&section.paragraphs) {
+            section.stream_bytes = None;
+        }
+    }
+
     Ok(doc)
+}
+
+/// Concatenated paragraph text (tables included, depth-first) with
+/// whitespace and U+FFFC object markers stripped — the equality key
+/// the verify-gate uses to decide whether the body records still
+/// match a frozen `SECTION_BYTES` cache. Whitespace-only edits are
+/// deliberately invisible to this key: false negatives there are
+/// harmless next to losing byte-equal replay on every roundtrip.
+fn comparable_text(paragraphs: &[Paragraph]) -> String {
+    fn walk(paragraphs: &[Paragraph], out: &mut String) {
+        for p in paragraphs {
+            out.extend(
+                p.text
+                    .chars()
+                    .filter(|c| !c.is_whitespace() && *c != '\u{FFFC}'),
+            );
+            for control in &p.controls {
+                if let ControlKind::Table(table) = &control.kind {
+                    for cell in &table.cells {
+                        walk(&cell.paragraphs, out);
+                    }
+                }
+            }
+        }
+    }
+    let mut out = String::new();
+    walk(paragraphs, &mut out);
+    out
 }
 
 enum State {

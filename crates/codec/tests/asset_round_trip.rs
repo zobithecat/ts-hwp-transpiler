@@ -158,7 +158,11 @@ fn section_bytes_round_trip_via_inline_footer() {
         p.text = "본문".into();
         p
     });
-    section.stream_bytes = Some(b"<hs:sec>verbatim payload</hs:sec>".to_vec());
+    // The frozen XML's text must match the typed body ("본문") —
+    // the import-side verify-gate compares the two and only keeps
+    // the verbatim cache when the body wasn't edited after export.
+    let frozen: &[u8] = b"<hs:sec><hp:p><hp:run><hp:t>\xEB\xB3\xB8\xEB\xAC\xB8</hp:t></hp:run></hp:p></hs:sec>";
+    section.stream_bytes = Some(frozen.to_vec());
     doc.sections.push(section);
 
     let opts = MdOptions {
@@ -169,7 +173,7 @@ fn section_bytes_round_trip_via_inline_footer() {
     };
     let md = to_llm_markdown(&doc, &opts);
     assert!(
-        md.contains("SECTION_BYTES[id=section-0,len=33]"),
+        md.contains(&format!("SECTION_BYTES[id=section-0,len={}]", frozen.len())),
         "SECTION_BYTES record emitted: {md}"
     );
 
@@ -181,9 +185,47 @@ fn section_bytes_round_trip_via_inline_footer() {
         .expect("section stream_bytes restored");
     assert_eq!(
         bytes.as_slice(),
-        b"<hs:sec>verbatim payload</hs:sec>",
+        frozen,
         "section bytes round-trip byte-equal"
     );
+}
+
+#[test]
+fn edited_body_invalidates_section_bytes_on_import() {
+    // Same transport as above, but the body md is edited between
+    // export and import. Replaying the frozen bytes would silently
+    // discard the edit, so the verify-gate must drop `stream_bytes`
+    // and let the writer rebuild the section from the edited
+    // paragraphs.
+    let mut doc = IrDocument::default();
+    let mut section = Section::default();
+    section.paragraphs.push({
+        let mut p = Paragraph::default();
+        p.text = "본문".into();
+        p
+    });
+    section.stream_bytes = Some(
+        b"<hs:sec><hp:p><hp:run><hp:t>\xEB\xB3\xB8\xEB\xAC\xB8</hp:t></hp:run></hp:p></hs:sec>"
+            .to_vec(),
+    );
+    doc.sections.push(section);
+
+    let opts = MdOptions {
+        llm: Some(LlmOptions::default()),
+        asset_mode: AssetMode::Inline,
+        asset_dpi: None,
+        ..MdOptions::default()
+    };
+    let md = to_llm_markdown(&doc, &opts);
+    let edited = md.replace("TEXT: 본문", "TEXT: 본문 (AI가 고침)");
+    assert_ne!(md, edited, "edit applied to the body record");
+
+    let reloaded = from_llm_markdown(&edited).expect("import");
+    assert!(
+        reloaded.sections[0].stream_bytes.is_none(),
+        "verify-gate drops stale frozen bytes so the edit survives"
+    );
+    assert_eq!(reloaded.sections[0].paragraphs[0].text, "본문 (AI가 고침)");
 }
 
 #[test]

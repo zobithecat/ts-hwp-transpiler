@@ -484,6 +484,24 @@ async function handleMarkdownFile(
     );
     return;
   }
+  // Reject the split-mode *body* uploaded on its own, too. Its
+  // DOC_INFO / ASSET / header.xml footers live in the `.assets.md`
+  // companion; importing without them synthesises a skeleton header,
+  // so every para_shape / char_shape / border_fill reference dangles
+  // and the document loses all table and paragraph formatting.
+  // Inline-mode exports carry the assets marker in the same file and
+  // pass this check.
+  if (
+    sourceOverride !== "md+assets" &&
+    detectMdKind(text) === "llm" &&
+    !text.includes("<!-- hwp-transpiler: assets -->")
+  ) {
+    setStatus(
+      "이 .md는 분리(split) 모드 본문입니다. 서식·이미지가 든 .assets.md 동반 파일과 두 파일을 동시에 업로드하세요 — 단독 변환 시 표·문단 서식이 전부 소실됩니다.",
+      true,
+    );
+    return;
+  }
   // Editor iframe has nothing to consume from a .md upload, so
   // clear any leftover buffer state from a previous HWP load.
   lastBuffer = null;

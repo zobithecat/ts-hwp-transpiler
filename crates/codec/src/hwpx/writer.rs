@@ -357,7 +357,7 @@ fn is_section_xml(name: &str) -> bool {
 /// (which never starts with `<`) takes the fresh-emit path. We
 /// don't validate the XML here; a malformed declaration is the
 /// reader's problem, not ours.
-fn looks_like_xml(bytes: &[u8]) -> bool {
+pub(crate) fn looks_like_xml(bytes: &[u8]) -> bool {
     let mut i = 0;
     if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
         i = 3;

@@ -1,6 +1,22 @@
 # 현재 위치
 
-**지금** (2026-07-01): **편집 워크플로 성립 — 두 모드 구분 확립.**
+**지금** (2026-07-02): **편집 안전장치 2종 — verify-gate + split 본문 단독 업로드 차단.**
+실전 편집 테스트(260701 문서, AI가 시험평가 표 대량 수정)에서 표 서식 전멸
+사고 발생. 원인은 코드가 아니라 워크플로 함정 2개: ① 웹앱에 split 본문
+`.md` 를 **단독 업로드** → companion 의 DOC_INFO/header.xml 없이 스켈레톤
+헤더 합성 → 모든 shape/borderFill 참조가 허공 → 서식 전멸(53KB hwpx).
+② 페어로 올렸어도 아카이브 모드 export 의 `SECTION_BYTES` 가 편집을 조용히
+무시했을 것. 수정: (a) **import verify-gate** (`import/markdown_llm.rs`) —
+`SECTION_BYTES` 의 동결 XML 텍스트와 typed 본문 텍스트를 비교(공백/U+FFFC
+무시), 다르면 `stream_bytes` drop → 편집이 항상 이김, 같으면 유지 →
+byte-equal 보존. 이제 **아카이브 모드로 export 한 md 를 편집해도 재조립이
+자동 발동**(--editable 몰라도 안전). HWP5 바이너리 캐시는 비교 불가라 제외.
+(b) **웹앱 차단** (`ts/src/main.ts`) — llm 스탬프 있는데 assets 마커 없는
+본문 단독 업로드를 명시적 에러로 거부. 검증: 18개 스위트 그린(byte-equal
+픽스처 포함 = 게이트 오탐 없음), 사용자 실파일 CLI 재변환 6.1M 정상
+(BinData 4, header 427KB verbatim, 편집 텍스트 반영, itemCnt 재계산).
+
+(2026-07-01): **편집 워크플로 성립 — 두 모드 구분 확립.**
 기본(아카이브) export 는 `SECTION_BYTES` 로 원본 섹션을 동결해 byte-equal
 왕복을 만드는데, 이 때문에 **body md 편집이 무시됨**(writer 가 동결
 바이트를 재생). 편집이 반영되려면 `--editable`(또는 `--edit-color`, 웹앱
