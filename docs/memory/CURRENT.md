@@ -1,6 +1,18 @@
 # 현재 위치
 
-**지금** (2026-07-02 오후): **재조립 렌더의 줄 겹침 해결 — linesegarray 생략 = 한컴 재배치.**
+**지금** (2026-07-02 저녁): **재조립 섹션의 페이지 지오메트리 verbatim 보존.**
+linesegarray 생략 검증 중 사용자 발견: 원래 한 줄이던 문단이 재배치 후
+줄바꿈 → 페이지 넘침. 문단 XML(paraPr/charPr)은 원본과 동일했고, 진범 후보는
+**합성 secPr** — 여백 3000(원본 5669), 머리말/꼬리말 850(원본 2834),
+gutterType LEFT_ONLY(원본 LEFT_RIGHT). 본문 폭이 다르면 재배치 시 모든 줄이
+다시 감긴다. 수정: `Section.sec_pr_xml`(verbatim `<hp:secPr>` 조각) 신설 —
+HWPX 파서가 바이트 스캔으로 캡처, writer 가 재조립 시 A4 합성 대신 splice,
+LLM export 가 `SECTION[sec_pr=<base64>]` 로 운반(편집 모드), verify-gate 가
+동결 바이트에서 회수(구버전 md 구제). 검증: 워크스페이스 그린, 실파일 재변환
+출력의 margin/gutterType 원본 일치. 남은 확인: 한컴에서 ※ 문단 줄바꿈 재현
+여부(docx/Word 비교는 폰트 치환 노이즈 있음 — hwpx 를 한컴에서 비교할 것).
+
+(2026-07-02 오후): **재조립 렌더의 줄 겹침 해결 — linesegarray 생략 = 한컴 재배치.**
 verify-gate 재조립 첫 실전 렌더에서 전 문단 줄 겹침 발생. 원인: HWPX 리더가
 `<hp:linesegarray>` 를 IR 로 파싱하지 않아(동결 재생 경로라 그동안 불필요)
 재조립 시 1,879개 문단 전부 vertpos=0 DEFAULT_LINESEG 폴백 → 한컴이 그대로
