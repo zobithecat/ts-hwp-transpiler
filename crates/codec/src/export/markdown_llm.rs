@@ -251,13 +251,15 @@ fn emit_paragraph(
 ) {
     let text = super::markdown::clean_text(&para.text);
     let has_text = !text.is_empty();
-    let has_structural = para.controls.iter().any(|c| {
-        matches!(
-            &c.kind,
-            ControlKind::Table(_) | ControlKind::Picture(_) | ControlKind::Equation(_)
-        )
-    });
-    if has_text || !has_structural {
+    // Every paragraph gets a PARAGRAPH record — text paragraphs (with
+    // a TEXT line), blank paragraphs (vertical rhythm, no TEXT line),
+    // and structural anchors (table/figure carriers, no TEXT line;
+    // the importer folds the record's shape ids into the wrapper it
+    // builds for the following TABLE/FIGURE record). Anchor shape ids
+    // matter: an anchor's paraShape decides the spacing around an
+    // inline (treatAsChar) table, and losing it to slot 0 changes the
+    // page's total height.
+    {
         // Stamp the heading level on the PARAGRAPH record so the LLM
         // importer can re-classify on the symmetric direction. The
         // shared `super::markdown::heading_level` lookup keys off

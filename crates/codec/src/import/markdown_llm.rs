@@ -284,6 +284,20 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
                 // owning CELL block. Push; END TABLE pops and attaches.
                 stack.push(builder);
             } else {
+                // A PARAGRAPH record immediately before TABLE is the
+                // table's anchor: its shape ids describe the wrapper
+                // paragraph the table lives in, not a blank line —
+                // consume it instead of materialising an empty
+                // paragraph via flush.
+                if let State::ExpectingParagraphText {
+                    para_shape_id,
+                    char_shape_id,
+                    page_break,
+                    ..
+                } = std::mem::replace(&mut state, State::Idle)
+                {
+                    builder.anchor = Some((para_shape_id, char_shape_id, page_break));
+                }
                 flush_state(&mut state, &mut current);
                 state = State::InTable(vec![builder]);
             }
@@ -293,13 +307,9 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
         if trimmed.starts_with("END TABLE") {
             if let State::InTable(stack) = &mut state {
                 if let Some(builder) = stack.pop() {
+                    let anchor = builder.anchor;
                     let table = builder.finish();
-                    let mut wrapper = Paragraph::default();
-                    wrapper.text = "\u{FFFC}".into();
-                    wrapper.controls.push(Control {
-                        kind: ControlKind::Table(table),
-                        caption_text: None,
-                    });
+                    let wrapper = table_wrapper(table, anchor);
                     if let Some(parent) = stack.last_mut() {
                         parent.attach_paragraph(wrapper);
                     } else {
@@ -312,8 +322,22 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
         }
 
         if trimmed.starts_with("FIGURE[") {
-            // Only flush paragraph state — a figure inside a CELL
-            // block must not terminate the table being built.
+            // A preceding PARAGRAPH record is this figure's anchor —
+            // consume its shape ids for the wrapper instead of
+            // materialising an empty paragraph. A figure inside a
+            // CELL block must not terminate the table being built.
+            let mut fig_anchor: Option<(u32, u32, bool)> = None;
+            if matches!(state, State::ExpectingParagraphText { .. }) {
+                if let State::ExpectingParagraphText {
+                    para_shape_id,
+                    char_shape_id,
+                    page_break,
+                    ..
+                } = std::mem::replace(&mut state, State::Idle)
+                {
+                    fig_anchor = Some((para_shape_id, char_shape_id, page_break));
+                }
+            }
             if !matches!(state, State::InTable(_)) {
                 flush_state(&mut state, &mut current);
             }
@@ -336,6 +360,16 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
                 }),
                 caption_text: None,
             });
+            if let Some((ps, cs, pb)) = fig_anchor {
+                wrapper.header.para_shape_id = ps as u16;
+                wrapper.header.page_break_before = pb;
+                if cs != 0 {
+                    wrapper.char_shape_runs.push(CharShapeRun {
+                        start: 0,
+                        char_shape_id: cs,
+                    });
+                }
+            }
             if let State::InTable(stack) = &mut state {
                 if let Some(builder) = stack.last_mut() {
                     builder.attach_paragraph(wrapper);
@@ -520,13 +554,17 @@ pub fn from_llm_markdown(src: &str) -> Result<IrDocument, IrError> {
 }
 
 /// Pre-order (document order) walk collecting every table, nested
-/// ones included. Used by the verify-gate to pair frozen tables with
-/// their typed counterparts positionally.
-fn collect_tables<'a>(paragraphs: &'a [Paragraph], out: &mut Vec<&'a TableControl>) {
+/// ones included, along with the paragraph that anchors it. Used by
+/// the verify-gate to pair frozen tables with their typed
+/// counterparts positionally.
+fn collect_tables<'a>(
+    paragraphs: &'a [Paragraph],
+    out: &mut Vec<(&'a Paragraph, &'a TableControl)>,
+) {
     for p in paragraphs {
         for c in &p.controls {
             if let ControlKind::Table(t) = &c.kind {
-                out.push(t);
+                out.push((p, t));
                 for cell in &t.cells {
                     collect_tables(&cell.paragraphs, out);
                 }
@@ -537,18 +575,23 @@ fn collect_tables<'a>(paragraphs: &'a [Paragraph], out: &mut Vec<&'a TableContro
 
 /// Same pre-order walk on the mutable side, copying table-level
 /// layout props from the positionally-matching frozen table wherever
-/// the typed value is still the "not carried" default. Explicit md
-/// attrs win — only defaults are filled in.
+/// the typed value is still the "not carried" default, and the
+/// anchor paragraph's shape ids onto the typed wrapper — an inline
+/// (treatAsChar) table's spacing comes from its anchor's paraShape,
+/// so losing it to slot 0 changes the page's total height. Explicit
+/// md attrs win — only defaults are filled in.
 fn transplant_table_props(
     paragraphs: &mut [Paragraph],
-    frozen: &[&TableControl],
+    frozen: &[(&Paragraph, &TableControl)],
     idx: &mut usize,
 ) {
     for p in paragraphs {
+        let mut frozen_anchor: Option<&Paragraph> = None;
         for c in &mut p.controls {
             if let ControlKind::Table(t) = &mut c.kind {
-                if let Some(src) = frozen.get(*idx) {
+                if let Some((owner, src)) = frozen.get(*idx) {
                     *idx += 1;
+                    frozen_anchor = Some(owner);
                     if t.border_fill_id == 0 {
                         t.border_fill_id = src.border_fill_id;
                     }
@@ -564,6 +607,13 @@ fn transplant_table_props(
                 }
             }
         }
+        if let Some(owner) = frozen_anchor {
+            // Shape bits only — page breaks are transplanted by the
+            // text-anchored alignment, which self-corrects around
+            // edits; the positional table zip can slip by one in
+            // deeply nested regions and would misplace a break.
+            copy_shape_bits(owner, p);
+        }
     }
 }
 
@@ -578,16 +628,41 @@ fn is_blank(p: &Paragraph) -> bool {
             .all(|c| c.is_whitespace() || c == '\u{FFFC}')
 }
 
-/// Two-pointer alignment of frozen (source) paragraphs against typed
-/// (md-imported) paragraphs. Re-inserts blank paragraphs the md
-/// didn't carry, and copies per-paragraph header bits (forced page
-/// break, style id) onto each aligned pair. Text edits shift the
-/// pairing only locally — an added/removed paragraph desyncs blanks
-/// near the edit, never corrupts content. Recurses into positionally
+fn strip_visible(s: &str) -> String {
+    s.chars()
+        .filter(|c| !c.is_whitespace() && *c != '\u{FFFC}')
+        .collect()
+}
+
+/// Do a frozen and a typed paragraph carry the same visible text?
+/// Old exports flattened `<hp:lineBreak/>` paragraphs to their first
+/// line — accept that prefix as equal so those still anchor.
+fn same_text(f: &Paragraph, t: &Paragraph) -> bool {
+    let fs = strip_visible(&f.text);
+    let ts = strip_visible(&t.text);
+    if fs == ts {
+        return true;
+    }
+    !ts.is_empty()
+        && f.text.contains('\n')
+        && strip_visible(f.text.split('\n').next().unwrap_or("")) == ts
+}
+
+/// Anchored alignment of frozen (source) paragraphs against typed
+/// (md-imported) paragraphs. Pairs on matching visible text and
+/// resyncs across local insertions/deletions with a bounded
+/// lookahead, so an AI edit desyncs at most its own neighbourhood —
+/// a purely positional walk used to smear page breaks and blank
+/// lines onto the wrong paragraphs for the entire rest of the
+/// document. Re-inserts blank paragraphs the md didn't carry and
+/// copies per-paragraph header bits onto each pair; recurses into
 /// paired tables cell-by-cell.
 fn align_paragraphs(frozen: &[Paragraph], typed: &mut Vec<Paragraph>) {
+    const WINDOW: usize = 5;
+    let mut i = 0usize;
     let mut j = 0usize;
-    for f in frozen {
+    while i < frozen.len() {
+        let f = &frozen[i];
         if is_blank(f) {
             if typed.get(j).is_some_and(is_blank) {
                 copy_header_bits(f, &mut typed[j]);
@@ -598,40 +673,91 @@ fn align_paragraphs(frozen: &[Paragraph], typed: &mut Vec<Paragraph>) {
                 clone.line_segments.clear();
                 typed.insert(j, clone);
             }
+            i += 1;
             j += 1;
-        } else {
-            let Some(t) = typed.get_mut(j) else { break };
-            copy_header_bits(f, t);
-            // Restore text lost after `<hp:lineBreak/>` in older
-            // exports: their md carried only the first line, so the
-            // tail never reached the editing AI. Restore only when
-            // the typed text is exactly the frozen text's first line
-            // (whitespace-insensitive) — an edited prefix fails the
-            // match and the edit wins.
-            if f.text.contains('\n') {
-                let strip = |s: &str| -> String {
-                    s.chars()
-                        .filter(|c| !c.is_whitespace() && *c != '\u{FFFC}')
-                        .collect()
-                };
-                let first_line = f.text.split('\n').next().unwrap_or("");
-                if strip(&t.text) == strip(first_line) {
-                    t.text = f.text.clone();
-                    t.char_shape_runs = f.char_shape_runs.clone();
+            continue;
+        }
+        if j >= typed.len() {
+            break;
+        }
+        if same_text(f, &typed[j]) {
+            pair_paragraphs(f, &mut typed[j]);
+            i += 1;
+            j += 1;
+            continue;
+        }
+        // Mismatch — try to resync within a small window before
+        // declaring this an in-place edit.
+        let t_skip = (1..=WINDOW).find(|k| {
+            typed
+                .get(j + k)
+                .is_some_and(|t| !is_blank(t) && same_text(f, t))
+        });
+        let f_skip = (1..=WINDOW).find(|k| {
+            frozen
+                .get(i + k)
+                .is_some_and(|fk| !is_blank(fk) && same_text(fk, &typed[j]))
+        });
+        match (t_skip, f_skip) {
+            // Typed inserted paragraphs (AI additions) — keep them,
+            // don't scatter frozen blanks into the inserted run.
+            (Some(tk), None) => j += tk,
+            // Frozen paragraphs deleted/replaced by the edit.
+            (None, Some(fk)) => i += fk,
+            (Some(tk), Some(fk)) => {
+                if tk <= fk {
+                    j += tk;
+                } else {
+                    i += fk;
                 }
             }
-            align_tables(f, t);
-            j += 1;
+            // In-place edit — still the same paragraph slot.
+            (None, None) => {
+                pair_paragraphs(f, &mut typed[j]);
+                i += 1;
+                j += 1;
+            }
         }
     }
+}
+
+/// Copy everything the md didn't carry from a frozen paragraph onto
+/// its aligned typed counterpart.
+fn pair_paragraphs(f: &Paragraph, t: &mut Paragraph) {
+    copy_header_bits(f, t);
+    // Restore text lost after `<hp:lineBreak/>` in older exports:
+    // their md carried only the first line, so the tail never
+    // reached the editing AI. Restore only when the typed text is
+    // exactly the frozen text's first line (whitespace-insensitive)
+    // — an edited prefix fails the match and the edit wins.
+    if f.text.contains('\n') {
+        let first_line = f.text.split('\n').next().unwrap_or("");
+        if strip_visible(&t.text) == strip_visible(first_line) {
+            t.text = f.text.clone();
+            t.char_shape_runs = f.char_shape_runs.clone();
+        }
+    }
+    align_tables(f, t);
 }
 
 fn copy_header_bits(f: &Paragraph, t: &mut Paragraph) {
     if f.header.page_break_before {
         t.header.page_break_before = true;
     }
+    copy_shape_bits(f, t);
+}
+
+fn copy_shape_bits(f: &Paragraph, t: &mut Paragraph) {
     if t.header.style_id == 0 {
         t.header.style_id = f.header.style_id;
+    }
+    // Slot 0 on the typed side means "not carried" (older md, or a
+    // wrapper the importer synthesised) — restore the source shape.
+    if t.header.para_shape_id == 0 && f.header.para_shape_id != 0 {
+        t.header.para_shape_id = f.header.para_shape_id;
+    }
+    if t.char_shape_runs.is_empty() && !f.char_shape_runs.is_empty() {
+        t.char_shape_runs = f.char_shape_runs.clone();
     }
 }
 
@@ -767,6 +893,12 @@ struct LlmTableBuilder {
     padding: [i16; 4],
     /// Cell gap from `cell_spacing=N`.
     cell_spacing: i16,
+    /// Anchor-paragraph properties consumed from the PARAGRAPH record
+    /// immediately preceding this table's `TABLE[` record:
+    /// `(para_shape, char_shape, page_break)`. Applied to the wrapper
+    /// paragraph at END TABLE — the anchor's paraShape decides the
+    /// spacing around an inline table.
+    anchor: Option<(u32, u32, bool)>,
 }
 
 struct PendingCell {
@@ -933,13 +1065,9 @@ fn flush_state(state: &mut State, section: &mut Section) {
             // builder stack innermost-first so nested cells aren't
             // lost, then land the outermost table in the section.
             while let Some(builder) = stack.pop() {
+                let anchor = builder.anchor;
                 let table = builder.finish();
-                let mut wrapper = Paragraph::default();
-                wrapper.text = "\u{FFFC}".into();
-                wrapper.controls.push(Control {
-                    kind: ControlKind::Table(table),
-                    caption_text: None,
-                });
+                let wrapper = table_wrapper(table, anchor);
                 if let Some(parent) = stack.last_mut() {
                     parent.attach_paragraph(wrapper);
                 } else {
@@ -948,6 +1076,29 @@ fn flush_state(state: &mut State, section: &mut Section) {
             }
         }
     }
+}
+
+/// Build the anchor paragraph a finished table lives in, applying
+/// any shape ids consumed from the PARAGRAPH record that preceded
+/// the table.
+fn table_wrapper(table: TableControl, anchor: Option<(u32, u32, bool)>) -> Paragraph {
+    let mut wrapper = Paragraph::default();
+    wrapper.text = "\u{FFFC}".into();
+    wrapper.controls.push(Control {
+        kind: ControlKind::Table(table),
+        caption_text: None,
+    });
+    if let Some((ps, cs, pb)) = anchor {
+        wrapper.header.para_shape_id = ps as u16;
+        wrapper.header.page_break_before = pb;
+        if cs != 0 {
+            wrapper.char_shape_runs.push(CharShapeRun {
+                start: 0,
+                char_shape_id: cs,
+            });
+        }
+    }
+    wrapper
 }
 
 /// Pull the comma-separated `key=value` attribute set out of a
