@@ -1079,8 +1079,15 @@ fn emit_new_char_pr(id: u32, shape: &CharShape, out: &mut Vec<u8>) {
     out.push(b'>');
 
     emit_script_array(b"fontRef", &shape.font_ids, out);
-    emit_script_array(b"ratio", &shape.ratios, out);
-    emit_script_array(b"relSz", &shape.rel_sizes, out);
+    // ratio (장평) / relSz (상대크기) are percentages; 0 isn't a legal
+    // OWPML value — it leaks in from `CharShape::default()`-built
+    // shapes. HWP 2014 takes 0 literally and renders every glyph at
+    // 0% size (the document collapses into a single dot), so
+    // normalise to the neutral 100% at emit.
+    let ratios = shape.ratios.map(|v| if v == 0 { 100 } else { v });
+    let rel_sizes = shape.rel_sizes.map(|v| if v == 0 { 100 } else { v });
+    emit_script_array(b"ratio", &ratios, out);
+    emit_script_array(b"relSz", &rel_sizes, out);
     emit_script_array(b"spacing", &shape.char_spacings, out);
     emit_script_array(b"offset", &shape.char_offsets, out);
 

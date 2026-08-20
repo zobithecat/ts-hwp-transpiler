@@ -41,14 +41,23 @@ pub fn synthesise_heading_para_shapes() -> Vec<ParaShape> {
 /// `[body 10pt, H1 20pt-bold, …, H6 11pt-bold]` so HWPX viewers
 /// render headings visibly distinct from body. Sizes are in 1/100 pt.
 pub fn synthesise_heading_char_shapes() -> Vec<CharShape> {
+    // 장평(ratios) / 상대크기(rel_sizes) are percentages — the struct
+    // default of 0 means "0% wide / 0% tall" to strict viewers (HWP
+    // 2014 collapses the whole document into a dot), so every
+    // synthesised shape carries the 100% neutral value explicitly.
+    let base = CharShape {
+        ratios: [100; 7],
+        rel_sizes: [100; 7],
+        ..CharShape::default()
+    };
     let mut shapes = vec![{
-        let mut cs = CharShape::default();
+        let mut cs = base.clone();
         cs.base_size = 1000;
         cs
     }];
     let sizes = [2000, 1700, 1500, 1300, 1200, 1100];
     for size in sizes {
-        let mut cs = CharShape::default();
+        let mut cs = base.clone();
         cs.base_size = size;
         cs.attr = 0x0000_0002; // bold
         shapes.push(cs);
@@ -108,6 +117,16 @@ mod tests {
         assert!(shapes[6].base_size > shapes[0].base_size);
         for s in shapes.iter().skip(1) {
             assert!(s.bold(), "headings should be bold");
+        }
+    }
+
+    #[test]
+    fn char_shapes_carry_neutral_percent_ratios() {
+        // ratio/relSz 0 renders as 0%-sized glyphs in HWP 2014 — every
+        // synthesised shape must ship the 100% neutral explicitly.
+        for (i, s) in synthesise_heading_char_shapes().iter().enumerate() {
+            assert_eq!(s.ratios, [100; 7], "shape {i} ratios");
+            assert_eq!(s.rel_sizes, [100; 7], "shape {i} rel_sizes");
         }
     }
 
