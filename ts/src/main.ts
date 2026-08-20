@@ -489,18 +489,29 @@ async function handleMarkdownFile(
   // companion; importing without them synthesises a skeleton header,
   // so every para_shape / char_shape / border_fill reference dangles
   // and the document loses all table and paragraph formatting.
-  // Inline-mode exports carry the assets marker in the same file and
-  // pass this check.
-  if (
-    sourceOverride !== "md+assets" &&
-    detectMdKind(text) === "llm" &&
-    !text.includes("<!-- hwp-transpiler: assets -->")
-  ) {
-    setStatus(
-      "이 .md는 분리(split) 모드 본문입니다. 서식·이미지가 든 .assets.md 동반 파일과 두 파일을 동시에 업로드하세요 — 단독 변환 시 표·문단 서식이 전부 소실됩니다.",
-      true,
+  //
+  // New exports stamp their asset mode (`assets=none` / `assets=split`)
+  // right under the format header, so only a stamped split body hard-
+  // blocks. A text-only (`assets=none`) export imports silently — the
+  // user chose that trade-off at export time. Legacy exports carry no
+  // stamp and a text-only body is byte-identical to a split body, so
+  // those import with a warning instead of a false-positive block.
+  // Inline-mode exports carry the assets footer in the same file.
+  let missingAssetFooterWarning = false;
+  if (sourceOverride !== "md+assets" && detectMdKind(text) === "llm") {
+    const stampedSplit = text.includes(
+      "<!-- hwp-transpiler: assets=split -->",
     );
-    return;
+    const stampedNone = text.includes("<!-- hwp-transpiler: assets=none -->");
+    const hasInlineFooter = text.includes("<!-- hwp-transpiler: assets -->");
+    if (stampedSplit) {
+      setStatus(
+        "이 .md는 분리(split) 모드 본문입니다. 서식·이미지가 든 .assets.md 동반 파일과 두 파일을 동시에 업로드하세요 — 단독 변환 시 표·문단 서식이 전부 소실됩니다.",
+        true,
+      );
+      return;
+    }
+    missingAssetFooterWarning = !stampedNone && !hasInlineFooter;
   }
   // Editor iframe has nothing to consume from a .md upload, so
   // clear any leftover buffer state from a previous HWP load.
@@ -541,7 +552,11 @@ async function handleMarkdownFile(
   pdfBtn.disabled = false;
   htmlBtn.disabled = false;
   const ms = Math.round(performance.now() - started);
-  setStatus(`loaded .md in ${ms}ms · ${text.length.toLocaleString()} chars`);
+  setStatus(
+    missingAssetFooterWarning
+      ? `loaded .md in ${ms}ms · ${text.length.toLocaleString()} chars — ⚠️ 서식 푸터가 없는 .md입니다. split 모드 본문이라면 .assets.md와 함께 다시 업로드하세요. 텍스트만 내보내기라면 정상이며, 표·문단 서식은 기본값으로 재구성됩니다.`
+      : `loaded .md in ${ms}ms · ${text.length.toLocaleString()} chars`,
+  );
   renderFileChip({
     kind: sourceOverride ?? "md",
     name: file.name,

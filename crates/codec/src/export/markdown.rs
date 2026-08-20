@@ -199,6 +199,16 @@ pub const FORMAT_HEADER_HUMAN: &str = "<!-- hwp-transpiler: format=human -->";
 /// [`FORMAT_HEADER_HUMAN`].
 pub const FORMAT_HEADER_LLM: &str = "<!-- hwp-transpiler: format=llm -->";
 
+/// Asset-mode stamps for LLM exports. Without them a `--no-assets`
+/// body and a split-mode body are byte-identical (neither carries a
+/// footer), so an importer UI can't tell "text-only export, convert
+/// as-is" apart from "split body missing its `.assets.md` companion".
+/// Inline mode needs no stamp — its footer marker self-identifies.
+pub const ASSET_STAMP_NONE: &str = "<!-- hwp-transpiler: assets=none -->";
+/// See [`ASSET_STAMP_NONE`]. Present when a `.assets.md` companion
+/// was emitted alongside this body and is required for round-trip.
+pub const ASSET_STAMP_SPLIT: &str = "<!-- hwp-transpiler: assets=split -->";
+
 pub fn to_markdown_with(doc: &IrDocument, opts: &MdOptions) -> String {
     if opts.llm.is_some() {
         return super::markdown_llm::to_llm_markdown(doc, opts);

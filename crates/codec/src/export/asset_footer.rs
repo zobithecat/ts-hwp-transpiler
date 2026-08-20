@@ -38,6 +38,20 @@ pub const FORMAT_HEADER_ASSETS: &str = "<!-- hwp-transpiler: assets -->";
 /// same "binary metadata, drop into a separate companion in split
 /// mode so it doesn't bloat the LLM context" property — keeping
 /// them in one place means a single parser handles both.
+/// Cheap mirror of `render_assets_block`'s empty-return check, so
+/// the LLM emitter can pick the right asset-mode stamp without
+/// paying for the base64 encode. `true` means a Split export would
+/// yield no companion file at all.
+pub fn assets_block_is_empty(doc: &IrDocument) -> bool {
+    doc.bin_data.is_empty()
+        && !doc
+            .sections
+            .iter()
+            .any(|s| s.stream_bytes.as_ref().map(|b| !b.is_empty()).unwrap_or(false))
+        && !doc.unknown_streams.iter().any(|(_, b)| !b.is_empty())
+        && !doc_info_has_content(&doc.doc_info)
+}
+
 pub fn render_assets_block(doc: &IrDocument, opts: &MdOptions) -> String {
     let encoded = encode_for_md(
         &doc.bin_data,

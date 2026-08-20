@@ -86,6 +86,27 @@ pub fn to_llm_markdown(doc: &IrDocument, opts: &MdOptions) -> String {
     let mut out = String::new();
     out.push_str(super::markdown::FORMAT_HEADER_LLM);
     out.push('\n');
+    // Stamp the asset mode so a re-importing UI can tell a text-only
+    // export apart from a split body that's missing its companion —
+    // the two are otherwise byte-identical. Inline mode skips the
+    // stamp (its in-file footer marker already identifies it), and a
+    // Split export whose companion would be empty stamps `none` so
+    // nobody demands a file that was never written.
+    match opts.asset_mode {
+        super::markdown::AssetMode::Inline => {}
+        super::markdown::AssetMode::None => {
+            out.push_str(super::markdown::ASSET_STAMP_NONE);
+            out.push('\n');
+        }
+        super::markdown::AssetMode::Split => {
+            out.push_str(if super::asset_footer::assets_block_is_empty(doc) {
+                super::markdown::ASSET_STAMP_NONE
+            } else {
+                super::markdown::ASSET_STAMP_SPLIT
+            });
+            out.push('\n');
+        }
+    }
     if let Some((id, hex)) = &llm.edit_color {
         // Editing agents read this to know which CharShape id renders
         // the "edited" colour; see docs/llm-edit-prompt.md.
@@ -707,6 +728,55 @@ mod tests {
         assert!(md.contains("SECTION[id=sec-0]"), "got: {md}");
         assert!(md.contains("PARAGRAPH[id=par-s0-p0"), "got: {md}");
         assert!(md.contains("TEXT: hello"), "got: {md}");
+    }
+
+    #[test]
+    fn asset_mode_stamp_distinguishes_none_from_split() {
+        use crate::export::markdown::{ASSET_STAMP_NONE, ASSET_STAMP_SPLIT, AssetMode};
+        let mut doc = IrDocument::default();
+        doc.sections.push(Section {
+            paragraphs: vec![para_text("hello")],
+            ..Section::default()
+        });
+        // Text-only export stamps assets=none.
+        let md = to_llm_markdown(&doc, &opts_llm());
+        assert!(md.contains(ASSET_STAMP_NONE), "got: {md}");
+        // Split export with nothing to split out also stamps none —
+        // no companion file exists to demand.
+        let split = MdOptions {
+            asset_mode: AssetMode::Split,
+            ..opts_llm()
+        };
+        let md = to_llm_markdown(&doc, &split);
+        assert!(md.contains(ASSET_STAMP_NONE), "got: {md}");
+        // Split export whose companion carries data stamps split.
+        doc.unknown_streams
+            .insert("settings.xml".into(), vec![1, 2, 3]);
+        let md = to_llm_markdown(&doc, &split);
+        assert!(md.contains(ASSET_STAMP_SPLIT), "got: {md}");
+        // Inline export has no stamp — the in-file footer marker
+        // already identifies it.
+        let inline = MdOptions {
+            asset_mode: AssetMode::Inline,
+            ..opts_llm()
+        };
+        let md = to_llm_markdown(&doc, &inline);
+        assert!(!md.contains("assets=none"), "got: {md}");
+        assert!(!md.contains("assets=split"), "got: {md}");
+    }
+
+    #[test]
+    fn asset_mode_stamp_is_ignored_on_import() {
+        let mut doc = IrDocument::default();
+        doc.sections.push(Section {
+            paragraphs: vec![para_text("hello")],
+            ..Section::default()
+        });
+        let md = to_llm_markdown(&doc, &opts_llm());
+        let back = crate::import::markdown::from_markdown(&md).expect("import");
+        assert_eq!(back.sections.len(), 1);
+        assert_eq!(back.sections[0].paragraphs.len(), 1);
+        assert_eq!(back.sections[0].paragraphs[0].text, "hello");
     }
 
     #[test]
