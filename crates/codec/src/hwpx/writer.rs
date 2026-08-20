@@ -32,7 +32,7 @@ use hwp_transpiler_core::ir::{
 };
 
 use super::header_rewriter::rewrite_header_xml;
-use super::section_writer::write_section_xml;
+use super::section_writer::{write_section_xml, ShapeRefBounds};
 use super::zip_writer::HwpxArchiveWriter;
 
 const MIMETYPE: &str = "application/hwp+zip";
@@ -54,6 +54,7 @@ impl Writer for HwpxWriter {
         // notice. Mutating helpers in `Section` clear the cache so
         // a fresh emit happens whenever the IR shape actually
         // changed.
+        let bounds = ShapeRefBounds::from_doc(doc);
         for (i, section) in doc.sections.iter().enumerate() {
             let bytes = match &section.stream_bytes {
                 // Verbatim only when the cache actually IS HWPX XML —
@@ -64,7 +65,7 @@ impl Writer for HwpxWriter {
                 // "tag not closed". Sniff the leading bytes; fall
                 // back to the typed XML emitter for non-XML payloads.
                 Some(cached) if looks_like_xml(cached) => cached.clone(),
-                _ => write_section_xml(section, &doc.bin_data)?,
+                _ => write_section_xml(section, &doc.bin_data, &bounds)?,
             };
             zip.add_part(&format!("Contents/section{i}.xml"), &bytes)?;
         }

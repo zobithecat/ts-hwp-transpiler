@@ -29,8 +29,8 @@
 use std::collections::HashMap;
 
 use hwp_transpiler_core::ir::{
-    BinaryEntry, CharShapeRun, ControlKind, IrError, Paragraph, PictureControl, Section,
-    TableCell, TableControl,
+    BinaryEntry, CharShapeRun, ControlKind, IrDocument, IrError, Paragraph, PictureControl,
+    Section, TableCell, TableControl,
 };
 
 /// Bin-id → manifest item stem lookup. Built once at write start
@@ -52,7 +52,114 @@ const NS_DECL: &str = concat!(
     r#"xmlns:hc="http://www.hancom.co.kr/hwpml/2011/core""#,
 );
 
-pub fn write_section_xml(section: &Section, bin_data: &[BinaryEntry]) -> Result<Vec<u8>, IrError> {
+/// Valid id ranges for the header collections the written archive
+/// will carry. A `charPrIDRef` / `paraPrIDRef` / `borderFillIDRef`
+/// at or beyond its bound references a header entry that won't
+/// exist in the output — HWP 2014's parser breaks layout on such
+/// dangling refs (observed: footer-less Markdown re-imports carry
+/// the *original* document's shape ids, which dangle against the
+/// 7-slot synthesised header). The emitter clamps them to a safe
+/// fallback at write time; in-range ids pass through untouched.
+pub struct ShapeRefBounds {
+    pub char_shapes: usize,
+    pub para_shapes: usize,
+    pub styles: usize,
+    pub border_fills: usize,
+}
+
+impl ShapeRefBounds {
+    /// No clamping — for callers (tests) that emit standalone
+    /// sections without a header to validate against.
+    pub fn unbounded() -> Self {
+        Self {
+            char_shapes: usize::MAX,
+            para_shapes: usize::MAX,
+            styles: usize::MAX,
+            border_fills: usize::MAX,
+        }
+    }
+
+    /// Bounds for a real write: the DocInfo tables are what the
+    /// header rewriter splices into the output header. An empty
+    /// table means the header keeps its source entries untouched —
+    /// unknown count, so don't clamp — except `border_fills`, which
+    /// Markdown imports never populate: there the bundled skeleton's
+    /// two entries are the only ones the output will have.
+    pub fn from_doc(doc: &IrDocument) -> Self {
+        let or_unbounded = |n: usize| if n == 0 { usize::MAX } else { n };
+        Self {
+            char_shapes: or_unbounded(doc.doc_info.char_shapes.len()),
+            para_shapes: or_unbounded(doc.doc_info.para_shapes.len()),
+            styles: or_unbounded(doc.doc_info.styles.len()),
+            border_fills: if doc.doc_info.border_fills.is_empty() {
+                super::skeleton::SKELETON_BORDER_FILL_COUNT
+            } else {
+                doc.doc_info.border_fills.len()
+            },
+        }
+    }
+
+    fn clamp_paragraph(&self, p: &mut Paragraph) {
+        if (p.header.para_shape_id as usize) >= self.para_shapes {
+            p.header.para_shape_id = 0;
+        }
+        if (p.header.style_id as usize) >= self.styles {
+            p.header.style_id = 0;
+        }
+        for run in &mut p.char_shape_runs {
+            if (run.char_shape_id as usize) >= self.char_shapes {
+                run.char_shape_id = 0;
+            }
+        }
+        for ctrl in &mut p.controls {
+            if let ControlKind::Table(t) = &mut ctrl.kind {
+                self.clamp_table(t);
+            }
+        }
+    }
+
+    fn clamp_table(&self, t: &mut TableControl) {
+        // Dangling table/cell fills fall back to the solid entry
+        // (id 1 in the skeleton) so tables keep visible grid lines —
+        // clamping to the borderless 0 would erase every table edge.
+        let fallback: u16 = if self.border_fills >= 2 { 1 } else { 0 };
+        if (t.border_fill_id as usize) >= self.border_fills {
+            t.border_fill_id = fallback;
+        }
+        for z in &mut t.valid_zones {
+            if (z.border_fill_id as usize) >= self.border_fills {
+                z.border_fill_id = fallback;
+            }
+        }
+        for c in &mut t.cells {
+            if (c.border_fill_id as usize) >= self.border_fills {
+                c.border_fill_id = fallback;
+            }
+            for p in &mut c.paragraphs {
+                self.clamp_paragraph(p);
+            }
+        }
+    }
+}
+
+pub fn write_section_xml(
+    section: &Section,
+    bin_data: &[BinaryEntry],
+    bounds: &ShapeRefBounds,
+) -> Result<Vec<u8>, IrError> {
+    // Clamp dangling shape refs on a working copy so the caller's IR
+    // stays untouched (re-exports must keep the original ids).
+    let mut paragraphs = section.paragraphs.clone();
+    for p in &mut paragraphs {
+        bounds.clamp_paragraph(p);
+    }
+    let section = &Section {
+        properties: section.properties.clone(),
+        paragraphs,
+        raw_records: section.raw_records.clone(),
+        stream_bytes: None,
+        sec_pr_xml: section.sec_pr_xml.clone(),
+    };
     let bin_lookup: BinLookup = bin_data
         .iter()
         .filter_map(|e| {
@@ -571,9 +678,65 @@ mod tests {
     }
 
     #[test]
+    fn dangling_shape_refs_clamp_against_doc_bounds() {
+        use hwp_transpiler_core::ir::{CharShapeRun, IrDocument};
+        // Footer-less Markdown re-import: the records carry the
+        // ORIGINAL document's ids while doc_info holds only the
+        // 7-slot synthesised heading tables and no border fills.
+        let mut doc = IrDocument::default();
+        crate::import::style_synth::populate_heading_doc_info(&mut doc);
+        let bounds = ShapeRefBounds::from_doc(&doc);
+
+        let mut cell_para = para_with_text("cell");
+        cell_para.header.para_shape_id = 21; // dangling
+        let table = TableControl {
+            rows: 1,
+            cols: 1,
+            row_cell_counts: vec![1],
+            border_fill_id: 3, // dangling
+            cells: vec![TableCell {
+                col: 0,
+                row: 0,
+                col_span: 1,
+                row_span: 1,
+                border_fill_id: 4, // dangling
+                paragraphs: vec![cell_para],
+                ..TableCell::default()
+            }],
+            ..TableControl::default()
+        };
+        let mut p = para_with_text("body");
+        p.header.para_shape_id = 20; // dangling
+        p.char_shape_runs.push(CharShapeRun { start: 0, char_shape_id: 8 }); // dangling
+        let mut valid = para_with_text("ok");
+        valid.header.para_shape_id = 3; // in range — must survive
+        valid.char_shape_runs.push(CharShapeRun { start: 0, char_shape_id: 5 });
+        let mut host = Paragraph::default();
+        host.controls.push(Control {
+            kind: ControlKind::Table(table),
+            ..Control::default()
+        });
+        let mut s = Section::default();
+        s.paragraphs.extend([p, valid, host]);
+
+        let xml = write_section_xml(&s, &[], &bounds).expect("emit");
+        let xml = std::str::from_utf8(&xml).unwrap();
+        assert!(!xml.contains(r#"paraPrIDRef="20""#), "got: {xml}");
+        assert!(!xml.contains(r#"paraPrIDRef="21""#), "got: {xml}");
+        assert!(!xml.contains(r#"charPrIDRef="8""#), "got: {xml}");
+        assert!(!xml.contains(r#"borderFillIDRef="3""#), "got: {xml}");
+        assert!(!xml.contains(r#"borderFillIDRef="4""#), "got: {xml}");
+        // Dangling table fills land on the solid skeleton entry.
+        assert!(xml.contains(r#"borderFillIDRef="1""#), "got: {xml}");
+        // In-range ids pass through untouched.
+        assert!(xml.contains(r#"paraPrIDRef="3""#), "got: {xml}");
+        assert!(xml.contains(r#"charPrIDRef="5""#), "got: {xml}");
+    }
+
+    #[test]
     fn empty_section_wraps_in_sec_element() {
         let s = Section::default();
-        let xml = write_section_xml(&s, &[]).expect("emit");
+        let xml = write_section_xml(&s, &[], &ShapeRefBounds::unbounded()).expect("emit");
         let s = std::str::from_utf8(&xml).expect("utf8");
         assert!(s.contains("<hs:sec "));
         assert!(s.contains("</hs:sec>"));
@@ -583,7 +746,7 @@ mod tests {
     fn paragraph_emits_hp_p_with_run_and_t() {
         let mut s = Section::default();
         s.paragraphs.push(para_with_text("Hello"));
-        let xml = write_section_xml(&s, &[]).expect("emit");
+        let xml = write_section_xml(&s, &[], &ShapeRefBounds::unbounded()).expect("emit");
         let s = std::str::from_utf8(&xml).unwrap();
         assert!(s.contains("<hp:p "));
         assert!(s.contains(r#"<hp:run charPrIDRef="0">"#));
@@ -595,7 +758,7 @@ mod tests {
         let mut s = Section::default();
         s.paragraphs
             .push(para_with_text(r#"A<b> & "quoted" O'Brien"#));
-        let xml = write_section_xml(&s, &[]).expect("emit");
+        let xml = write_section_xml(&s, &[], &ShapeRefBounds::unbounded()).expect("emit");
         let s = std::str::from_utf8(&xml).unwrap();
         assert!(s.contains("A&lt;b&gt; &amp; &quot;quoted&quot; O&#39;Brien"));
         assert!(!s.contains("<b>"));
@@ -605,7 +768,7 @@ mod tests {
     fn newlines_become_line_break_elements() {
         let mut s = Section::default();
         s.paragraphs.push(para_with_text("line1\nline2"));
-        let xml = write_section_xml(&s, &[]).expect("emit");
+        let xml = write_section_xml(&s, &[], &ShapeRefBounds::unbounded()).expect("emit");
         let s = std::str::from_utf8(&xml).unwrap();
         assert!(s.contains("<hp:t>line1</hp:t><hp:lineBreak/><hp:t>line2</hp:t>"));
     }
@@ -636,7 +799,7 @@ mod tests {
             }],
             ..Paragraph::default()
         });
-        let xml = write_section_xml(&s, &[]).expect("emit");
+        let xml = write_section_xml(&s, &[], &ShapeRefBounds::unbounded()).expect("emit");
         let s = std::str::from_utf8(&xml).unwrap();
         assert!(s.contains(r#"<hp:tbl id="0""#));
         assert!(s.contains(r#"rowCnt="1" colCnt="1""#));
@@ -673,7 +836,7 @@ mod tests {
             }],
             ..Paragraph::default()
         });
-        let xml = write_section_xml(&s, &[]).expect("emit");
+        let xml = write_section_xml(&s, &[], &ShapeRefBounds::unbounded()).expect("emit");
         let s = std::str::from_utf8(&xml).unwrap();
         assert!(s.contains(r#"colSpan="2" rowSpan="3""#));
     }

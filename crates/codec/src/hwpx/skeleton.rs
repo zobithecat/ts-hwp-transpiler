@@ -31,6 +31,13 @@ const CONTAINER_XML_STR: &str = r##"<?xml version="1.0" encoding="UTF-8" standal
 pub const CONTENT_HPF: &[u8] = CONTENT_HPF_STR.as_bytes();
 const CONTENT_HPF_STR: &str = r##"<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><opf:package xmlns:opf="http://www.idpf.org/2007/opf/" version="" unique-identifier="" id=""><opf:metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><opf:meta name="creator" content="text">md-to-hwpx</opf:meta></opf:metadata><opf:manifest><opf:item id="header" href="Contents/header.xml" media-type="application/xml"/><opf:item id="section0" href="Contents/section0.xml" media-type="application/xml"/></opf:manifest><opf:spine><opf:itemref idref="section0" linear="yes"/></opf:spine></opf:package>"##;
 
+/// Number of `<hh:borderFill>` entries the header skeleton ships
+/// (id 0 = borderless, id 1 = solid 0.12 mm on all sides). The
+/// section writer clamps dangling `borderFillIDRef`s against this
+/// when the IR carries no border-fill table of its own — keep in
+/// sync with `HEADER_XML_STR` below.
+pub const SKELETON_BORDER_FILL_COUNT: usize = 2;
+
 /// Header skeleton: namespaced root with empty containers ready to
 /// receive shapes through the surgical rewriter. `<hh:beginNum>`
 /// carries the customary "starts at 1" counters; the empty
