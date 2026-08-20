@@ -12,8 +12,9 @@
 .vscode/
 *.log
 
-# Local AI agent session state.
-/.claude/
+# Local AI agent session state — but ship the repo skills.
+/.claude/*
+!/.claude/skills/
 .omc/
 
 # Fixture corpus: keep .hwp out of git unless explicitly checked in.

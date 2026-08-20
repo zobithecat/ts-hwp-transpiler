@@ -238,6 +238,28 @@ cargo run -p hwp-transpiler-codec --bin md-to-hwpx -- doc.md
 
 ---
 
+## 🤖 Claude Code 스킬 (`/hwp-md`)
+
+이 저장소에는 트랜스파일된 `.md`를 **읽고 · 편집하고 · 다시 `.hwpx`로
+복원**하는 Claude Code 스킬이 들어 있습니다
+([`.claude/skills/hwp-md/SKILL.md`](.claude/skills/hwp-md/SKILL.md)).
+저장소를 Claude Code로 열면 자동으로 인식됩니다.
+
+스킬이 강제하는 워크플로:
+
+1. **변환** — 편집 목적이면 `--llm --editable --split-assets` 로 뽑는다
+   (기본 아카이브 모드는 편집이 복원에 반영되지 않음)
+2. **읽기·편집** — [`docs/llm-edit-prompt.md`](docs/llm-edit-prompt.md)의
+   황금 규칙대로 `TEXT:` 뒤 본문만 수정, `[...]` 레코드 줄은 불가침
+3. **검증** — 편집 전후 레코드 줄을 `diff` 로 대조해 구조 훼손을 차단
+4. **복원** — `md-to-hwpx` 실행 (`.assets.md` 자동 페어링), 복원본을
+   재변환해 편집 반영 여부를 reparse-diff 로 확인
+
+예: Claude Code에서 *"이 hwpx를 md로 바꿔서 예산표 값만 고치고 다시
+hwpx로 만들어줘"* 라고 하면 위 절차대로 안전하게 수행합니다.
+
+---
+
 ## ✅ 지금 되는 것
 
 ### 파일 입출력
